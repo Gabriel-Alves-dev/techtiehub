@@ -1,0 +1,19 @@
+{
+  "name": "techtie-hub",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Escritório em pixel art onde cada mesa é um projeto e cada personagem é um agente de IA (Claude) trabalhando nele.",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "instalar-hook": "node instalar-hook.js",
+    "remover-hook": "node instalar-hook.js --remover"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.310"
+  }
+}

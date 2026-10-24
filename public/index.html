@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Techtie Hub</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Inter:wght@400;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>TECHTIE HUB</h1>
+    <div class="stats" id="stats"></div>
+    <div class="actions">
+      <button id="btn-team">Equipe</button>
+      <button id="btn-log">Atividade</button>
+      <button id="btn-new-project">+ Mesa</button>
+      <button id="btn-new-agent">+ Contratar</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="office" id="office-wrap">
+      <canvas id="office"></canvas>
+      <div id="bubbles"></div>
+      <div class="tooltip" id="tooltip" hidden></div>
+      <p class="hint" id="hint">Clique num personagem, balão ou mesa para conversar com o agente</p>
+    </section>
+  </main>
+
+  <div id="windows"></div>
+
+  <dialog id="dialog">
+    <form method="dialog" id="dialog-form"></form>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>

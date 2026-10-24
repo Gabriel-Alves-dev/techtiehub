@@ -1,0 +1,8 @@
+node_modules/
+
+# dados locais: estado do escritório, conversas com os agentes e caminhos das pastas
+data/
+
+*.log
+.DS_Store
+Thumbs.db
