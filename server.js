@@ -14,11 +14,14 @@ const DATA_FILE = process.env.HUB_DATA || path.join(__dirname, 'data', 'state.js
 const STATUSES = ['trabalhando', 'ocioso', 'bloqueado', 'concluido'];
 const MAX_LOG = 300;
 
+const FLOORS = ['madeira', 'carpete', 'piso', 'escuro'];
+
 const SEED = {
+  rooms: [{ id: 'r1', name: 'Escritório', cols: 4, floor: 'madeira' }],
   projects: [
-    { id: 'p1', name: 'Site Techtie', description: 'Landing page e blog', color: '#4f8cff', agentId: 'a1' },
-    { id: 'p2', name: 'Automação Jurídica', description: 'Geração de petições e prazos', color: '#f2a93b', agentId: 'a2' },
-    { id: 'p3', name: 'App Mobile', description: 'MVP do aplicativo', color: '#3fbf7f', agentId: 'a3' },
+    { id: 'p1', roomId: 'r1', name: 'Site Techtie', description: 'Landing page e blog', color: '#4f8cff', agentId: 'a1' },
+    { id: 'p2', roomId: 'r1', name: 'Automação Jurídica', description: 'Geração de petições e prazos', color: '#f2a93b', agentId: 'a2' },
+    { id: 'p3', roomId: 'r1', name: 'App Mobile', description: 'MVP do aplicativo', color: '#3fbf7f', agentId: 'a3' },
   ],
   agents: [
     { id: 'a1', name: 'Ana', role: 'Dev Front-end', shirt: '#4f8cff', hair: '#3b2416', skin: '#f1c7a0', status: 'trabalhando', message: 'Ajustando o header' },
@@ -29,11 +32,16 @@ const SEED = {
 };
 
 function load() {
+  let s;
   try {
-    return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+    s = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
   } catch {
-    return structuredClone(SEED);
+    s = structuredClone(SEED);
   }
+  // dados de versões sem salas: tudo vai para uma sala "Escritório"
+  if (!s.rooms?.length) s.rooms = [{ id: 'r1', name: 'Escritório', cols: 4, floor: 'madeira' }];
+  for (const p of s.projects) if (!s.rooms.some((r) => r.id === p.roomId)) p.roomId = s.rooms[0].id;
+  return s;
 }
 
 let state = load();
@@ -89,8 +97,11 @@ function pick(obj, fields) {
   return out;
 }
 
-const PROJECT_FIELDS = ['name', 'description', 'color', 'agentId', 'folder'];
-const AGENT_FIELDS = ['name', 'role', 'shirt', 'hair', 'skin', 'status', 'message'];
+const FIELDS = {
+  projects: ['name', 'description', 'color', 'agentId', 'folder', 'roomId'],
+  agents: ['name', 'role', 'shirt', 'hair', 'skin', 'status', 'message'],
+  rooms: ['name', 'cols', 'floor'],
+};
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -315,28 +326,38 @@ async function api(req, res, url) {
     return send(res, 200, agent);
   }
 
-  if (resource === 'projects' || resource === 'agents') {
+  if (FIELDS[resource]) {
     const list = state[resource];
-    const fields = resource === 'projects' ? PROJECT_FIELDS : AGENT_FIELDS;
+    const fields = FIELDS[resource];
     if (typeof body.folder === 'string') {
       body.folder = body.folder.trim().replace(/^"(.*)"$/, '$1') || null;
       if (body.folder && !isDir(body.folder)) return send(res, 400, { error: `a pasta "${body.folder}" não existe` });
       if (body.folder) body.folder = path.resolve(body.folder);
     }
+    if (body.roomId !== undefined && !state.rooms.some((r) => r.id === body.roomId)) {
+      return send(res, 400, { error: 'sala não encontrada' });
+    }
+    if (body.cols !== undefined) body.cols = Math.max(2, Math.min(8, parseInt(body.cols, 10) || 4));
+    if (body.floor !== undefined && !FLOORS.includes(body.floor)) body.floor = 'madeira';
 
     if (method === 'POST' && !id) {
       if (!body.name) return send(res, 400, { error: 'nome é obrigatório' });
       const item = { id: newId(resource[0]), ...pick(body, fields) };
       if (resource === 'agents') item.status ??= 'ocioso';
+      if (resource === 'rooms') {
+        item.cols ??= 4;
+        item.floor ??= 'carpete';
+      }
       if (resource === 'projects') {
+        item.roomId ??= state.rooms[0].id;
         item.agentId = null;
         list.push(item);
         assign(item, body.agentId);
       } else {
         list.push(item);
       }
-      addLog(resource === 'agents' ? item.id : null, resource === 'projects' ? item.id : null,
-        resource === 'agents' ? `${item.name} foi contratado(a)` : `Nova mesa: ${item.name}`);
+      const what = { agents: `${item.name} foi contratado(a)`, projects: `Nova mesa: ${item.name}`, rooms: `Nova sala: ${item.name}` };
+      addLog(resource === 'agents' ? item.id : null, resource === 'projects' ? item.id : null, what[resource]);
       save();
       return send(res, 201, item);
     }
@@ -357,6 +378,12 @@ async function api(req, res, url) {
     }
 
     if (method === 'DELETE') {
+      if (resource === 'rooms') {
+        if (state.rooms.length === 1) return send(res, 400, { error: 'o escritório precisa de pelo menos uma sala' });
+        // as mesas da sala removida vão para a primeira sala que sobrar
+        const target = state.rooms.find((r) => r !== item);
+        for (const p of state.projects) if (p.roomId === item.id) p.roomId = target.id;
+      }
       state[resource] = list.filter((x) => x !== item);
       if (resource === 'projects') runner.stop(item.id);
       if (resource === 'agents') for (const p of state.projects) if (p.agentId === item.id) p.agentId = null;

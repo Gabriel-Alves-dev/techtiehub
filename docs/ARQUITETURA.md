@@ -37,9 +37,13 @@ Os princípios:
 
 ```jsonc
 {
+  "rooms": [
+    { "id": "r1", "name": "Escritório", "cols": 4, "floor": "madeira" } // cols: mesas por fileira (2–8)
+  ],
   "projects": [
     {
       "id": "p1a2b3c4d",
+      "roomId": "r1",                          // sala onde a mesa fica
       "name": "TechTie Flow",
       "description": "CRM da TechTie",
       "color": "#4f8cff",
@@ -64,6 +68,7 @@ Os princípios:
 Regras:
 
 - **Uma mesa tem no máximo um agente.** Ao atribuir um agente a uma mesa, ele sai da mesa anterior (função `assign` em `server.js`).
+- **Sempre existe pelo menos uma sala.** Dados antigos, sem salas, são migrados ao carregar (`load` em `server.js`): tudo vai para a sala "Escritório". Ao remover uma sala, as mesas dela vão para outra.
 - **O histórico (`log`) guarda as 300 entradas mais recentes**, com a mais nova primeiro.
 - **O id ganha o prefixo da coleção** (`p…` para mesas, `a…` para agentes) mais 8 caracteres hexadecimais.
 
@@ -146,7 +151,9 @@ O arquivo é dividido em seções comentadas:
 
 | Seção | O que faz |
 |---|---|
-| **Layout do mundo** | Geometria em "pixels de mundo" (tile de 16 px), multiplicada por `SCALE` (2–4) na tela. Fileiras de 4 mesas (5×5 tiles cada), lounge à direita, parede com janelas no topo. A sala cresce conforme o número de mesas. |
+| **Salas** | Só a sala exibida (`roomId`, lembrada no `localStorage`) é desenhada. `roomProjects()` lista as mesas dela, e `visibleAgents()` lista os agentes com mesa nela, mais os agentes sem mesa, que ficam no lounge da primeira sala. Trocar de sala (`switchRoom`) recria os personagens já sentados. |
+| **Layout do mundo** | Geometria em "pixels de mundo" (tile de 16 px), multiplicada por `SCALE` na tela. Fileiras de `room.cols` mesas (5×5 tiles cada), lounge à direita, parede com janelas no topo. A sala cresce conforme o número de mesas. |
+| **Zoom e arrasto** | `SCALE` automático (cabe na tela) ou fixo de 1 a 6 (`setZoom`, em passos inteiros para a pixel art ficar nítida), mantendo parado o ponto sob o mouse. Arrastar o canvas rola o escritório; o clique é ignorado depois de um arrasto. |
 | **Caminhos** | Os personagens andam pelo corredor horizontal de cada fileira e pelo corredor vertical à direita das mesas (`route`), para não atravessar mesas. |
 | **Simulação** (`update`) | Define o destino de cada agente: com mesa e status ≠ ocioso → cadeira da mesa; senão → um ponto livre do lounge, trocado de tempos em tempos. Move a velocidade constante. |
 | **Desenho** (`draw…`) | Tudo é desenhado com retângulos no canvas, sem imagens: sala, mesas, monitores (conteúdo depende do status), personagens (frente/costas, passos, piscadas, mãos digitando). Textos são desenhados em coordenadas de tela para ficarem nítidos. |

@@ -3,7 +3,6 @@
 
 // ---------- Layout do mundo (em pixels "de mundo"; a tela multiplica por SCALE) ----------
 const T = 16; // tamanho do tile
-const COLS = 4; // mesas por fileira
 const CELL_W = 5, CELL_H = 5; // tiles por mesa
 const WALL_H = 3; // parede do topo, em tiles
 const DESK_X0 = 1;
@@ -22,17 +21,42 @@ const ctx = canvas.getContext('2d');
 const wrap = document.getElementById('office-wrap');
 const tooltip = document.getElementById('tooltip');
 
-let state = { projects: [], agents: [], log: [] };
-let world = null; // geometria calculada a partir do número de mesas
+let state = { rooms: [], projects: [], agents: [], log: [] };
+let world = null; // geometria da sala atual (cresce com o número de mesas)
 let SCALE = 3;
+let zoom = load('hub.zoom'); // null = ajusta à tela; número = escala fixa
+let roomId = load('hub.room'); // sala sendo exibida
 const runtime = new Map(); // agentId -> posição/animação
 let selected = null; // { kind: 'project', id } — mesa da janela em foco
 let hover = null;
 
+// preferências do navegador (sala aberta, zoom, posição das janelas)
+function load(key) {
+  try { return JSON.parse(localStorage.getItem(key)); } catch { return null; }
+}
+function store(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+}
+
+// ---------- Salas ----------
+const currentRoom = () => state.rooms.find((r) => r.id === roomId) || state.rooms[0];
+const roomProjects = (rid = currentRoom()?.id) => state.projects.filter((p) => p.roomId === rid);
+
+// Agentes desta sala: os que têm mesa aqui + os sem mesa (ficam no lounge da primeira sala).
+function visibleAgents() {
+  const first = currentRoom() === state.rooms[0];
+  return state.agents.filter((a) => {
+    const desk = deskOf(a.id);
+    return desk ? desk.here : first;
+  });
+}
+
 function computeWorld() {
-  const slots = state.projects.length + 1; // +1 = mesa vazia para criar projeto
-  const rows = Math.max(2, Math.ceil(slots / COLS));
-  const loungeX = DESK_X0 + COLS * CELL_W;
+  const room = currentRoom();
+  const cols = room?.cols || 4;
+  const slots = roomProjects().length + 1; // +1 = mesa vazia para criar projeto
+  const rows = Math.max(2, Math.ceil(slots / cols));
+  const loungeX = DESK_X0 + cols * CELL_W;
   const W = loungeX + LOUNGE_W + 1;
   const H = WALL_H + rows * CELL_H + 1;
   const L = loungeX * T;
@@ -46,14 +70,14 @@ function computeWorld() {
   for (let i = 0; i < 3; i++) spots.push({ x: L + (1.8 + i * 1.6) * T, y: bottom - 2.4 * T });
 
   return {
-    rows, W, H, L, top, bottom, mid, spots,
+    cols, rows, W, H, L, top, bottom, mid, spots, floor: room?.floor || 'madeira',
     trunkX: (loungeX - 0.4) * T,
     door: { x: (loungeX - 0.4) * T, y: bottom + 0.6 * T },
   };
 }
 
 function cellOf(i) {
-  const col = i % COLS, row = Math.floor(i / COLS);
+  const col = i % world.cols, row = Math.floor(i / world.cols);
   const x = (DESK_X0 + col * CELL_W) * T;
   const y = (WALL_H + row * CELL_H) * T;
   return { x, y, row, seat: { x: x + 2.5 * T, y: y + 2.85 * T }, aisleY: y + 4.45 * T };
@@ -76,23 +100,32 @@ function route(from, to) {
 }
 
 // ---------- Estado vindo do servidor ----------
+// Mesa do agente. `here` = está na sala exibida (só então há `cell` para desenhar).
 function deskOf(agentId) {
-  const i = state.projects.findIndex((p) => p.agentId === agentId);
-  return i < 0 ? null : { project: state.projects[i], cell: cellOf(i) };
+  const project = state.projects.find((p) => p.agentId === agentId);
+  if (!project) return null;
+  const i = roomProjects().indexOf(project);
+  return { project, here: i >= 0, cell: i >= 0 ? cellOf(i) : null };
+}
+
+// Cria/remove personagens da sala exibida. Ao entrar numa sala, quem trabalha já aparece sentado.
+function syncRuntime(atSeats) {
+  const visible = visibleAgents();
+  for (const a of visible) {
+    if (runtime.has(a.id)) continue;
+    const desk = deskOf(a.id);
+    const start = atSeats && desk && a.status !== 'ocioso' ? desk.cell.seat : world.door;
+    runtime.set(a.id, { x: start.x, y: start.y, path: [], targetKey: null, walk: 0, facing: 'up', wanderAt: 0 });
+  }
+  for (const id of runtime.keys()) if (!visible.some((a) => a.id === id)) runtime.delete(id);
 }
 
 function applyState(next) {
   const firstLoad = !world;
   state = next;
+  if (!state.rooms.some((r) => r.id === roomId)) roomId = state.rooms[0]?.id;
   world = computeWorld();
-  for (const a of state.agents) {
-    if (!runtime.has(a.id)) {
-      const desk = deskOf(a.id);
-      const start = firstLoad && desk && a.status !== 'ocioso' ? desk.cell.seat : world.door;
-      runtime.set(a.id, { x: start.x, y: start.y, path: [], targetKey: null, walk: 0, facing: 'up', wanderAt: 0 });
-    }
-  }
-  for (const id of runtime.keys()) if (!state.agents.some((a) => a.id === id)) runtime.delete(id);
+  syncRuntime(firstLoad);
   if (selected && !state.projects.some((p) => p.id === selected.id)) selected = null;
   resize();
   refreshUI();
@@ -109,15 +142,27 @@ function pickSpot(agentId) {
   return pool[Math.floor(Math.random() * pool.length)];
 }
 
+function switchRoom(id) {
+  if (id === currentRoom()?.id) return;
+  roomId = id;
+  store('hub.room', id);
+  runtime.clear();
+  world = computeWorld();
+  syncRuntime(true);
+  wrap.scrollTo(0, 0);
+  resize();
+  refreshUI();
+}
+
 function update(dt, now) {
-  for (const a of state.agents) {
+  for (const a of visibleAgents()) {
     const rt = runtime.get(a.id);
     const desk = deskOf(a.id);
     let target, key;
 
     if (desk && a.status !== 'ocioso') {
       target = desk.cell.seat;
-      key = 'desk:' + desk.project.id + ':' + state.projects.indexOf(desk.project);
+      key = 'desk:' + desk.project.id + ':' + roomProjects().indexOf(desk.project) + ':' + world.cols;
       rt.spot = null;
     } else {
       if (rt.spot == null || now > rt.wanderAt) {
@@ -125,7 +170,7 @@ function update(dt, now) {
         rt.wanderAt = now + 6000 + Math.random() * 9000;
       }
       target = world.spots[rt.spot];
-      key = 'spot:' + rt.spot + ':' + world.H;
+      key = 'spot:' + rt.spot + ':' + world.H + ':' + world.W;
     }
 
     if (key !== rt.targetKey) {
@@ -181,16 +226,25 @@ function skyColor() {
   return ['#1b2350', '#2c3770'];
 }
 
+// piso da área das mesas: [cor A, cor B, linha entre tábuas/lajotas ou null]
+const FLOORS = {
+  madeira: ['#a7744a', '#b17d50', '#8e6340'],
+  carpete: ['#4b5a7a', '#51617f', null],
+  piso: ['#c9c4b8', '#d3cec2', '#b5b0a4'],
+  escuro: ['#2e3245', '#33384d', null],
+};
+
 function drawRoom(now) {
   const { W, H, L, top, bottom } = world;
-  // piso de madeira (área das mesas) e carpete (lounge)
+  const [fa, fb, fline] = FLOORS[world.floor] || FLOORS.madeira;
+  // piso da sala (área das mesas) e carpete (lounge)
   for (let ty = WALL_H; ty < H - 1; ty++) {
     for (let tx = 1; tx < W - 1; tx++) {
       const x = tx * T, y = ty * T;
       if (x >= L) rect(x, y, T, T, (tx + ty) % 2 ? '#3c3552' : '#433b5c');
       else {
-        rect(x, y, T, T, (tx + ty) % 2 ? '#a7744a' : '#b17d50');
-        rect(x, y + T - 1, T, 1, '#8e6340');
+        rect(x, y, T, T, (tx + ty) % 2 ? fa : fb);
+        if (fline) rect(x, y + T - 1, T, 1, fline);
       }
     }
   }
@@ -269,7 +323,7 @@ function drawLounge(now) {
 }
 
 function drawDesk(i, now) {
-  const project = state.projects[i];
+  const project = roomProjects()[i];
   const c = cellOf(i);
   const agent = project ? state.agents.find((a) => a.id === project.agentId) : null;
   const rt = agent && runtime.get(agent.id);
@@ -405,10 +459,10 @@ function draw(now) {
   ctx.setTransform(SCALE, 0, 0, SCALE, 0, 0);
   ctx.imageSmoothingEnabled = false;
   drawRoom(now);
-  const slots = state.projects.length + 1;
+  const slots = roomProjects().length + 1;
   for (let i = 0; i < slots; i++) drawDesk(i, now);
 
-  const ordered = state.agents.map((a) => [a, runtime.get(a.id)]).sort((p, q) => p[1].y - q[1].y);
+  const ordered = visibleAgents().map((a) => [a, runtime.get(a.id)]).sort((p, q) => p[1].y - q[1].y);
   for (const [a, rt] of ordered) {
     drawAgent(a, rt, now);
     if (rt.seated) drawChairBack(rt);
@@ -429,15 +483,72 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 
+const MIN_ZOOM = 1, MAX_ZOOM = 6;
+
 function resize() {
   if (!world) return;
   const ww = world.W * T, wh = world.H * T;
   const fit = Math.floor(Math.min((wrap.clientWidth - 16) / ww, (wrap.clientHeight - 16) / wh));
-  SCALE = Math.max(2, Math.min(4, fit));
-  canvas.width = ww * SCALE;
-  canvas.height = wh * SCALE;
+  SCALE = zoom ?? Math.max(MIN_ZOOM, Math.min(4, fit));
+  if (canvas.width !== ww * SCALE || canvas.height !== wh * SCALE) {
+    canvas.width = ww * SCALE;
+    canvas.height = wh * SCALE;
+  }
+  document.getElementById('zoom-label').textContent = zoom == null ? 'Auto' : SCALE * 25 + '%';
 }
 window.addEventListener('resize', resize);
+
+// Zoom em passos inteiros (pixel art nítida), mantendo parado o ponto sob o mouse.
+function setZoom(next, cx, cy) {
+  const r = wrap.getBoundingClientRect();
+  cx ??= r.left + r.width / 2;
+  cy ??= r.top + r.height / 2;
+  const before = canvas.getBoundingClientRect();
+  const wx = (cx - before.left) / SCALE, wy = (cy - before.top) / SCALE;
+  zoom = next == null ? null : Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, next));
+  store('hub.zoom', zoom);
+  resize();
+  const after = canvas.getBoundingClientRect();
+  wrap.scrollLeft += after.left + wx * SCALE - cx;
+  wrap.scrollTop += after.top + wy * SCALE - cy;
+}
+
+document.getElementById('zoom-in').onclick = () => setZoom(SCALE + 1);
+document.getElementById('zoom-out').onclick = () => setZoom(SCALE - 1);
+document.getElementById('zoom-fit').onclick = () => setZoom(null);
+wrap.addEventListener('wheel', (e) => {
+  if (!e.ctrlKey) return; // roda sozinha rola; Ctrl+roda dá zoom
+  e.preventDefault();
+  setZoom(SCALE + (e.deltaY < 0 ? 1 : -1), e.clientX, e.clientY);
+}, { passive: false });
+
+// Arrastar o escritório com o mouse (quando ele é maior que a tela).
+let drag = null, suppressClick = false;
+canvas.addEventListener('pointerdown', (e) => {
+  if (e.button === 1) e.preventDefault();
+  if (e.button > 1) return;
+  drag = { x: e.clientX, y: e.clientY, sl: wrap.scrollLeft, st: wrap.scrollTop, moved: false };
+});
+window.addEventListener('pointermove', (e) => {
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  if (!drag.moved && Math.hypot(dx, dy) > 5) {
+    drag.moved = true;
+    canvas.style.cursor = 'grabbing';
+    tooltip.hidden = true;
+  }
+  if (drag.moved) {
+    wrap.scrollLeft = drag.sl - dx;
+    wrap.scrollTop = drag.st - dy;
+  }
+});
+window.addEventListener('pointerup', () => {
+  if (drag?.moved) {
+    suppressClick = true;
+    canvas.style.cursor = '';
+  }
+  drag = null;
+});
 
 // ---------- Balões de fala (HTML por cima do canvas) ----------
 const bubbleLayer = document.getElementById('bubbles');
@@ -458,7 +569,7 @@ function bubbleFor(a) {
 function updateBubbles() {
   const ox = canvas.offsetLeft, oy = canvas.offsetTop;
   const seen = new Set();
-  for (const a of state.agents) {
+  for (const a of visibleAgents()) {
     const b = bubbleFor(a);
     const rt = runtime.get(a.id);
     if (!b || !rt) continue;
@@ -487,20 +598,22 @@ function updateBubbles() {
 function hitTest(ev) {
   const r = canvas.getBoundingClientRect();
   const wx = (ev.clientX - r.left) / SCALE, wy = (ev.clientY - r.top) / SCALE;
-  const ordered = state.agents.map((a) => [a, runtime.get(a.id)]).sort((p, q) => q[1].y - p[1].y);
+  const ordered = visibleAgents().map((a) => [a, runtime.get(a.id)]).sort((p, q) => q[1].y - p[1].y);
   for (const [a, rt] of ordered) {
     if (wx > rt.x - 8 && wx < rt.x + 8 && wy > rt.y - 24 && wy < rt.y + 2) return { kind: 'agent', id: a.id };
   }
-  for (let i = 0; i <= state.projects.length; i++) {
+  const rp = roomProjects();
+  for (let i = 0; i <= rp.length; i++) {
     const c = cellOf(i);
     if (wx > c.x + 0.5 * T && wx < c.x + 4.5 * T && wy > c.y + 0.5 * T && wy < c.y + 4.3 * T) {
-      return state.projects[i] ? { kind: 'project', id: state.projects[i].id } : { kind: 'slot' };
+      return rp[i] ? { kind: 'project', id: rp[i].id } : { kind: 'slot' };
     }
   }
   return null;
 }
 
 canvas.addEventListener('mousemove', (ev) => {
+  if (drag?.moved) return;
   hover = hitTest(ev);
   canvas.style.cursor = hover ? 'pointer' : 'default';
   if (!hover || hover.kind === 'slot') { tooltip.hidden = true; return; }
@@ -522,6 +635,7 @@ canvas.addEventListener('mousemove', (ev) => {
 canvas.addEventListener('mouseleave', () => { hover = null; tooltip.hidden = true; });
 
 canvas.addEventListener('click', (ev) => {
+  if (suppressClick) { suppressClick = false; return; } // foi um arrasto, não um clique
   const hit = hitTest(ev);
   if (!hit) return;
   if (hit.kind === 'slot') return openProjectDialog();
@@ -701,7 +815,7 @@ function updateHint() {
 const chats = new Map(); // projectId -> entries
 
 function deskAnchor(projectId) {
-  const i = state.projects.findIndex((p) => p.id === projectId);
+  const i = roomProjects().findIndex((p) => p.id === projectId);
   if (i < 0) return null;
   const c = cellOf(i);
   const r = canvas.getBoundingClientRect();
@@ -709,7 +823,9 @@ function deskAnchor(projectId) {
 }
 
 function openProjectWindow(projectId) {
-  if (!state.projects.some((p) => p.id === projectId)) return;
+  const project = state.projects.find((p) => p.id === projectId);
+  if (!project) return;
+  switchRoom(project.roomId); // abre na sala da mesa, para o balão e a mesa ficarem à vista
   const win = openWindow('p:' + projectId, { anchor: deskAnchor(projectId), cls: 'win-project' }, (win) => {
     win.projectId = projectId;
     win.body.innerHTML = `
@@ -916,8 +1032,36 @@ function openLogWindow() {
   win.render(win);
 }
 
+// ---------- Barra de salas ----------
+// Quantos agentes da sala estão esperando você (pergunta, permissão ou bloqueio).
+function waitingIn(rid) {
+  return roomProjects(rid).filter((p) => {
+    const a = state.agents.find((x) => x.id === p.agentId);
+    return state.live?.[p.id]?.pending || a?.status === 'bloqueado';
+  }).length;
+}
+
+function renderRooms() {
+  const bar = document.getElementById('room-tabs');
+  const cur = currentRoom();
+  bar.innerHTML = state.rooms.map((r) => {
+    const waiting = waitingIn(r.id);
+    return `<button class="room-tab ${r === cur ? 'active' : ''}" data-room="${r.id}" title="${r === cur ? 'Clique para configurar a sala' : 'Ir para a sala'}">
+      ${esc(r.name)} <span class="muted">${roomProjects(r.id).length}</span>
+      ${waiting ? `<span class="room-alert">${waiting}</span>` : ''}
+      ${r === cur ? '<span class="room-gear">⚙</span>' : ''}
+    </button>`;
+  }).join('') + '<button class="room-tab room-add" data-act="add-room" title="Criar sala">+ Sala</button>';
+  bar.querySelectorAll('[data-room]').forEach((b) => (b.onclick = () => {
+    if (b.dataset.room === cur.id) openRoomDialog(cur);
+    else switchRoom(b.dataset.room);
+  }));
+  bar.querySelector('[data-act=add-room]').onclick = () => openRoomDialog();
+}
+
 function refreshUI() {
   renderStats();
+  renderRooms();
   for (const win of [...wins.values()]) {
     if (win.projectId) updateProjectWindow(win);
     else win.render?.(win);
@@ -946,6 +1090,32 @@ function openDialog(html, onSubmit, danger) {
   form.querySelector('input')?.focus();
 }
 
+const FLOOR_NAMES = { madeira: 'Madeira', carpete: 'Carpete azul', piso: 'Piso claro', escuro: 'Escuro' };
+
+function openRoomDialog(r) {
+  openDialog(`
+    <h2>${r ? 'Configurar sala' : 'Nova sala'}</h2>
+    <label>Nome da sala<input name="name" required maxlength="30" placeholder="Ex.: Clientes, Produto, Jurídico" value="${esc(r?.name || '')}" /></label>
+    <label>Mesas por fileira: <b id="cols-out">${r?.cols || 4}</b>
+      <input type="range" name="cols" min="2" max="8" value="${r?.cols || 4}" />
+    </label>
+    <label>Piso<select name="floor">${Object.entries(FLOOR_NAMES).map(([k, v]) =>
+      `<option value="${k}" ${k === (r?.floor || 'carpete') ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+    ${r ? '' : '<p class="muted">As mesas podem ser movidas entre salas em ⚙ Mesa.</p>'}
+  `, async (d) => {
+    if (r) await api('PATCH', `/api/rooms/${r.id}`, d);
+    else {
+      const created = await api('POST', '/api/rooms', d);
+      setTimeout(() => switchRoom(created.id), 100);
+    }
+  }, r && state.rooms.length > 1 && {
+    label: 'Remover sala',
+    confirm: `Remover a sala "${r.name}"? As mesas dela vão para outra sala.`,
+    action: () => api('DELETE', `/api/rooms/${r.id}`),
+  });
+  form.elements.cols.oninput = (e) => (form.querySelector('#cols-out').textContent = e.target.value);
+}
+
 const PALETTE = ['#4f8cff', '#f2a93b', '#3fbf7f', '#e5534b', '#b072f5', '#2ec4c4', '#f272b6'];
 
 function openProjectDialog(p) {
@@ -960,7 +1130,11 @@ function openProjectDialog(p) {
         <button type="button" id="pick-folder">Escolher…</button>
       </div>
     </label>
-    <label>Cor<input type="color" name="color" value="${esc(color)}" /></label>
+    <div class="colors">
+      <label>Cor<input type="color" name="color" value="${esc(color)}" /></label>
+      <label>Sala<select name="roomId">${state.rooms.map((r) =>
+        `<option value="${r.id}" ${r.id === (p?.roomId || currentRoom().id) ? 'selected' : ''}>${esc(r.name)}</option>`).join('')}</select></label>
+    </div>
     ${p ? '' : `<label>Agente<select name="agentId"><option value="">— sem agente —</option>${state.agents.map((a) => `<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select></label>`}
   `, async (d) => {
     if (p) await api('PATCH', `/api/projects/${p.id}`, d);

@@ -57,16 +57,59 @@ button.danger { color: var(--bad); }
 
 main { flex: 1; display: flex; min-height: 0; }
 
+/* ---------- barra de salas + zoom ---------- */
+.roombar {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  padding: 8px 20px 0;
+  background: var(--bg);
+  border-bottom: 2px solid var(--line);
+}
+.room-tabs { flex: 1; display: flex; gap: 4px; overflow-x: auto; }
+.room-tab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 14px;
+  font: 600 13px Inter, sans-serif;
+  color: var(--muted);
+  background: var(--panel);
+  border: 2px solid var(--line);
+  border-bottom: 0;
+  box-shadow: none;
+  white-space: nowrap;
+}
+.room-tab:active { transform: none; }
+.room-tab.active { color: var(--text); background: var(--panel-2); border-color: var(--accent); }
+.room-add { font: 9px var(--pixel); color: var(--muted); border-style: dashed; }
+.room-gear { color: var(--muted); }
+.room-alert {
+  min-width: 18px;
+  padding: 1px 5px;
+  font: 9px var(--pixel);
+  line-height: 14px;
+  text-align: center;
+  color: #1d2030;
+  background: #ffd166;
+  animation: bob 0.9s ease-in-out infinite;
+}
+.zoom { display: flex; align-items: center; gap: 6px; padding-bottom: 6px; }
+.zoom button { padding: 6px 10px; box-shadow: none; }
+#zoom-label { min-width: 44px; text-align: center; font: 9px var(--pixel); color: var(--muted); }
+
 .office {
   flex: 1;
   overflow: auto;
   display: grid;
-  place-items: center;
   position: relative;
   background: #0d0f16;
 }
 
-canvas { image-rendering: pixelated; cursor: pointer; }
+/* margin:auto centraliza sem cortar a borda esquerda quando o escritório é maior que a tela */
+canvas { margin: auto; image-rendering: pixelated; cursor: pointer; }
+
+input[type='range'] { padding: 0; accent-color: var(--accent); }
 
 .tooltip {
   position: absolute;
@@ -79,7 +122,7 @@ canvas { image-rendering: pixelated; cursor: pointer; }
 }
 
 .hint {
-  position: absolute;
+  position: fixed;
   bottom: 14px;
   left: 50%;
   transform: translateX(-50%);
