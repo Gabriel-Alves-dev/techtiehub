@@ -48,7 +48,8 @@ Os princípios:
       "name": "TechTie Flow",
       "description": "CRM da TechTie",
       "color": "#4f8cff",
-      "folder": "C:\\Users\\...\\techtie-flow", // pasta do projeto (opcional)
+      "folders": { "e1a2b3c4": "C:\\Users\\...\\techtie-flow" }, // pasta do projeto em cada PC (id do ambiente)
+      "repo": "https://github.com/…/techtie-flow.git", // remote git, conferido ao vincular pasta em outro PC
       "agentId": "a5e6f7a8b"                  // agente sentado na mesa (ou null)
     }
   ],
@@ -62,7 +63,8 @@ Os princípios:
       "message": "Editando app.js"      // texto do balão / última ação
     }
   ],
-  "log": [ { "t": 1729700000000, "agentId": "...", "projectId": "...", "text": "[concluido] ..." } ]
+  "log": [ { "t": 1729700000000, "agentId": "...", "projectId": "...", "text": "[concluido] ..." } ],
+  "environments": { "e1a2b3c4": { "name": "PC de casa", "lastSeen": 1729700000000 } } // PCs que já abriram este escritório
 }
 ```
 
@@ -77,7 +79,11 @@ Regras:
 
 ```jsonc
 {
-  "sessionId": "886991a4-…", // sessão do Claude Code, usada para continuar a conversa (resume)
+  "sessionId": "886991a4-…",     // sessão do Claude, retomada com `resume` (de data/sessions/)
+  "sessionAppend": "…",          // texto acrescentado ao prompt de sistema desta sessão (a memória, se havia)
+  "memory": "## Projeto …",      // memória do agente (Markdown) e quando foi atualizada (memoryAt)
+  "lastCommit": "4ed7ca9…",      // HEAD da pasta quando o agente terminou o último pedido
+  "lastEnv": "e1a2b3c4", "lastEnvName": "PC de casa", "lastFolder": "C:\\…", // onde rodou por último
   "entries": [
     { "t": 1729700000000, "role": "user", "text": "..." }, // role: user | assistant | tool | system
   ]
@@ -115,6 +121,13 @@ O estado transmitido ao navegador tem um campo a mais, **`live`**, que não é s
 - **`handleHook(ev)`** converte eventos do Claude Code em status. A mesa é encontrada pela pasta: `projectForPath(cwd)` escolhe a pasta mais específica que contém o `cwd`, sem diferenciar maiúsculas. Eventos de sessões criadas pelo próprio hub são ignorados (`runner.isHubSession`), porque essas sessões já são acompanhadas pelo runner.
 - **`describeTool(name, input)`** transforma uma chamada de ferramenta em texto curto ("Editando app.js"). É usado pelos hooks e pelo runner.
 
+## Ambientes: o mesmo escritório em vários PCs
+
+- **Identidade do PC.** Cada computador tem um id e um nome em `~/.techtie-hub/ambiente.json` (`HUB_ENV_FILE` muda o caminho, útil em testes). O arquivo fica fora de `data/` de propósito: `data/` viaja entre PCs, a identidade não.
+- **Pasta por PC.** A pasta de cada mesa fica em `project.folders[envId]`. O servidor só usa a deste PC (`folderOf`), e o estado enviado ao navegador já traz `folder` resolvido, mais `env` (este PC) e `environments`.
+- **Repositório.** Ao vincular uma pasta, `git.remote` lê o `origin`. A primeira pasta define `project.repo`; pastas de outro repositório são recusadas com `409 repo_mismatch`, a menos que o usuário confirme (`forceFolder`).
+- **Exportar/importar.** `GET /api/export` junta estado, conversas e sessões num JSON, e `POST /api/import` grava tudo de volta. As pastas já configuradas neste PC são mantidas.
+
 ## Runner (`runner.js`)
 
 Executa o Claude por mesa usando `query()` do Claude Agent SDK. O SDK sobe o processo do Claude Code, que usa o login do usuário.
@@ -134,6 +147,15 @@ O fluxo de um pedido:
    - **negar** → `{ behavior: "deny", message }`
    - **pergunta** → `updatedInput: { questions, answers }`. As respostas chegam **na ordem das perguntas** e o runner monta o mapa `texto da pergunta → resposta`. Usar o índice evita problemas de codificação com acentos.
 6. **Parar** chama `abort()` no `AbortController`. O pedido pendente é negado automaticamente.
+
+### Continuidade: sessão completa, memória e commit
+
+- **Sessão completa portátil.** Toda `query()` recebe `sessionStore` (`session-store.js`): o SDK grava cada linha da sessão também em `data/sessions/<sessionId>.jsonl` e, ao retomar (`resume`), carrega dali. Por isso a conversa continua em outro PC e outra pasta. A chave é só o `sessionId`, porque o `projectKey` do SDK depende do cwd. Sessões antigas, só no disco local do Claude Code, são importadas na primeira vez (`importSessionToStore`).
+- **Prompt de sistema montado na hora.** `systemPrompt: { type: 'preset', preset: 'claude_code', append, snapshot: false }`. Com `snapshot: true` (o padrão), o prompt, que inclui a pasta de trabalho e o git, ficaria gravado na sessão com os dados do PC antigo.
+- **Aviso de mudança.** Se a sessão rodou por último em outro PC ou pasta (`lastEnv`/`lastFolder`), o pedido ganha uma nota no início: onde está agora, onde estava, e que caminhos antigos podem não valer mais.
+- **Memória.** `refreshMemory` junta a memória anterior com as entradas da conversa desde `memoryAt`, numa chamada curta ao Claude sem ferramentas, sem configurações do usuário e sem salvar sessão. Roda na **Nova conversa**, no botão *Atualizar com a conversa* e no plano B. Sessões novas recebem a memória pelo `append` do prompt de sistema.
+- **Plano B.** Se a retomada falhar antes de o Claude responder (`resume-failed`), o runner atualiza a memória e começa uma sessão nova com ela.
+- **Commit.** Ao fim de cada pedido bem-sucedido, grava `lastCommit` (HEAD da pasta). `git.status` compara esse commit com o da pasta atual: `missing` (falta pull), `diverged`, `ahead` ou `ok`.
 
 Os callbacks que o servidor passa ao runner são `onStatus` (atualiza o agente da mesa e o histórico), `onLive` (retransmite o estado) e `onChat` (transmite a nova linha).
 

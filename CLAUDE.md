@@ -7,10 +7,13 @@ Leia `docs/ARQUITETURA.md` antes de mudanças estruturais.
 ## Mapa rápido
 
 - `server.js`: servidor HTTP nativo (sem framework), API REST, SSE e hooks. O estado fica em memória e é salvo em `data/state.json`.
-- `runner.js`: uma execução do Claude por mesa. `canUseTool` fica pendente até o usuário responder.
+- `runner.js`: uma execução do Claude por mesa. `canUseTool` fica pendente até o usuário responder. Também cuida da memória do agente.
+- `session-store.js`: espelha as sessões do Claude em `data/sessions/`, para continuar a conversa em outro PC.
+- `git.js`: HEAD, remote e comparação de commits das pastas dos projetos.
 - `public/app.js`: canvas do escritório, balões HTML, janelas flutuantes e diálogos. JS puro, sem build.
 - `hub-hook.js` / `instalar-hook.js`: integração com o Claude Code do VS Code via hooks.
 - `data/`: dados locais do usuário. **Nunca versionar** (está no `.gitignore`).
+- **Pasta por PC:** a pasta de uma mesa fica em `project.folders[envId]` e no servidor se lê com `folderOf(p)`. Nunca grave `project.folder`. A identidade do PC fica em `~/.techtie-hub/ambiente.json`.
 
 ## Convenções
 
@@ -27,6 +30,6 @@ Leia `docs/ARQUITETURA.md` antes de mudanças estruturais.
 ## Rodar e testar
 
 - `npm start` sobe em <http://localhost:4321>, e `iniciar.bat` faz o mesmo no Windows.
-- **Instância de teste isolada:** `PORT=4399 HUB_DATA=/caminho/temp/state.json node server.js`. Não use os dados reais do usuário em testes.
+- **Instância de teste isolada:** `PORT=4399 HUB_DATA=/caminho/temp/state.json HUB_ENV_FILE=/caminho/temp/ambiente.json node server.js`. Com outro `HUB_ENV_FILE`, a instância se comporta como outro PC. Não use os dados reais do usuário em testes.
 - **Checagem de sintaxe:** `for f in server.js runner.js hub-hook.js public/app.js; do node --check "$f"; done`.
 - Não há testes automatizados. Valide pela API (`curl`) e abrindo o navegador.

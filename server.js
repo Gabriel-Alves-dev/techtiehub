@@ -3,10 +3,12 @@
 // e roda o Claude na pasta de cada mesa (runner.js).
 const http = require('http');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn, execFile } = require('child_process');
 const { Runner } = require('./runner');
+const git = require('./git');
 
 const PORT = process.env.PORT || 4321;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -32,6 +34,27 @@ const SEED = {
   log: [],
 };
 
+// ---------- Ambiente: este computador ----------
+// Fica FORA de data/ de propósito: data/ pode ser copiada para outro PC, mas cada PC
+// tem sua própria identidade e suas próprias pastas.
+const ENV_FILE = process.env.HUB_ENV_FILE || path.join(os.homedir(), '.techtie-hub', 'ambiente.json');
+
+function loadEnv() {
+  try {
+    return JSON.parse(fs.readFileSync(ENV_FILE, 'utf8'));
+  } catch {
+    const env = { id: 'e' + crypto.randomBytes(4).toString('hex'), name: os.hostname() };
+    fs.mkdirSync(path.dirname(ENV_FILE), { recursive: true });
+    fs.writeFileSync(ENV_FILE, JSON.stringify(env, null, 2));
+    return env;
+  }
+}
+
+const ENV = loadEnv();
+
+// Pasta da mesa neste computador (cada PC tem a sua, em project.folders[envId]).
+const folderOf = (p) => p.folders?.[ENV.id] || null;
+
 function load() {
   let s;
   try {
@@ -43,6 +66,14 @@ function load() {
   if (!s.rooms?.length) s.rooms = [{ id: 'r1', name: 'Escritório', cols: 4, floor: 'madeira' }];
   for (const r of s.rooms) r.areas ??= [...AREAS];
   for (const p of s.projects) if (!s.rooms.some((r) => r.id === p.roomId)) p.roomId = s.rooms[0].id;
+  // pasta única (versões antigas) vira a pasta deste PC
+  for (const p of s.projects) {
+    p.folders ??= {};
+    if (p.folder) p.folders[ENV.id] ??= p.folder;
+    delete p.folder;
+  }
+  s.environments ??= {};
+  s.environments[ENV.id] = { name: ENV.name, lastSeen: Date.now() };
   return s;
 }
 
@@ -50,7 +81,13 @@ let state = load();
 const clients = new Set();
 
 // O navegador recebe o estado salvo + o que está rodando agora (não persistido).
-const snapshot = () => ({ ...state, live: runner.live() });
+// `folder` = pasta da mesa neste PC; `env` = este PC.
+const snapshot = () => ({
+  ...state,
+  projects: state.projects.map((p) => ({ ...p, folder: folderOf(p) })),
+  env: ENV,
+  live: runner.live(),
+});
 
 function broadcast(event, data) {
   const payload = `${event ? `event: ${event}\n` : ''}data: ${JSON.stringify(data)}\n\n`;
@@ -65,6 +102,8 @@ function save() {
 
 const runner = new Runner({
   dir: path.join(path.dirname(DATA_FILE), 'chats'),
+  sessionsDir: path.join(path.dirname(DATA_FILE), 'sessions'),
+  env: ENV,
   describeTool,
   onStatus(projectId, status, message, log) {
     const project = state.projects.find((p) => p.id === projectId);
@@ -100,7 +139,7 @@ function pick(obj, fields) {
 }
 
 const FIELDS = {
-  projects: ['name', 'description', 'color', 'agentId', 'folder', 'roomId'],
+  projects: ['name', 'description', 'color', 'agentId', 'roomId'], // pasta: tratada à parte (uma por PC)
   agents: ['name', 'role', 'shirt', 'hair', 'skin', 'status', 'message'],
   rooms: ['name', 'cols', 'floor', 'areas'],
 };
@@ -110,7 +149,7 @@ function readBody(req) {
     let body = '';
     req.on('data', (c) => {
       body += c;
-      if (body.length > 1e6) req.destroy();
+      if (body.length > 200e6) req.destroy(); // importação pode trazer sessões grandes
     });
     req.on('end', () => {
       try {
@@ -150,9 +189,9 @@ function projectForPath(cwd) {
   const target = normPath(cwd);
   let best = null;
   for (const p of state.projects) {
-    if (!p.folder) continue;
-    const f = normPath(p.folder);
-    if ((target === f || target.startsWith(f + path.sep)) && (!best || f.length > normPath(best.folder).length)) best = p;
+    if (!folderOf(p)) continue;
+    const f = normPath(folderOf(p));
+    if ((target === f || target.startsWith(f + path.sep)) && (!best || f.length > normPath(folderOf(best)).length)) best = p;
   }
   return best;
 }
@@ -281,31 +320,79 @@ async function api(req, res, url) {
   }
 
   // ---------- Conversa com o agente da mesa ----------
-  if (resource === 'projects' && ['chat', 'answer', 'stop', 'reset'].includes(action)) {
-    const project = state.projects.find((p) => p.id === id);
-    if (!project) return send(res, 404, { error: 'não encontrado' });
+  if (resource === 'projects' && ['chat', 'answer', 'stop', 'reset', 'memory', 'git'].includes(action)) {
+    const stored = state.projects.find((p) => p.id === id);
+    if (!stored) return send(res, 404, { error: 'não encontrado' });
+    const project = { ...stored, folder: folderOf(stored) };
     if (action === 'chat' && method === 'GET') return send(res, 200, runner.chat(id));
+    if (action === 'git' && method === 'GET') return send(res, 200, await git.status(project.folder, runner.chat(id).lastCommit));
+    if (action === 'memory' && method === 'GET') {
+      const chat = runner.chat(id);
+      return send(res, 200, { memory: chat.memory || '', memoryAt: chat.memoryAt || null, lastCommit: chat.lastCommit || null });
+    }
+    if (action === 'memory' && method === 'PUT') {
+      runner.setMemory(id, body.memory);
+      return send(res, 200, { ok: true });
+    }
     if (method !== 'POST') return send(res, 405, { error: 'método não permitido' });
     try {
       if (action === 'chat') {
-        if (!isDir(project.folder)) return send(res, 400, { error: 'defina a pasta do projeto antes (Editar)' });
+        if (!isDir(project.folder)) return send(res, 400, { error: `defina a pasta desta mesa neste PC (${ENV.name}) em ⚙ Mesa` });
         const text = String(body.message || '').trim();
         if (!text) return send(res, 400, { error: 'mensagem vazia' });
         await runner.send(project, text);
       } else if (action === 'answer') runner.answer(id, body);
       else if (action === 'stop') runner.stop(id);
-      else runner.reset(id);
+      else if (action === 'memory') {
+        if (runner.isRunning(id)) return send(res, 409, { error: 'espere o agente terminar para atualizar a memória' });
+        return send(res, 200, { memory: await runner.refreshMemory(project) });
+      } else await runner.reset(project);
     } catch (e) {
       return send(res, 409, { error: e.message });
     }
     return send(res, 200, { ok: true });
   }
 
+  // ---------- Este PC + levar o escritório para outro PC ----------
+  if (resource === 'environment' && method === 'PATCH') {
+    const name = String(body.name || '').trim().slice(0, 40);
+    if (!name) return send(res, 400, { error: 'nome vazio' });
+    ENV.name = name;
+    fs.writeFileSync(ENV_FILE, JSON.stringify(ENV, null, 2));
+    state.environments[ENV.id] = { name, lastSeen: Date.now() };
+    save();
+    return send(res, 200, ENV);
+  }
+
+  if (resource === 'export' && method === 'GET') {
+    const bundle = { app: 'techtie-hub', version: 1, exportedAt: new Date().toISOString(), from: ENV.name, state, ...runner.exportAll() };
+    const stamp = new Date().toISOString().slice(0, 10);
+    res.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Disposition': `attachment; filename="techtie-hub-${stamp}.json"`,
+    });
+    return res.end(JSON.stringify(bundle));
+  }
+
+  if (resource === 'import' && method === 'POST') {
+    if (body.app !== 'techtie-hub' || !body.state?.projects) return send(res, 400, { error: 'arquivo não é uma exportação do Techtie Hub' });
+    if (state.projects.some((p) => runner.isRunning(p.id))) return send(res, 409, { error: 'pare os agentes antes de importar' });
+    runner.importAll(body);
+    // pastas deste PC que já estavam configuradas continuam valendo
+    const mine = Object.fromEntries(state.projects.map((p) => [p.id, folderOf(p)]));
+    fs.writeFileSync(DATA_FILE, JSON.stringify(body.state));
+    state = load();
+    for (const p of state.projects) if (mine[p.id] && !folderOf(p)) p.folders[ENV.id] = mine[p.id];
+    addLog(null, null, `Escritório importado de "${body.from || 'outro PC'}"`);
+    save();
+    return send(res, 200, { ok: true });
+  }
+
   if (resource === 'projects' && action === 'open' && method === 'POST') {
     const project = state.projects.find((p) => p.id === id);
     if (!project) return send(res, 404, { error: 'não encontrado' });
-    if (!isDir(project.folder)) return send(res, 400, { error: 'pasta não definida ou inexistente' });
-    openFolder(project.folder, body.app);
+    if (!isDir(folderOf(project))) return send(res, 400, { error: 'pasta não definida neste PC ou inexistente' });
+    openFolder(folderOf(project), body.app);
     return send(res, 200, { ok: true });
   }
 
@@ -336,6 +423,25 @@ async function api(req, res, url) {
       if (body.folder && !isDir(body.folder)) return send(res, 400, { error: `a pasta "${body.folder}" não existe` });
       if (body.folder) body.folder = path.resolve(body.folder);
     }
+    // a pasta vale só para este PC; se a mesa já tem repositório, confere se é o mesmo
+    let folderRemote = null;
+    if (resource === 'projects' && body.folder) {
+      folderRemote = await git.remote(body.folder);
+      const current = id && list.find((x) => x.id === id);
+      if (current?.repo && folderRemote && !git.sameRepo(current.repo, folderRemote) && !body.forceFolder) {
+        return send(res, 409, {
+          code: 'repo_mismatch',
+          error: `Essa pasta é de outro repositório (${folderRemote}). A mesa "${current.name}" trabalha em ${current.repo}.`,
+        });
+      }
+    }
+    const applyFolder = (item) => {
+      if (resource !== 'projects' || body.folder === undefined) return;
+      item.folders ??= {};
+      if (body.folder) item.folders[ENV.id] = body.folder;
+      else delete item.folders[ENV.id];
+      if (folderRemote && (!item.repo || body.forceFolder)) item.repo = folderRemote;
+    };
     if (body.roomId !== undefined && !state.rooms.some((r) => r.id === body.roomId)) {
       return send(res, 400, { error: 'sala não encontrada' });
     }
@@ -359,6 +465,7 @@ async function api(req, res, url) {
       if (resource === 'projects') {
         item.roomId ??= state.rooms[0].id;
         item.agentId = null;
+        applyFolder(item);
         list.push(item);
         assign(item, body.agentId);
       } else {
@@ -381,6 +488,7 @@ async function api(req, res, url) {
         delete changes.agentId;
       }
       Object.assign(item, changes);
+      applyFolder(item);
       save();
       return send(res, 200, item);
     }
@@ -428,3 +536,15 @@ http
   })
   // só nesta máquina: a API abre pastas e programas, não deve ficar exposta na rede
   .listen(PORT, '127.0.0.1', () => console.log(`Techtie Hub rodando em http://localhost:${PORT}`));
+
+// Mesas vinculadas antes de o hub guardar o repositório: registra o remote agora,
+// para a conferência de "pasta de outro repositório" funcionar em outros PCs.
+(async () => {
+  let changed = false;
+  for (const p of state.projects) {
+    if (p.repo || !folderOf(p)) continue;
+    const remote = await git.remote(folderOf(p));
+    if (remote) [p.repo, changed] = [remote, true];
+  }
+  if (changed) save();
+})();

@@ -338,3 +338,33 @@ dialog .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16
   word-break: break-all;
   margin-top: 8px;
 }
+
+/* ---------- avisos, memória e "Este PC" ---------- */
+.pw-banner {
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  font-size: 12px;
+  border: 2px solid var(--warn);
+  background: #f2a93b14;
+}
+.pw-banner p { margin: 0; }
+.pw-banner p + p { margin-top: 6px; }
+.pw-banner code, .win code { background: #0006; padding: 0 3px; font: 11px Consolas, monospace; }
+
+.win-memory .win-body { display: flex; flex-direction: column; }
+.mem-help { margin: 0 0 8px; font-size: 12px; }
+.mem-text { flex: 1; min-height: 120px; margin: 0; resize: none; font: 12px/1.5 Consolas, monospace; }
+.mem-meta { margin: 6px 0 0; font-size: 11px; }
+
+.win h3 { margin: 16px 0 6px; font: 9px var(--pixel); line-height: 1.6; color: var(--muted); }
+a.btn {
+  display: inline-block;
+  font: 10px var(--pixel);
+  color: var(--text);
+  text-decoration: none;
+  background: var(--panel-2);
+  border: 2px solid var(--line);
+  padding: 9px 12px;
+  box-shadow: 0 3px 0 #0008;
+}
+a.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }

@@ -1,8 +1,16 @@
 // Roda o Claude (via Claude Agent SDK) na pasta de cada mesa.
 // Pedidos de permissão e perguntas (AskUserQuestion) ficam pendentes até o usuário responder pelo hub.
+//
+// Continuidade entre PCs: a sessão inteira é espelhada em data/sessions/ (session-store.js),
+// então a conversa pode ser retomada em outro computador e outra pasta. A "memória" é um
+// resumo do projeto mantido pelo hub; ela entra no prompt de sistema de sessões novas
+// (Nova conversa, ou quando a sessão completa não pode ser retomada).
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
+const git = require('./git');
+const { FileSessionStore } = require('./session-store');
 
 let sdk;
 const loadSdk = async () => (sdk ??= await import('@anthropic-ai/claude-agent-sdk'));
@@ -10,25 +18,32 @@ const loadSdk = async () => (sdk ??= await import('@anthropic-ai/claude-agent-sd
 const MAX_ENTRIES = 500;
 const clip = (s, n) => (s && s.length > n ? s.slice(0, n) + '…' : s || '');
 
+const MEMORY_SYSTEM = 'Você mantém a memória de trabalho de um agente de programação que trabalha num projeto ' +
+  'ao longo de várias sessões e computadores. Responda somente com a memória atualizada, em Markdown e em português, sem introdução.';
+
 class Runner {
+  // env: { id, name } do computador atual
   // onStatus(projectId, status, message, log) — atualiza o agente da mesa
   // onLive() — estado de execução mudou (rodando / pedido pendente)
   // onChat(projectId, entry) — nova linha na conversa
-  constructor({ dir, describeTool, onStatus, onLive, onChat }) {
-    Object.assign(this, { dir, describeTool, onStatus, onLive, onChat });
+  constructor({ dir, sessionsDir, env, describeTool, onStatus, onLive, onChat }) {
+    Object.assign(this, { dir, env, describeTool, onStatus, onLive, onChat });
+    this.store = new FileSessionStore(sessionsDir);
     this.runs = new Map(); // projectId -> { running, pending, abort }
-    this.chats = new Map(); // projectId -> { sessionId, entries }
+    this.chats = new Map(); // projectId -> conversa (ver chat())
     this.hubSessions = new Set(); // sessões criadas pelo hub (os hooks delas são ignorados)
     fs.mkdirSync(dir, { recursive: true });
   }
 
   // ---------- Conversa salva em disco ----------
+  // { sessionId, sessionAppend, entries, memory, memoryAt, lastCommit, lastEnv, lastEnvName, lastFolder }
   chat(projectId) {
     if (!this.chats.has(projectId)) {
-      let data = { sessionId: null, entries: [] };
+      let data = {};
       try {
         data = JSON.parse(fs.readFileSync(path.join(this.dir, projectId + '.json'), 'utf8'));
       } catch {}
+      data.entries ??= [];
       if (data.sessionId) this.hubSessions.add(data.sessionId);
       this.chats.set(projectId, data);
     }
@@ -50,6 +65,10 @@ class Runner {
 
   isHubSession(sessionId) {
     return !!sessionId && this.hubSessions.has(sessionId);
+  }
+
+  isRunning(projectId) {
+    return !!this.runs.get(projectId)?.running;
   }
 
   // Resumo do que está rodando, enviado ao navegador junto com o estado.
@@ -83,9 +102,9 @@ class Runner {
   }
 
   // ---------- Execução ----------
+  // project.folder já é a pasta da mesa NESTE computador.
   async send(project, text) {
-    if (this.runs.get(project.id)?.running) throw new Error('o agente ainda está trabalhando nesta mesa');
-    const { query } = await loadSdk();
+    if (this.isRunning(project.id)) throw new Error('o agente ainda está trabalhando nesta mesa');
     const chat = this.chat(project.id);
     const run = { running: true, pending: null, abort: new AbortController() };
     this.runs.set(project.id, run);
@@ -93,23 +112,38 @@ class Runner {
     this.onStatus(project.id, 'trabalhando', text, true);
     this.onLive();
 
-    const resumed = !!chat.sessionId;
     (async () => {
       try {
-        const q = query({
-          prompt: text,
-          options: {
-            cwd: project.folder,
-            resume: chat.sessionId || undefined,
-            abortController: run.abort,
-            canUseTool: (name, input, opts) => this.ask(project.id, run, name, input, opts),
-          },
-        });
-        for await (const m of q) this.handle(project.id, m);
+        // sessões criadas antes do espelhamento só existem no disco do PC onde nasceram
+        if (chat.sessionId && !this.store.has(chat.sessionId)) await this.importLocalSession(project.id);
+
+        let prompt = text;
+        const moved = chat.sessionId && chat.lastFolder &&
+          (chat.lastEnv !== this.env.id || path.resolve(chat.lastFolder) !== path.resolve(project.folder));
+        if (moved) {
+          const where = chat.lastEnv !== this.env.id ? `no computador "${chat.lastEnvName || 'outro PC'}"` : 'em outra pasta';
+          this.push(project.id, 'system', `Continuando a conversa neste PC (${this.env.name}). Antes estava ${where}.`);
+          prompt = `[Techtie Hub] Esta conversa continua agora em outro ambiente: computador "${this.env.name}", ` +
+            `pasta de trabalho ${project.folder} (antes: ${chat.lastFolder}, ${where}). Caminhos de arquivos citados ` +
+            `antes nesta conversa podem não valer mais — use a pasta atual. O código pode ter mudado desde a última vez.\n\n${text}`;
+        }
+
+        let ok = await this.runQuery(project, prompt, run);
+        if (ok === 'resume-failed') {
+          // plano B: sessão nova, com a memória atualizada a partir do histórico do hub
+          this.push(project.id, 'system', 'Não consegui retomar a sessão completa — continuando com a memória do agente.');
+          await this.refreshMemory(project).catch(() => {});
+          chat.sessionId = null;
+          ok = await this.runQuery(project, text, run);
+        }
+        if (ok === true) {
+          chat.lastCommit = (await git.head(project.folder)) || chat.lastCommit || null;
+          Object.assign(chat, { lastEnv: this.env.id, lastEnvName: this.env.name, lastFolder: project.folder });
+          this.saveChat(project.id);
+        }
       } catch (e) {
         if (!run.abort.signal.aborted) {
-          const hint = resumed ? ' — se persistir, clique em "Nova conversa".' : '';
-          this.push(project.id, 'system', `Erro: ${e.message}${hint}`);
+          this.push(project.id, 'system', `Erro: ${e.message}`);
           this.onStatus(project.id, 'bloqueado', 'Erro: ' + clip(e.message, 120), true);
         }
       } finally {
@@ -122,6 +156,40 @@ class Runner {
         this.onLive();
       }
     })();
+  }
+
+  // Uma rodada do Claude. Devolve true (sucesso), false (terminou com erro)
+  // ou 'resume-failed' (a sessão salva não pôde ser retomada).
+  async runQuery(project, prompt, run) {
+    const { query } = await loadSdk();
+    const chat = this.chat(project.id);
+    const resuming = !!chat.sessionId;
+    if (!resuming) chat.sessionAppend = this.memoryPrompt(chat);
+    let started = false, success = false;
+    try {
+      const q = query({
+        prompt,
+        options: {
+          cwd: project.folder,
+          resume: chat.sessionId || undefined,
+          sessionStore: this.store,
+          // snapshot:false = o prompt de sistema é montado a cada pedido, com a pasta e o
+          // git do PC atual (gravado na sessão, ele carregaria a pasta do PC antigo)
+          systemPrompt: { type: 'preset', preset: 'claude_code', append: chat.sessionAppend || undefined, snapshot: false },
+          abortController: run.abort,
+          canUseTool: (name, input, opts) => this.ask(project.id, run, name, input, opts),
+        },
+      });
+      for await (const m of q) {
+        if (m.type === 'assistant') started = true;
+        if (m.type === 'result') success = m.subtype === 'success';
+        this.handle(project.id, m);
+      }
+    } catch (e) {
+      if (resuming && !started && !run.abort.signal.aborted) return 'resume-failed';
+      throw e;
+    }
+    return success;
   }
 
   handle(projectId, m) {
@@ -145,6 +213,18 @@ class Runner {
         this.push(projectId, 'system', `Parou com erro (${m.subtype}).`);
         this.onStatus(projectId, 'bloqueado', `Parou com erro (${m.subtype})`, true);
       }
+    }
+  }
+
+  async importLocalSession(projectId) {
+    const chat = this.chat(projectId);
+    try {
+      const { importSessionToStore } = await loadSdk();
+      await importSessionToStore(chat.sessionId, this.store);
+    } catch {
+      // o arquivo local não está neste PC: segue com sessão nova + memória
+      chat.sessionId = null;
+      this.saveChat(projectId);
     }
   }
 
@@ -201,11 +281,79 @@ class Runner {
     this.runs.get(projectId)?.abort.abort();
   }
 
-  reset(projectId) {
-    if (this.runs.get(projectId)?.running) throw new Error('pare o agente antes de começar outra conversa');
-    this.chats.set(projectId, { sessionId: null, entries: [] });
-    this.saveChat(projectId);
+  // Nova conversa: guarda o que importa na memória e começa uma sessão limpa.
+  async reset(project) {
+    if (this.isRunning(project.id)) throw new Error('pare o agente antes de começar outra conversa');
+    const chat = this.chat(project.id);
+    await this.refreshMemory(project).catch(() => {});
+    if (chat.sessionId) await this.store.delete({ sessionId: chat.sessionId });
+    this.chats.set(project.id, { entries: [], memory: chat.memory, memoryAt: Date.now(), lastCommit: chat.lastCommit });
+    this.saveChat(project.id);
     this.onLive();
+  }
+
+  // ---------- Memória do agente ----------
+  memoryPrompt(chat) {
+    if (!chat.memory?.trim()) return '';
+    return '# Memória deste projeto (Techtie Hub)\n' +
+      'Você já trabalhou neste projeto antes, talvez em outro computador. Este é o resumo do que você sabe ' +
+      `até agora. Use como contexto, mas confira o código atual antes de agir.${chat.lastCommit ? ` Último commit em que você trabalhou: ${chat.lastCommit}.` : ''}\n\n` +
+      chat.memory.trim();
+  }
+
+  setMemory(projectId, memory) {
+    const chat = this.chat(projectId);
+    chat.memory = String(memory || '').slice(0, 20000);
+    chat.memoryAt = Date.now(); // o que foi editado à mão conta como atualizado
+    this.saveChat(projectId);
+  }
+
+  // Junta a memória atual com o que aconteceu desde a última atualização (uma chamada
+  // curta ao Claude, sem ferramentas e sem as configurações/hooks do usuário).
+  async refreshMemory(project) {
+    const chat = this.chat(project.id);
+    const fresh = chat.entries.filter((e) => e.t > (chat.memoryAt || 0));
+    if (!fresh.length) return chat.memory || '';
+    const label = { user: 'Usuário', assistant: 'Agente', tool: 'Ação', system: 'Hub' };
+    const convo = fresh.map((e) => `${label[e.role] || e.role}: ${clip(e.text, e.role === 'tool' ? 150 : 1500)}`)
+      .join('\n\n').slice(-60000);
+    const prompt = `Projeto: ${project.name}${project.description ? ` — ${project.description}` : ''}\n\n` +
+      `Memória atual:\n<memoria>\n${chat.memory?.trim() || '(vazia)'}\n</memoria>\n\n` +
+      `O que aconteceu desde a última atualização:\n<conversa>\n${convo}\n</conversa>\n\n` +
+      'Escreva a memória atualizada com estas seções: ## Projeto, ## Feito até agora, ## Decisões e preferências do usuário, ' +
+      '## Em andamento e próximos passos, ## Observações. Seja conciso (até ~400 palavras): mantenha o que continua ' +
+      'relevante e descarte o que ficou obsoleto.';
+    const { query } = await loadSdk();
+    let out = '';
+    for await (const m of query({
+      prompt,
+      options: { cwd: os.tmpdir(), tools: [], maxTurns: 1, settingSources: [], persistSession: false, systemPrompt: MEMORY_SYSTEM },
+    })) {
+      if (m.type === 'result' && m.subtype === 'success') out = m.result || '';
+    }
+    if (!out.trim()) throw new Error('não consegui gerar a memória');
+    chat.memory = out.trim();
+    chat.memoryAt = fresh[fresh.length - 1].t;
+    this.saveChat(project.id);
+    return chat.memory;
+  }
+
+  // ---------- Exportar / importar ----------
+  exportAll() {
+    const chats = {};
+    for (const f of fs.readdirSync(this.dir)) {
+      if (f.endsWith('.json')) chats[f.slice(0, -5)] = JSON.parse(fs.readFileSync(path.join(this.dir, f), 'utf8'));
+    }
+    return { chats, sessions: this.store.exportAll() };
+  }
+
+  importAll({ chats, sessions }) {
+    for (const [id, chat] of Object.entries(chats || {})) {
+      if (!/^[\w-]+$/.test(id)) continue;
+      fs.writeFileSync(path.join(this.dir, id + '.json'), JSON.stringify(chat));
+    }
+    this.store.importAll(sessions);
+    this.chats.clear();
   }
 }
 

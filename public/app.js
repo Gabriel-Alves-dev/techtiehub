@@ -767,7 +767,8 @@ canvas.addEventListener('click', (ev) => {
 });
 
 // ---------- API ----------
-async function api(method, url, body) {
+// quiet: não mostra alerta (quem chamou trata o erro, ex.: e.code === 'repo_mismatch')
+async function api(method, url, body, { quiet } = {}) {
   const res = await fetch(url, {
     method,
     headers: { 'Content-Type': 'application/json' },
@@ -775,8 +776,8 @@ async function api(method, url, body) {
   });
   if (!res.ok && res.status !== 204) {
     const err = await res.json().catch(() => ({}));
-    alert(err.error || 'Erro ao falar com o servidor');
-    throw new Error(err.error);
+    if (!quiet) alert(err.error || 'Erro ao falar com o servidor');
+    throw Object.assign(new Error(err.error || 'Erro ao falar com o servidor'), { code: err.code, status: res.status });
   }
   return res.status === 204 ? null : res.json();
 }
@@ -812,6 +813,7 @@ function logList(items) {
 }
 
 function renderStats() {
+  document.getElementById('btn-env').textContent = 'PC: ' + (state.env?.name || '?');
   const count = (st) => state.agents.filter((a) => a.status === st).length;
   document.getElementById('stats').innerHTML =
     `<span><b>${state.projects.length}</b> mesas</span><span><b>${state.agents.length}</b> agentes</span>` +
@@ -950,6 +952,7 @@ function openProjectWindow(projectId) {
     win.projectId = projectId;
     win.body.innerHTML = `
       <div class="pw-toolbar"></div>
+      <div class="pw-banner" hidden></div>
       <div class="chat-log"><p class="muted chat-empty">Carregando…</p></div>
       <div class="pending-box"></div>
       <div class="chat-input">
@@ -979,11 +982,13 @@ function openProjectWindow(projectId) {
     };
     win.body.querySelector('[data-act=stop]').onclick = () => api('POST', `/api/projects/${projectId}/stop`, {});
     win.body.querySelector('[data-act=reset]').onclick = async () => {
-      if (!confirm('Começar uma conversa nova? O agente esquece o contexto desta.')) return;
+      if (!confirm('Começar uma conversa nova? O agente guarda um resumo na memória e começa uma sessão limpa.')) return;
+      win.body.querySelector('[data-act=reset]').textContent = 'Guardando memória…';
       await api('POST', `/api/projects/${projectId}/reset`, {});
       loadChat(projectId);
     };
     loadChat(projectId);
+    refreshGit(win);
     setTimeout(() => input.focus(), 0);
   });
   updateProjectWindow(win);
@@ -1004,16 +1009,18 @@ function updateProjectWindow(win) {
     tb.innerHTML = `
       ${p.folder ? `<button data-act="folder" title="${esc(p.folder)}">📁 Pasta</button><button data-act="vscode">VS Code</button>` : ''}
       <button data-act="edit-desk" title="Editar mesa">⚙ Mesa</button>
+      <button data-act="memory" title="O que o agente sabe deste projeto">🧠 Memória</button>
       <select data-act="assign" title="Agente nesta mesa">
         <option value="">— sem agente —</option>
         ${state.agents.map((x) => `<option value="${x.id}" ${x.id === p.agentId ? 'selected' : ''}>👤 ${esc(x.name)}</option>`).join('')}
       </select>
       ${a ? '<button data-act="edit-agent" title="Editar agente">✎</button>' : ''}
-      ${p.folder ? '' : '<p class="muted pw-note">Escolha a pasta do projeto em <b>⚙ Mesa</b> para conversar com o agente.</p>'}`;
+`;
     const on = (act, fn) => { const b = tb.querySelector(`[data-act=${act}]`); if (b) b.onclick = fn; };
     on('folder', () => api('POST', `/api/projects/${p.id}/open`, { app: 'explorer' }));
     on('vscode', () => api('POST', `/api/projects/${p.id}/open`, { app: 'vscode' }));
     on('edit-desk', () => openProjectDialog(p));
+    on('memory', () => openMemoryWindow(p.id));
     on('edit-agent', () => openAgentDialog(a));
     tb.querySelector('[data-act=assign]').onchange = (e) => api('PATCH', `/api/projects/${p.id}`, { agentId: e.target.value || null });
   }
@@ -1028,6 +1035,129 @@ function updateProjectWindow(win) {
   win.body.querySelector('[data-act=stop]').hidden = !live?.running;
   win.body.querySelector('[data-act=reset]').disabled = !!live?.running;
   renderPending(win, p, live?.pending);
+  // terminou uma rodada: o commit pode ter mudado
+  if (win.wasRunning && !live?.running) refreshGit(win);
+  win.wasRunning = !!live?.running;
+  renderBanner(win, p);
+}
+
+// Avisos da janela da mesa: pasta não configurada neste PC e commit diferente do que o agente lembra.
+function renderBanner(win, p) {
+  const box = win.body.querySelector('.pw-banner');
+  const envName = state.env?.name || 'este PC';
+  const msgs = [];
+  if (!p.folder) {
+    const others = Object.entries(p.folders || {})
+      .map(([envId, f]) => `<b>${esc(state.environments?.[envId]?.name || 'outro PC')}</b>: ${esc(f)}`);
+    msgs.push(others.length
+      ? `📁 Esta mesa ainda não tem pasta em <b>${esc(envName)}</b>. Ela está em ${others.join(', ')}. Clone ou copie o projeto aqui e escolha a pasta em <b>⚙ Mesa</b>.`
+      : 'Escolha a pasta do projeto em <b>⚙ Mesa</b> para conversar com o agente.');
+  }
+  const g = win.git;
+  const short = (sha) => `<code>${esc(sha.slice(0, 7))}</code>`;
+  if (p.folder && g?.git && g.state === 'missing') {
+    msgs.push(`⚠️ O agente parou no commit ${short(g.last)}, que não existe nesta pasta. Dê <code>git pull</code> antes de continuar.`);
+  } else if (p.folder && g?.git && g.state === 'diverged') {
+    msgs.push(`⚠️ Esta pasta (${short(g.head)} em ${esc(g.branch)}) seguiu outro caminho desde o commit ${short(g.last)} em que o agente parou. Confira a branch antes de continuar.`);
+  }
+  const html = msgs.map((m) => `<p>${m}</p>`).join('');
+  if (box.innerHTML !== html) box.innerHTML = html;
+  box.hidden = !msgs.length;
+}
+
+async function refreshGit(win) {
+  try {
+    win.git = await api('GET', `/api/projects/${win.projectId}/git`, undefined, { quiet: true });
+  } catch {
+    win.git = null;
+  }
+  const p = state.projects.find((x) => x.id === win.projectId);
+  if (p && wins.has(win.key)) renderBanner(win, p);
+}
+
+// ---------- Janela de memória do agente ----------
+function openMemoryWindow(projectId) {
+  const p = state.projects.find((x) => x.id === projectId);
+  if (!p) return;
+  const win = openWindow('m:' + projectId, { w: 480, h: 520, cls: 'win-memory' }, (win) => {
+    win.titleEl.innerHTML = `🧠 Memória · ${esc(p.name)}`;
+    win.body.innerHTML = `
+      <p class="muted mem-help">Resumo do que o agente sabe deste projeto. Ele recebe esta memória ao começar uma conversa nova
+        ou ao continuar num PC onde a sessão completa não estiver disponível. Você pode editar à vontade.</p>
+      <textarea class="mem-text" placeholder="Ainda não há memória. Ela é criada ao clicar em “Atualizar com a conversa” ou em “Nova conversa”."></textarea>
+      <p class="muted mem-meta"></p>
+      <div class="row">
+        <button class="primary" data-act="save">Salvar</button>
+        <button data-act="refresh" title="Pede ao Claude para resumir a conversa recente na memória">Atualizar com a conversa</button>
+      </div>`;
+    const text = win.body.querySelector('.mem-text');
+    const meta = win.body.querySelector('.mem-meta');
+    const load = async () => {
+      const m = await api('GET', `/api/projects/${projectId}/memory`);
+      text.value = m.memory;
+      meta.textContent = (m.memoryAt ? 'Atualizada ' + timeAgo(m.memoryAt) : 'Nunca atualizada') +
+        (m.lastCommit ? ` · último commit do agente: ${m.lastCommit.slice(0, 7)}` : '');
+    };
+    win.body.querySelector('[data-act=save]').onclick = async () => {
+      await api('PUT', `/api/projects/${projectId}/memory`, { memory: text.value });
+      meta.textContent = 'Salva agora';
+    };
+    win.body.querySelector('[data-act=refresh]').onclick = async (e) => {
+      e.target.disabled = true;
+      e.target.textContent = 'Resumindo…';
+      try {
+        await api('POST', `/api/projects/${projectId}/memory`, {});
+        await load();
+      } finally {
+        e.target.disabled = false;
+        e.target.textContent = 'Atualizar com a conversa';
+      }
+    };
+    load();
+  });
+}
+
+// ---------- Janela "Este PC": nome, outros PCs, exportar/importar ----------
+function openEnvWindow() {
+  const win = openWindow('env', { w: 440, h: 520, cls: 'win-env' }, (win) => {
+    win.titleEl.textContent = '🖥 Este PC';
+    win.render = renderEnv;
+  });
+  renderEnv(win);
+}
+
+function renderEnv(win) {
+  if (win.body.contains(document.activeElement)) return; // não atrapalha quem está digitando o nome
+  const envs = Object.entries(state.environments || {}).sort((a, b) => b[1].lastSeen - a[1].lastSeen);
+  win.body.innerHTML = `
+    <label>Nome deste PC<div class="folder-row">
+      <input data-field="name" maxlength="40" value="${esc(state.env?.name || '')}" />
+      <button data-act="rename">Salvar</button></div></label>
+    <p class="muted">Cada PC guarda a sua própria pasta para cada mesa. Agentes, conversas e memória vão junto quando você leva o escritório para outro PC.</p>
+    <h3>PCs que já usaram este escritório</h3>
+    ${envs.map(([id, e]) => `<div class="log-item">${esc(e.name)} ${id === state.env?.id ? '<span class="badge st-concluido">este PC</span>' : ''}
+      <span class="muted"> · visto ${timeAgo(e.lastSeen)}</span></div>`).join('')}
+    <h3>Levar para outro PC</h3>
+    <p class="muted">Exporte aqui e importe no outro PC (ou copie a pasta <code>data/</code>). Lá, abra cada mesa e escolha onde a pasta do projeto está naquele computador.</p>
+    <div class="row">
+      <a class="btn primary" href="/api/export" download>Exportar escritório</a>
+      <button data-act="import">Importar…</button>
+      <input type="file" accept=".json,application/json" hidden />
+    </div>`;
+  win.body.querySelector('[data-act=rename]').onclick = () =>
+    api('PATCH', '/api/environment', { name: win.body.querySelector('[data-field=name]').value });
+  const file = win.body.querySelector('input[type=file]');
+  win.body.querySelector('[data-act=import]').onclick = () => file.click();
+  file.onchange = async () => {
+    const f = file.files[0];
+    if (!f || !confirm(`Importar "${f.name}"? Isso substitui as mesas, agentes e conversas deste escritório.`)) return;
+    try {
+      await api('POST', '/api/import', JSON.parse(await f.text()));
+      alert('Escritório importado.');
+    } catch (e) {
+      if (e instanceof SyntaxError) alert('Esse arquivo não é uma exportação válida.');
+    }
+  };
 }
 
 async function loadChat(projectId) {
@@ -1249,7 +1379,7 @@ function openProjectDialog(p) {
     <h2>${p ? 'Editar mesa' : 'Nova mesa (projeto)'}</h2>
     <label>Nome do projeto<input name="name" required maxlength="40" value="${esc(p?.name || '')}" /></label>
     <label>Descrição<textarea name="description" rows="2">${esc(p?.description || '')}</textarea></label>
-    <label>Pasta do projeto
+    <label>Pasta do projeto neste PC (${esc(state.env?.name || '')})
       <div class="folder-row">
         <input name="folder" placeholder="C:\\Users\\...\\meu-projeto" value="${esc(p?.folder || '')}" />
         <button type="button" id="pick-folder">Escolher…</button>
@@ -1262,11 +1392,22 @@ function openProjectDialog(p) {
     </div>
     ${p ? '' : `<label>Agente<select name="agentId"><option value="">— sem agente —</option>${state.agents.map((a) => `<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select></label>`}
   `, async (d) => {
-    if (p) await api('PATCH', `/api/projects/${p.id}`, d);
-    else {
-      const created = await api('POST', '/api/projects', { ...d, agentId: d.agentId || null });
-      setTimeout(() => openProjectWindow(created.id), 100);
-    }
+    const submit = async (body) => {
+      try {
+        if (p) await api('PATCH', `/api/projects/${p.id}`, body, { quiet: true });
+        else {
+          const created = await api('POST', '/api/projects', { ...body, agentId: body.agentId || null }, { quiet: true });
+          setTimeout(() => openProjectWindow(created.id), 100);
+        }
+        const w = p && wins.get('p:' + p.id);
+        if (w) refreshGit(w);
+      } catch (e) {
+        if (e.code === 'repo_mismatch') {
+          if (confirm(e.message + '\n\nUsar esta pasta mesmo assim?')) submit({ ...body, forceFolder: true });
+        } else alert(e.message);
+      }
+    };
+    submit(d);
   }, p && { label: 'Remover mesa', confirm: `Remover a mesa "${p.name}"?`, action: () => api('DELETE', `/api/projects/${p.id}`) });
   form.querySelector('#pick-folder').onclick = async (e) => {
     e.target.disabled = true;
@@ -1302,6 +1443,7 @@ document.getElementById('btn-new-project').onclick = () => openProjectDialog();
 document.getElementById('btn-new-agent').onclick = () => openAgentDialog();
 document.getElementById('btn-team').onclick = () => openTeamWindow();
 document.getElementById('btn-log').onclick = () => openLogWindow();
+document.getElementById('btn-env').onclick = () => openEnvWindow();
 
 // ---------- Início ----------
 connect();
