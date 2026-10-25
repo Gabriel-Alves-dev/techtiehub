@@ -15,9 +15,10 @@ const STATUSES = ['trabalhando', 'ocioso', 'bloqueado', 'concluido'];
 const MAX_LOG = 300;
 
 const FLOORS = ['madeira', 'carpete', 'piso', 'escuro'];
+const AREAS = ['copa', 'reuniao', 'descanso']; // blocos da coluna lateral de cada sala
 
 const SEED = {
-  rooms: [{ id: 'r1', name: 'Escritório', cols: 4, floor: 'madeira' }],
+  rooms: [{ id: 'r1', name: 'Escritório', cols: 4, floor: 'madeira', areas: [...AREAS] }],
   projects: [
     { id: 'p1', roomId: 'r1', name: 'Site Techtie', description: 'Landing page e blog', color: '#4f8cff', agentId: 'a1' },
     { id: 'p2', roomId: 'r1', name: 'Automação Jurídica', description: 'Geração de petições e prazos', color: '#f2a93b', agentId: 'a2' },
@@ -40,6 +41,7 @@ function load() {
   }
   // dados de versões sem salas: tudo vai para uma sala "Escritório"
   if (!s.rooms?.length) s.rooms = [{ id: 'r1', name: 'Escritório', cols: 4, floor: 'madeira' }];
+  for (const r of s.rooms) r.areas ??= [...AREAS];
   for (const p of s.projects) if (!s.rooms.some((r) => r.id === p.roomId)) p.roomId = s.rooms[0].id;
   return s;
 }
@@ -100,7 +102,7 @@ function pick(obj, fields) {
 const FIELDS = {
   projects: ['name', 'description', 'color', 'agentId', 'folder', 'roomId'],
   agents: ['name', 'role', 'shirt', 'hair', 'skin', 'status', 'message'],
-  rooms: ['name', 'cols', 'floor'],
+  rooms: ['name', 'cols', 'floor', 'areas'],
 };
 
 function readBody(req) {
@@ -339,6 +341,11 @@ async function api(req, res, url) {
     }
     if (body.cols !== undefined) body.cols = Math.max(2, Math.min(8, parseInt(body.cols, 10) || 4));
     if (body.floor !== undefined && !FLOORS.includes(body.floor)) body.floor = 'madeira';
+    if (body.areas !== undefined) {
+      // sempre sobra ao menos uma área, para os agentes ociosos terem para onde ir
+      body.areas = AREAS.filter((a) => [].concat(body.areas).includes(a));
+      if (!body.areas.length) body.areas = ['copa'];
+    }
 
     if (method === 'POST' && !id) {
       if (!body.name) return send(res, 400, { error: 'nome é obrigatório' });
@@ -347,6 +354,7 @@ async function api(req, res, url) {
       if (resource === 'rooms') {
         item.cols ??= 4;
         item.floor ??= 'carpete';
+        item.areas ??= [...AREAS];
       }
       if (resource === 'projects') {
         item.roomId ??= state.rooms[0].id;

@@ -111,6 +111,9 @@ canvas { margin: auto; image-rendering: pixelated; cursor: pointer; }
 
 input[type='range'] { padding: 0; accent-color: var(--accent); }
 
+fieldset.areas { margin: 0 0 10px; padding: 8px 10px 2px; border: 2px solid var(--line); }
+fieldset.areas legend { padding: 0 4px; font-size: 12px; color: var(--muted); }
+
 .tooltip {
   position: absolute;
   pointer-events: none;

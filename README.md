@@ -8,11 +8,14 @@ Você vê de relance quem está trabalhando, quem terminou e quem precisa de voc
 
 ![Janela de conversa com pergunta do agente](docs/janela-conversa.png)
 
+![Áreas especiais: copa, reunião e descanso](docs/areas.png)
+
 ---
 
 ## Recursos
 
 - **Salas.** Organize as mesas em salas, por exemplo uma por cliente ou time. Cada sala tem o próprio formato (de 2 a 8 mesas por fileira) e o próprio piso, e a aba da sala avisa quando algum agente de lá precisa de você.
+- **Áreas especiais.** Cada sala tem uma coluna lateral com **copa**, **sala de reunião** e **área de descanso** (você escolhe quais). Os agentes ociosos circulam entre elas: tomam café, "conversam" em reunião, sentam no sofá, cochilam no puff e jogam fliperama.
 - **Zoom e navegação.** Use os botões ou Ctrl + roda do mouse para dar zoom, e arraste o escritório com o mouse quando ele for maior que a tela.
 - **Escritório animado.** Os personagens andam pelo escritório. Sentam e digitam na mesa quando trabalham, vão tomar café no lounge quando estão ociosos, e o monitor de cada mesa mostra o status. As janelas mudam de cor conforme a hora do dia e o relógio da parede marca a hora real.
 - **Balões de fala** sobre cada personagem. Mostram o que o agente está fazendo, ou piscam em amarelo quando ele tem uma pergunta ou precisa de permissão.
@@ -46,7 +49,7 @@ No Windows, você também pode dar dois cliques em **`iniciar.bat`**. Ele instal
 ### Primeiros passos
 
 1. **Contrate agentes** no botão **+ Contratar**: escolha nome, cargo e as cores do personagem.
-2. **Crie salas, se quiser,** pela aba **+ Sala**. Clique na aba da sala atual (⚙) para mudar o nome, as mesas por fileira e o piso.
+2. **Crie salas, se quiser,** pela aba **+ Sala**. Clique na aba da sala atual (⚙) para mudar o nome, as mesas por fileira, as áreas especiais e o piso.
 3. **Crie uma mesa** no botão **+ Mesa** ou clicando na mesa tracejada. Dê um nome, escolha a **pasta do projeto** com o botão "Escolher…" e o agente que vai sentar nela.
 4. **Clique na mesa ou no personagem** para abrir a janela de conversa e peça algo, por exemplo: *"Analisa a estrutura do projeto e me diz o que falta para o MVP"*.
 5. **Acompanhe pelos balões.** Quando o balão ficar amarelo, clique nele para responder.
@@ -58,7 +61,7 @@ No Windows, você também pode dar dois cliques em **`iniciar.bat`**. Ele instal
 | **Trabalhando** | Sentado digitando, código passando no monitor, balão com a ação atual |
 | **Bloqueado** | Monitor vermelho, balão amarelo pulando: tem pergunta ou pedido de permissão |
 | **Concluído** | Monitor azul com ✓, balão "Pronto!" |
-| **Ocioso** | Levanta e vai tomar café no lounge ☕ |
+| **Ocioso** | Levanta e vai para as áreas da sala: café ☕, reunião 💬, sofá, puff 💤 ou fliperama 🕹️ |
 
 ### Conversando com os agentes
 
@@ -113,7 +116,7 @@ O servidor escuta só em `127.0.0.1:4321`. Para mudar a porta, use a variável `
 | `GET /api/events` | Stream SSE. Evento padrão = estado completo; evento `chat` = nova mensagem `{ projectId, entry }` |
 | `POST /api/report` | Atualiza um agente: `{ agent, status, message?, project? }`. `agent` e `project` aceitam id ou nome |
 | `POST /api/hook` | Recebe eventos do `hub-hook.js` |
-| `POST /api/rooms` · `PATCH /api/rooms/:id` · `DELETE /api/rooms/:id` | CRUD de salas: `{ name, cols (2–8), floor: "madeira" | "carpete" | "piso" | "escuro" }`. Ao remover uma sala, as mesas dela vão para outra |
+| `POST /api/rooms` · `PATCH /api/rooms/:id` · `DELETE /api/rooms/:id` | CRUD de salas: `{ name, cols (2–8), areas: ["copa", "reuniao", "descanso"], floor: "madeira" | "carpete" | "piso" | "escuro" }`. Ao remover uma sala, as mesas dela vão para outra |
 | `POST /api/projects` · `PATCH /api/projects/:id` · `DELETE /api/projects/:id` | CRUD de mesas: `{ name, description, color, folder, agentId, roomId }` |
 | `POST /api/agents` · `PATCH /api/agents/:id` · `DELETE /api/agents/:id` | CRUD de agentes: `{ name, role, shirt, hair, skin, status, message }` |
 | `GET /api/projects/:id/chat` | Conversa salva da mesa: `{ sessionId, entries }` |
@@ -173,7 +176,7 @@ O hub abre pastas e programas e executa agentes que editam arquivos, então:
 ## Ideias para o futuro
 
 - Notificação do Windows quando um agente ficar esperando você
-- Áreas especiais: sala de reunião (agentes conversando entre si), copa, descanso
+- Reunião de verdade: escolher agentes e um tema para eles discutirem e devolverem um resumo
 - Modo de edição para montar e decorar as salas (arrastar mesas, móveis)
 - Hub na nuvem com conector local por PC: contas, memória do agente portátil entre computadores
 - Vários agentes na mesma mesa

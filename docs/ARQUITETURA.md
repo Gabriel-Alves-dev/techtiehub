@@ -38,7 +38,8 @@ Os princípios:
 ```jsonc
 {
   "rooms": [
-    { "id": "r1", "name": "Escritório", "cols": 4, "floor": "madeira" } // cols: mesas por fileira (2–8)
+    { "id": "r1", "name": "Escritório", "cols": 4, "floor": "madeira",
+      "areas": ["copa", "reuniao", "descanso"] } // cols: mesas por fileira (2–8); areas: blocos da coluna lateral
   ],
   "projects": [
     {
@@ -153,9 +154,10 @@ O arquivo é dividido em seções comentadas:
 |---|---|
 | **Salas** | Só a sala exibida (`roomId`, lembrada no `localStorage`) é desenhada. `roomProjects()` lista as mesas dela, e `visibleAgents()` lista os agentes com mesa nela, mais os agentes sem mesa, que ficam no lounge da primeira sala. Trocar de sala (`switchRoom`) recria os personagens já sentados. |
 | **Layout do mundo** | Geometria em "pixels de mundo" (tile de 16 px), multiplicada por `SCALE` na tela. Fileiras de `room.cols` mesas (5×5 tiles cada), lounge à direita, parede com janelas no topo. A sala cresce conforme o número de mesas. |
+| **Áreas especiais** | A coluna à direita das mesas é uma pilha de blocos (`world.blocks`): copa, reunião e descanso, nessa ordem, conforme `room.areas`. A sala fica alta o bastante para as mesas e para os blocos. Cada bloco define lugares (`areaSpots`) com uma atividade (`act`: cafe, reuniao, sofa, puff, arcade) e uma direção. Os agentes ociosos sorteiam um lugar livre a cada 10–30 s, e `drawLabels` desenha a atividade (☕, balões de conversa alternados na reunião, Zzz…). Os lugares ficam em linhas sem móveis, porque o agente chega andando na horizontal a partir do corredor. |
 | **Zoom e arrasto** | `SCALE` automático (cabe na tela) ou fixo de 1 a 6 (`setZoom`, em passos inteiros para a pixel art ficar nítida), mantendo parado o ponto sob o mouse. Arrastar o canvas rola o escritório; o clique é ignorado depois de um arrasto. |
 | **Caminhos** | Os personagens andam pelo corredor horizontal de cada fileira e pelo corredor vertical à direita das mesas (`route`), para não atravessar mesas. |
-| **Simulação** (`update`) | Define o destino de cada agente: com mesa e status ≠ ocioso → cadeira da mesa; senão → um ponto livre do lounge, trocado de tempos em tempos. Move a velocidade constante. |
+| **Simulação** (`update`) | Define o destino de cada agente: com mesa e status ≠ ocioso → cadeira da mesa; senão → um lugar livre das áreas especiais, trocado de tempos em tempos (`rt.atSpot` quando chega). Move a velocidade constante. |
 | **Desenho** (`draw…`) | Tudo é desenhado com retângulos no canvas, sem imagens: sala, mesas, monitores (conteúdo depende do status), personagens (frente/costas, passos, piscadas, mãos digitando). Textos são desenhados em coordenadas de tela para ficarem nítidos. |
 | **Balões** (`updateBubbles`) | Elementos HTML posicionados a cada quadro sobre o canvas. Mais nítidos que texto no canvas e clicáveis. O conteúdo vem de `bubbleFor(agent)` e só é reescrito quando muda. |
 | **Janelas flutuantes** (`openWindow`) | Gerenciador genérico: arrastar pela barra, redimensionar (CSS `resize`), minimizar, foco/z-index. Posição e tamanho ficam salvos no `localStorage`. |

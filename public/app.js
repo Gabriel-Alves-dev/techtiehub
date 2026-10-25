@@ -57,23 +57,55 @@ function computeWorld() {
   const slots = roomProjects().length + 1; // +1 = mesa vazia para criar projeto
   const rows = Math.max(2, Math.ceil(slots / cols));
   const loungeX = DESK_X0 + cols * CELL_W;
+  const areas = AREA_ORDER.filter((a) => (room?.areas || AREA_ORDER).includes(a));
+  if (!areas.length) areas.push('copa');
+  const areaTiles = areas.reduce((sum, a) => sum + AREA_H[a], 0);
   const W = loungeX + LOUNGE_W + 1;
-  const H = WALL_H + rows * CELL_H + 1;
+  const H = WALL_H + Math.max(rows * CELL_H, areaTiles) + 1;
   const L = loungeX * T;
   const top = WALL_H * T;
   const bottom = (H - 1) * T;
   const mid = (top + bottom) / 2;
 
-  const spots = [];
-  for (let i = 0; i < 4; i++) spots.push({ x: L + (1.2 + i * 1.5) * T, y: top + 2.2 * T });
-  for (let i = 0; i < 3; i++) spots.push({ x: L + (1.5 + i * 2) * T, y: mid + 0.6 * T });
-  for (let i = 0; i < 3; i++) spots.push({ x: L + (1.8 + i * 1.6) * T, y: bottom - 2.4 * T });
+  // coluna lateral: blocos empilhados (o último estica até o fim da sala)
+  const blocks = [];
+  let y = top;
+  areas.forEach((type, i) => {
+    const y1 = i === areas.length - 1 ? bottom : y + AREA_H[type] * T;
+    blocks.push({ type, y0: y, y1 });
+    y = y1;
+  });
+  const spots = blocks.flatMap((b) => areaSpots(b, L));
 
   return {
-    cols, rows, W, H, L, top, bottom, mid, spots, floor: room?.floor || 'madeira',
+    cols, rows, W, H, L, top, bottom, mid, spots, blocks, floor: room?.floor || 'madeira',
     trunkX: (loungeX - 0.4) * T,
     door: { x: (loungeX - 0.4) * T, y: bottom + 0.6 * T },
   };
+}
+
+// ---------- Áreas especiais (coluna lateral) ----------
+const AREA_ORDER = ['copa', 'reuniao', 'descanso'];
+const AREA_H = { copa: 5, reuniao: 6, descanso: 6 }; // altura em tiles
+const AREA_NAMES = { copa: '☕ Copa', reuniao: '💬 Sala de reunião', descanso: '🎮 Área de descanso' };
+
+// Lugares onde agentes ociosos param. act = o que fazem ali; facing = para onde olham.
+// Os agentes chegam andando na horizontal a partir do corredor da esquerda, então os
+// lugares ficam em linhas livres de móveis (cadeiras acima/abaixo da mesa, não ao lado).
+function areaSpots({ type, y0 }, L) {
+  const s = (dx, dy, act, facing, extra) => ({ x: L + dx * T, y: y0 + dy * T, act, facing, ...extra });
+  if (type === 'copa') {
+    return [1.4, 2.9, 4.4, 5.9].map((dx) => s(dx, 2.2, 'cafe', 'up'))
+      .concat([s(2.4, 3.9, 'cafe', 'right'), s(4.6, 3.9, 'cafe', 'left')]);
+  }
+  if (type === 'reuniao') {
+    return [2, 3.5, 5].flatMap((dx) => [
+      s(dx, 2.3, 'reuniao', 'down', { chair: 'top' }),
+      s(dx, 4.8, 'reuniao', 'up', { chair: 'bottom' }),
+    ]);
+  }
+  return [1.9, 3.5, 5.1].map((dx) => s(dx, 2.5, 'sofa', 'down'))
+    .concat([s(1.6, 5.0, 'puff', 'down'), s(5.9, 5.5, 'arcade', 'up')]);
 }
 
 function cellOf(i) {
@@ -114,8 +146,16 @@ function syncRuntime(atSeats) {
   for (const a of visible) {
     if (runtime.has(a.id)) continue;
     const desk = deskOf(a.id);
-    const start = atSeats && desk && a.status !== 'ocioso' ? desk.cell.seat : world.door;
-    runtime.set(a.id, { x: start.x, y: start.y, path: [], targetKey: null, walk: 0, facing: 'up', wanderAt: 0 });
+    const rt = { path: [], targetKey: null, walk: 0, facing: 'up', wanderAt: 0 };
+    let start = world.door;
+    if (atSeats && desk && a.status !== 'ocioso') start = desk.cell.seat;
+    else if (atSeats) {
+      // ocioso já aparece numa das áreas (copa, reunião, descanso)
+      rt.spot = pickSpot(a.id);
+      rt.wanderAt = Date.now() + 10000 + Math.random() * 20000;
+      start = world.spots[rt.spot];
+    }
+    runtime.set(a.id, Object.assign(rt, { x: start.x, y: start.y }));
   }
   for (const id of runtime.keys()) if (!visible.some((a) => a.id === id)) runtime.delete(id);
 }
@@ -167,7 +207,7 @@ function update(dt, now) {
     } else {
       if (rt.spot == null || now > rt.wanderAt) {
         rt.spot = pickSpot(a.id);
-        rt.wanderAt = now + 6000 + Math.random() * 9000;
+        rt.wanderAt = now + 10000 + Math.random() * 20000;
       }
       target = world.spots[rt.spot];
       key = 'spot:' + rt.spot + ':' + world.H + ':' + world.W;
@@ -193,8 +233,11 @@ function update(dt, now) {
       rt.moving = true;
       rt.facing = Math.abs(dy) > Math.abs(dx) ? (dy < 0 ? 'up' : 'down') : dx < 0 ? 'left' : 'right';
     }
-    rt.seated = !rt.path.length && key.startsWith('desk');
+    const arrived = !rt.path.length;
+    rt.seated = arrived && key.startsWith('desk');
+    rt.atSpot = arrived && !rt.seated && rt.spot != null ? world.spots[rt.spot] : null;
     if (rt.seated) rt.facing = 'up';
+    else if (rt.atSpot) rt.facing = rt.atSpot.facing;
     else if (!rt.moving) rt.facing = 'down';
   }
 }
@@ -282,7 +325,7 @@ function drawRoom(now) {
   rect(world.door.x - 12, bottom, 24, T, '#2b2f3e');
   rect(world.door.x - 10, bottom + 2, 20, T - 2, '#7a5a3a');
 
-  drawLounge(now);
+  drawAreas(now);
 }
 
 function plant(x, y) {
@@ -294,32 +337,89 @@ function plant(x, y) {
   }
 }
 
-function drawLounge(now) {
-  const { L, top, bottom, mid } = world;
+function drawAreas(now) {
+  const { L, W } = world;
+  const right = (W - 1) * T;
+  const occupied = new Set();
+  for (const rt of runtime.values()) if (rt.atSpot) occupied.add(rt.atSpot);
+  world.blocks.forEach((b, i) => {
+    if (i > 0) {
+      // divisória entre áreas
+      rect(L, b.y0 - 2, right - L, 4, '#3d4256');
+      rect(L, b.y0 + 2, right - L, 2, '#2b2f3e');
+      text({ copa: 'COPA', reuniao: 'REUNIÃO', descanso: 'DESCANSO' }[b.type], right - 4, b.y0 + 9, 6, '#ffffff55', 'right');
+    }
+    ({ copa: drawCopa, reuniao: drawMeeting, descanso: drawRest })[b.type](b, now, occupied);
+  });
+}
+
+function drawCopa({ y0 }, now) {
+  const { L } = world;
   // bancada com cafeteira
-  rect(L + 0.3 * T, top, 6.4 * T, T, '#d8d2c4');
-  rect(L + 0.3 * T, top + T, 6.4 * T, 4, '#a49d8c');
-  rect(L + 1 * T, top - 10, 12, 16, '#2d2d2d');
-  rect(L + 1 * T + 3, top - 6, 6, 4, now % 1000 < 500 ? '#e5534b' : '#702a26');
-  rect(L + 2.2 * T, top + 2, 6, 7, '#f5f5f5');
-  rect(L + 2.7 * T, top + 2, 6, 7, '#4f8cff');
+  rect(L + 0.3 * T, y0, 6.4 * T, T, '#d8d2c4');
+  rect(L + 0.3 * T, y0 + T, 6.4 * T, 4, '#a49d8c');
+  rect(L + 1 * T, y0 - 10, 12, 16, '#2d2d2d');
+  rect(L + 1 * T + 3, y0 - 6, 6, 4, now % 1000 < 500 ? '#e5534b' : '#702a26');
+  rect(L + 2.2 * T, y0 + 2, 6, 7, '#f5f5f5');
+  rect(L + 2.7 * T, y0 + 2, 6, 7, '#4f8cff');
   // galão de água
-  rect(L + 5.6 * T, top - 14, 12, 12, '#8fd3ff');
-  rect(L + 5.6 * T, top - 2, 12, 14, '#e8eaf2');
-  // mesa de centro
+  rect(L + 5.6 * T, y0 - 14, 12, 12, '#8fd3ff');
+  rect(L + 5.6 * T, y0 - 2, 12, 14, '#e8eaf2');
+  // mesinha
   ctx.fillStyle = '#7a5a3a';
-  ctx.beginPath(); ctx.ellipse(L + 3.5 * T, mid, 18, 9, 0, 0, Math.PI * 2); ctx.fill();
-  rect(L + 3.5 * T - 3, mid - 4, 6, 5, '#f5f5f5');
-  // sofá
-  const sy = bottom - 1.8 * T;
-  rect(L + 0.8 * T, sy, 5.4 * T, 1.5 * T, '#c0392b');
-  rect(L + 0.8 * T, sy + 1.1 * T, 5.4 * T, 0.4 * T, '#8e2a20');
-  rect(L + 0.8 * T, sy - 2, 8, 1.5 * T + 2, '#a5311f');
-  rect(L + 6.2 * T - 8, sy - 2, 8, 1.5 * T + 2, '#a5311f');
-  // plantas
-  plant(L + 0.6 * T, top + 3.2 * T);
-  plant(L + 6.4 * T, mid + 1.2 * T);
-  plant(1.6 * T, world.bottom - 0.2 * T);
+  ctx.beginPath(); ctx.ellipse(L + 3.5 * T, y0 + 3.7 * T, 16, 8, 0, 0, Math.PI * 2); ctx.fill();
+  rect(L + 3.5 * T - 3, y0 + 3.7 * T - 4, 6, 5, '#f5f5f5');
+  plant(L + 6.5 * T, y0 + 4.8 * T);
+}
+
+function drawMeeting({ y0, y1 }, now, occupied) {
+  const { L, W } = world;
+  ctx.globalAlpha = 0.3;
+  rect(L, y0 + 4, (W - 1) * T - L, y1 - y0 - 4, '#2a5f8a');
+  ctx.globalAlpha = 1;
+  // quadro branco
+  rect(L + 0.6 * T, y0 + 0.5 * T, 1.8 * T, 0.9 * T, '#e8eaf2');
+  rect(L + 0.6 * T + 3, y0 + 0.5 * T + 3, 14, 2, '#4f8cff');
+  rect(L + 0.6 * T + 3, y0 + 0.5 * T + 7, 9, 2, '#e5534b');
+  const chairs = world.spots.filter((s) => s.act === 'reuniao');
+  // cadeiras de cima: encosto fica atrás de quem senta
+  for (const s of chairs.filter((s) => s.chair === 'top')) {
+    rect(s.x - 6, s.y - 13, 12, 5, '#2d3142');
+    rect(s.x - 6, s.y - 8, 12, 6, '#3a3f55');
+  }
+  // mesa
+  rect(L + 1.3 * T, y0 + 2.5 * T, 4.4 * T, 1.4 * T, '#6b4429');
+  rect(L + 1.3 * T + 2, y0 + 2.5 * T + 2, 4.4 * T - 4, 1.4 * T - 6, '#8a5a3b');
+  rect(L + 2.2 * T, y0 + 2.9 * T, 6, 8, '#f5f5f5');
+  rect(L + 4.4 * T, y0 + 3 * T, 8, 6, '#d0d0d8');
+  // cadeiras de baixo: o encosto de quem está sentado é desenhado depois do agente
+  for (const s of chairs.filter((s) => s.chair === 'bottom')) {
+    rect(s.x - 7, s.y - 6, 14, 6, '#2d3142');
+    if (!occupied.has(s)) rect(s.x - 7, s.y - 2, 14, 7, '#3a3f55');
+  }
+}
+
+function drawRest({ y0 }, now, occupied) {
+  const { L } = world;
+  // tapete
+  rect(L + 1.2 * T, y0 + 3.3 * T, 3.4 * T, 2 * T, '#5a3e7a');
+  rect(L + 1.2 * T + 3, y0 + 3.3 * T + 3, 3.4 * T - 6, 2 * T - 6, '#6b4f8f');
+  // sofá encostado na divisória (quem senta fica de frente)
+  rect(L + 1 * T, y0 + 0.9 * T, 5 * T, 0.7 * T, '#a5311f');
+  rect(L + 1 * T, y0 + 1.5 * T, 5 * T, 1.1 * T, '#c0392b');
+  rect(L + 1 * T, y0 + 2.4 * T, 5 * T, 0.3 * T, '#8e2a20');
+  rect(L + 0.8 * T, y0 + 1.1 * T, 6, 1.6 * T, '#a5311f');
+  rect(L + 6 * T - 2, y0 + 1.1 * T, 6, 1.6 * T, '#a5311f');
+  // puff
+  ctx.fillStyle = '#f2a93b';
+  ctx.beginPath(); ctx.ellipse(L + 1.6 * T, y0 + 4.9 * T, 10, 6, 0, 0, Math.PI * 2); ctx.fill();
+  // fliperama: a tela pisca quando tem alguém jogando
+  const ax = L + 5.4 * T, ay = y0 + 3 * T;
+  const playing = world.spots.some((s) => s.act === 'arcade' && occupied.has(s));
+  rect(ax, ay, 16, 30, '#2b2f6e');
+  rect(ax, ay, 16, 4, '#e5534b');
+  rect(ax + 3, ay + 7, 10, 8, playing ? ['#3fbf7f', '#f2a93b', '#4f8cff', '#e5534b'][Math.floor(now / 180) % 4] : '#111');
+  rect(ax + 2, ay + 18, 12, 3, '#1c1c24');
 }
 
 function drawDesk(i, now) {
@@ -441,7 +541,9 @@ function drawChairBack(rt) {
   rect(rt.x - 7, rt.y - 4, 14, 2, '#4a5070');
 }
 
-function drawLabels(a, rt, now) {
+const TALK = ['💡', '📊', '👍', '🤔', '📈', '✅', '😂', '📌'];
+
+function drawLabels(a, rt, now, talkers) {
   const isSel = selected?.kind === 'project' && deskOf(a.id)?.project.id === selected.id;
   const y = rt.y - 27; // acima da cabeça
   const nameY = rt.seated ? rt.y + 9 : y; // sentado: nome embaixo da cadeira, para não tampar o monitor
@@ -450,9 +552,26 @@ function drawLabels(a, rt, now) {
   ctx.fillStyle = st.color;
   ctx.beginPath(); ctx.arc(rt.x + a.name.length * 7 / SCALE / 2 + 4, nameY, 2, 0, Math.PI * 2); ctx.fill();
 
-  if (!rt.seated && !rt.moving && a.status === 'ocioso' && Math.floor(now / 3000) % 3 === 0) {
-    text('☕', rt.x + 8, y - 6, 8, '#fff');
-  }
+  // o que o agente faz em cada área
+  const act = rt.atSpot?.act;
+  const phase = Math.floor(now / 2500);
+  if (act === 'cafe' && phase % 3 === 0) text('☕', rt.x + 8, y - 6, 8, '#fff');
+  else if (act === 'reuniao') {
+    // em grupo, um fala de cada vez; sozinho, fica anotando
+    const i = talkers.indexOf(a.id);
+    const speaking = talkers.length > 1 ? phase % talkers.length === i : phase % 2 === 0;
+    if (speaking) {
+      const by = y - 9;
+      rect(rt.x - 7, by - 6, 14, 11, '#fff');
+      rect(rt.x - 1, by + 5, 2, 2, '#fff');
+      text(talkers.length > 1 ? TALK[(phase + i) % TALK.length] : '📝', rt.x, by, 7, '#000');
+    }
+  } else if (act === 'puff') {
+    const t = (now / 700) % 1;
+    text('z', rt.x + 6 + t * 3, y - 2 - t * 6, 7, '#ffffffcc');
+    text('Z', rt.x + 10 + t * 3, y - 9 - t * 6, 8, '#ffffff99');
+  } else if (act === 'sofa' && phase % 4 === 1) text('📱', rt.x + 8, y - 6, 8, '#fff');
+  else if (act === 'arcade' && phase % 3 === 0) text('🕹️', rt.x + 9, y - 6, 8, '#fff');
 }
 
 function draw(now) {
@@ -465,9 +584,10 @@ function draw(now) {
   const ordered = visibleAgents().map((a) => [a, runtime.get(a.id)]).sort((p, q) => p[1].y - q[1].y);
   for (const [a, rt] of ordered) {
     drawAgent(a, rt, now);
-    if (rt.seated) drawChairBack(rt);
+    if (rt.seated || rt.atSpot?.chair === 'bottom') drawChairBack(rt);
   }
-  for (const [a, rt] of ordered) drawLabels(a, rt, now);
+  const talkers = ordered.filter(([, rt]) => rt.atSpot?.act === 'reuniao').map(([a]) => a.id);
+  for (const [a, rt] of ordered) drawLabels(a, rt, now, talkers);
 }
 
 // ---------- Loop ----------
@@ -1099,10 +1219,15 @@ function openRoomDialog(r) {
     <label>Mesas por fileira: <b id="cols-out">${r?.cols || 4}</b>
       <input type="range" name="cols" min="2" max="8" value="${r?.cols || 4}" />
     </label>
+    <fieldset class="areas"><legend>Áreas da coluna lateral</legend>
+      ${AREA_ORDER.map((k) => `<label class="option"><input type="checkbox" name="areas" value="${k}"
+        ${(r?.areas || AREA_ORDER).includes(k) ? 'checked' : ''} /><span>${AREA_NAMES[k]}</span></label>`).join('')}
+    </fieldset>
     <label>Piso<select name="floor">${Object.entries(FLOOR_NAMES).map(([k, v]) =>
       `<option value="${k}" ${k === (r?.floor || 'carpete') ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
     ${r ? '' : '<p class="muted">As mesas podem ser movidas entre salas em ⚙ Mesa.</p>'}
   `, async (d) => {
+    d.areas = [...form.querySelectorAll('input[name=areas]:checked')].map((i) => i.value);
     if (r) await api('PATCH', `/api/rooms/${r.id}`, d);
     else {
       const created = await api('POST', '/api/rooms', d);
