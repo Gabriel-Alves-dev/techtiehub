@@ -12,6 +12,7 @@ const STATUSES = ['trabalhando', 'ocioso', 'bloqueado', 'concluido'];
 const FLOORS = ['madeira', 'carpete', 'piso', 'escuro'];
 const AREAS = ['copa', 'reuniao', 'descanso']; // blocos da coluna lateral de cada sala
 const MAX_LOG = 300;
+const GRACE_MS = 90 * 1000; // quanto o hub espera um PC que caiu voltar antes de abandonar as tarefas
 
 // escritório de exemplo para contas novas
 const SEED = {
@@ -116,14 +117,68 @@ class Office {
   }
 
   // pedidos que estavam rodando num PC que caiu não têm mais como terminar
+  // Um PC caiu. Quedas curtas são normais (redeploy do hub, internet oscilando) e o agente
+  // continua trabalhando no PC: espera ele voltar antes de dar a tarefa como perdida.
   onDisconnect(envId) {
+    const affected = Object.values(this.live).filter((l) => l.envId === envId);
+    if (!affected.length) return;
+    for (const l of affected) l.offline = true;
+    this.broadcast(null, this.snapshot());
+    clearTimeout(this.graceTimers?.[envId]);
+    (this.graceTimers ??= {})[envId] = setTimeout(() => this.abandonEnv(envId), GRACE_MS);
+  }
+
+  // O PC voltou: o conector manda em seguida a lista do que está rodando (syncLive).
+  onReconnect(envId) {
+    clearTimeout(this.graceTimers?.[envId]);
+    for (const l of Object.values(this.live)) if (l.envId === envId) delete l.offline;
+  }
+
+  abandonEnv(envId) {
+    if (this.connectors.has(envId)) return;
     const name = this.envName(envId);
     for (const [projectId, l] of Object.entries(this.live)) {
       if (l.envId !== envId) continue;
       delete this.live[projectId];
-      this.chats.push(projectId, 'system', `O PC "${name}" desconectou do hub; a tarefa foi interrompida.`);
+      this.chats.push(projectId, 'system', `O PC "${name}" desconectou do hub e não voltou; a tarefa foi interrompida.`);
       this.setStatus(projectId, 'ocioso', `${name} desconectou`, true);
     }
+    this.broadcast(null, this.snapshot());
+  }
+
+  // Lista enviada pelo conector a cada (re)conexão: o que ele diz que roda é a verdade.
+  // Mesas que o hub achava "rodando" naquele PC e não estão na lista ficaram fantasmas.
+  syncLive(envId, lives) {
+    for (const [projectId, l] of Object.entries(this.live)) {
+      if (l.envId !== envId || lives[projectId]) continue;
+      delete this.live[projectId];
+      const agent = this.agentOf(projectId);
+      if (agent && ['trabalhando', 'bloqueado'].includes(agent.status)) this.setStatus(projectId, 'ocioso', 'Tarefa encerrada', true);
+    }
+    for (const [projectId, l] of Object.entries(lives || {})) {
+      if (this.state.projects.some((p) => p.id === projectId)) this.setLive(projectId, l, envId);
+    }
+    this.broadcast(null, this.snapshot());
+  }
+
+  // `age` vira um horário no relógio do hub (cada PC tem o seu relógio)
+  setLive(projectId, l, envId) {
+    if (!l) return delete this.live[projectId];
+    const phase = l.phase && { kind: l.phase.kind, name: l.phase.name, since: Date.now() - (l.phase.age || 0) };
+    this.live[projectId] = { ...l, phase, envId };
+  }
+
+  agentOf(projectId) {
+    const project = this.state.projects.find((p) => p.id === projectId);
+    return project && this.state.agents.find((a) => a.id === project.agentId);
+  }
+
+  // Parar quando o PC não responde ou já não tinha nada rodando: só limpa a mesa no hub.
+  forceStop(projectId, reason) {
+    if (!this.live[projectId]) return;
+    delete this.live[projectId];
+    this.chats.push(projectId, 'system', reason);
+    this.setStatus(projectId, 'ocioso', 'Parou', true);
   }
 
   envName(envId) {

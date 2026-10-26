@@ -71,11 +71,36 @@ function start({ hub, token, envFile = ENV_FILE, log = console.log }) {
     return data;
   }
 
-  // eventos vão em fila, na ordem em que aconteceram (a conversa não pode embaralhar)
-  let chain = Promise.resolve();
+  // Eventos vão em fila, na ordem em que aconteceram (a conversa não pode embaralhar).
+  // Se o hub cair (redeploy, internet), a fila espera e reenvia: nenhum aviso se perde —
+  // principalmente o "terminei", senão a mesa ficaria "trabalhando" para sempre.
+  const queue = [];
+  let flushing = false;
   const emit = (type, payload) => {
-    chain = chain.then(() => post('/api/connector/event', { type, ...payload })).catch((e) => log('Evento perdido:', e.message));
+    // do andamento só importa o mais recente: descarta os da mesma mesa ainda não enviados
+    if (type === 'live') {
+      for (let i = queue.length - 1; i >= 1; i--) if (queue[i].type === 'live' && queue[i].projectId === payload.projectId) queue.splice(i, 1);
+    }
+    queue.push({ type, ...payload });
+    flush();
   };
+  async function flush() {
+    if (flushing) return;
+    flushing = true;
+    let wait = 1000;
+    while (queue.length) {
+      try {
+        await post('/api/connector/event', queue[0]);
+        queue.shift();
+        wait = 1000;
+      } catch (e) {
+        if (/pareado/.test(e.message)) { queue.length = 0; break; } // PC removido no hub: não adianta guardar
+        await sleep(wait);
+        wait = Math.min(wait * 2, 15000);
+      }
+    }
+    flushing = false;
+  }
 
   const store = new RemoteSessionStore((op, body) => post('/api/connector/sessions/' + op, body));
   const runner = new Runner({
@@ -133,7 +158,8 @@ function start({ hub, token, envFile = ENV_FILE, log = console.log }) {
         if (!res.ok) throw new Error(`hub respondeu ${res.status}`);
         log(`Conectado ao hub ${hub} como "${env.name}"`);
         wait = 1000;
-        runner.resendLive();
+        // conta ao hub exatamente o que está rodando aqui (ele apaga o que ficou "fantasma")
+        emit('live-sync', { lives: runner.allLive() });
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buf = '';

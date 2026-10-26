@@ -425,3 +425,6 @@ button.warn { color: var(--warn); border-color: var(--warn); }
 .thumb button { position: absolute; top: -8px; right: -8px; padding: 2px 5px; font-size: 8px; box-shadow: none; }
 .msg-images { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
 .msg-images img { max-width: 160px; max-height: 120px; border: 2px solid #fff4; display: block; }
+
+/* o atributo hidden sempre esconde (estilos como input { display: block } não podem anular) */
+[hidden] { display: none !important; }

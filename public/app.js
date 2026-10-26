@@ -1266,7 +1266,8 @@ function renderActivity(win) {
   if (!box) return;
   if (!l?.running) { box.hidden = true; return; }
   let text;
-  if (l.pending) text = '✋ Esperando você responder acima';
+  if (l.offline) text = '📡 O PC desconectou — aguardando ele voltar (até 90 s)…';
+  else if (l.pending) text = '✋ Esperando você responder acima';
   else if (!l.phase) text = '⏳ Começando…';
   else {
     const elapsed = Date.now() - clockOffset - l.phase.since;

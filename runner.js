@@ -70,8 +70,11 @@ class Runner {
   }
 
   // depois de reconectar ao hub: reenvia o que está rodando
-  resendLive() {
-    for (const id of this.runs.keys()) if (this.isRunning(id)) this.emitLive(id);
+  // tudo o que está rodando neste PC (enviado ao hub a cada reconexão)
+  allLive() {
+    const out = {};
+    for (const id of this.runs.keys()) if (this.isRunning(id)) out[id] = this.liveOf(id);
+    return out;
   }
 
   preview(name, input = {}) {
@@ -294,8 +297,9 @@ class Runner {
   }
 
   stop(projectId) {
+    const wasRunning = this.isRunning(projectId);
     this.runs.get(projectId)?.abort.abort();
-    return { ok: true };
+    return { ok: true, wasRunning }; // false: o hub achava que rodava, mas aqui já tinha acabado
   }
 
   // ---------- Memória do agente ----------

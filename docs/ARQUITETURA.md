@@ -159,7 +159,8 @@ O estado transmitido ao navegador tem dois campos que não são salvos:
   | `rename` | Renomear o PC |
 
 - **Eventos do conector** (`POST /api/connector/event`, em ordem): `chat-push` (nova linha), `chat-update` (sessão, commit, memória…), `status` (agente da mesa) e `live` (andamento/pendências).
-- **PC caiu.** Quando o stream de um conector fecha, os comandos pendentes falham, os pedidos que rodavam nele são encerrados no `live` e a conversa ganha um aviso (`onDisconnect`).
+- **PC caiu.** Quando o stream de um conector fecha, os comandos pendentes falham e as mesas que rodavam nele ficam marcadas `offline` ("aguardando o PC voltar"). Se o PC não reconectar em 90 s (`GRACE_MS`), os pedidos são encerrados e a conversa ganha um aviso (`abandonEnv`). Se reconectar, o `live-sync` acerta tudo.
+- **Parar sempre destrava:** se o PC não responde ou diz que já não tinha nada rodando (`wasRunning !== true`), o hub libera a mesa mesmo assim (`forceStop`).
 - **Proteções:**
   - escuta só em `127.0.0.1` por padrão (`HUB_HOST` muda; na VPS, atrás do proxy HTTPS);
   - corpo das rotas sem login limitado (100 KB; pareamento 10 KB);
@@ -175,7 +176,8 @@ O estado transmitido ao navegador tem dois campos que não são salvos:
 - **Identidade do PC** em `~/.techtie-hub/ambiente.json` (id + nome) e **configuração** em `~/.techtie-hub/conector.json` (endereço do hub + token do PC). `HUB_ENV_FILE` e `HUB_CONNECTOR_FILE` mudam esses caminhos, o que é útil para simular vários PCs numa máquina.
 - **Linha de comando:** `node conector.js --hub <URL> --codigo XXXX-XXXX [--nome "PC"]`. Troca o código por um token (`pair`) e grava a configuração; das próximas vezes basta `node conector.js`. Se o hub recusar o token (PC removido), o conector avisa e tenta de novo só a cada minuto.
 - **Conexão:** abre `GET /api/connector/stream` e lê os comandos (`event: cmd`). Se cair, reconecta sozinho com espera crescente e reenvia o andamento dos pedidos em curso (`runner.resendLive`).
-- **Eventos em fila:** `emit()` manda os eventos um de cada vez, na ordem, para a conversa não embaralhar.
+- **Eventos em fila, sem perda:** `emit()` manda os eventos um de cada vez, na ordem, para a conversa não embaralhar. Se o hub estiver fora (redeploy, internet), a fila espera e reenvia com espera crescente, para que nenhum aviso se perca, principalmente o de fim de tarefa. Do andamento (`live`) só o mais recente de cada mesa fica na fila.
+- **Sincronização ao reconectar:** a cada conexão, o conector manda `live-sync` com tudo o que roda naquele PC. O hub apaga as mesas que achava rodando ali e não estão na lista (`syncLive`), e restaura as que estão, inclusive pedidos de permissão pendentes.
 - **No modo local**, o hub chama `conector.start()` no mesmo processo, com o token do PC local (ver Contas e credenciais).
 
 ### Pacote baixável (Windows)

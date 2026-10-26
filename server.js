@@ -210,6 +210,7 @@ async function connectorApi(req, res, url, op, sub) {
     auth.touchConnector(bearer(req));
     o.state.environments[envId] = { name, lastSeen: Date.now() };
     o.connectors.attach(envId, name, req, res);
+    o.onReconnect(envId);
     o.save();
     o.backfillRepos(envId);
     return;
@@ -223,15 +224,16 @@ async function connectorApi(req, res, url, op, sub) {
 
   if (op === 'event') {
     const { type, projectId } = body;
+    if (type === 'live-sync') {
+      o.syncLive(envId, body.lives || {});
+      return send(res, 200, { ok: true });
+    }
     if (!o.state.projects.some((p) => p.id === projectId)) return send(res, 200, { ignored: true });
     if (type === 'chat-push') o.chats.push(projectId, body.role, body.text, [].concat(body.images || []).filter((n) => o.hasUpload(n)));
     else if (type === 'chat-update') o.chats.update(projectId, body.fields || {});
     else if (type === 'status') o.setStatus(projectId, body.status, body.message, body.log);
     else if (type === 'live') {
-      // `age` vira um horário no relógio do hub (cada PC tem o seu relógio)
-      const phase = body.live?.phase && { kind: body.live.phase.kind, name: body.live.phase.name, since: Date.now() - (body.live.phase.age || 0) };
-      if (body.live) o.live[projectId] = { ...body.live, phase, envId };
-      else delete o.live[projectId];
+      o.setLive(projectId, body.live, envId);
       o.broadcast(null, o.snapshot());
     }
     return send(res, 200, { ok: true });
@@ -404,9 +406,23 @@ async function officeApi(req, res, url, o, user) {
     if (method !== 'POST') return send(res, 405, { error: 'método não permitido' });
 
     // pedidos em andamento vão para o PC onde estão rodando, venha de onde vier a resposta
-    if (action === 'answer' || action === 'stop') {
+    if (action === 'answer') {
       if (!live[id]) return send(res, 409, { error: 'nada rodando nesta mesa' });
-      return send(res, 200, await connectors.rpc(live[id].envId, action, { projectId: id, ...body }));
+      return send(res, 200, await connectors.rpc(live[id].envId, 'answer', { projectId: id, ...body }));
+    }
+    // Parar sempre destrava a mesa: se o PC não responde ou já tinha terminado, limpa no hub
+    if (action === 'stop') {
+      if (!live[id]) return send(res, 200, { ok: true });
+      const name = o.envName(live[id].envId);
+      let r = null;
+      try {
+        r = await connectors.rpc(live[id].envId, 'stop', { projectId: id }, 15000);
+      } catch {}
+      if (!r) o.forceStop(id, `Parado. O PC "${name}" não respondia; a mesa foi liberada.`);
+      // wasRunning !== true: já tinha terminado lá (ou conector antigo, que não informa) — se ainda
+      // estivesse rodando, o próprio PC avisaria o fim logo depois de abortar
+      else if (r.wasRunning !== true) o.forceStop(id, 'Parado. A tarefa já tinha terminado no PC; a mesa foi liberada.');
+      return send(res, 200, { ok: true });
     }
 
     const envId = o.needEnv(req);
