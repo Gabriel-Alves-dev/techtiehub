@@ -325,6 +325,15 @@ class Office {
   // mesas (projects: 'all') ou para uma lista de mesas; enabled liga/desliga sem apagar.
 
   // Versão para a tela: segredos mascarados.
+  // Segredos guardados que não abrem (chave HUB_SECRET_KEY trocada depois de cadastrar).
+  mcpLost(s) {
+    const lost = (v) => typeof v === 'string' && v.startsWith('enc:') && !this.secrets.decrypt(v);
+    return [
+      ...(lost(s.url) ? ['URL'] : []),
+      ...Object.entries({ ...s.headers, ...s.env }).filter(([, v]) => lost(v)).map(([k]) => k),
+    ];
+  }
+
   mcpPublic() {
     const secret = (v) => mask(this.secrets.decrypt(v));
     return this.state.mcpServers.map((s) => ({
@@ -334,6 +343,7 @@ class Office {
       headers: Object.fromEntries(Object.entries(s.headers || {}).map(([k, v]) => [k, secret(v)])),
       env: Object.fromEntries(Object.entries(s.env || {}).map(([k, v]) => [k, secret(v)])),
       lastTest: s.lastTest || null,
+      lost: this.mcpLost(s), // precisam ser digitados de novo
     }));
   }
 

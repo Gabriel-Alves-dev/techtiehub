@@ -444,8 +444,10 @@ async function processQueue(o, projectId) {
 const mcpScans = new Map(); // resultados de "procurar neste PC" (com segredos) — nunca vão para o navegador
 
 const MCP_TYPES = ['http', 'sse', 'stdio'];
+// tolera o formato do .mcp.json colado linha a linha: "Authorization": "Bearer …",
+const unquote = (s) => String(s ?? '').trim().replace(/,$/, '').trim().replace(/^(["'])(.*)\1$/, '$2');
 const strMap = (m) => Object.fromEntries(Object.entries(m && typeof m === 'object' ? m : {})
-  .filter(([k]) => /^[\w.-]{1,80}$/.test(k)).map(([k, v]) => [k, String(v ?? '')]));
+  .map(([k, v]) => [unquote(k), unquote(v)]).filter(([k]) => /^[\w.-]{1,80}$/.test(k)));
 
 function mcpValidate(o, body, current) {
   const name = body.name ?? current?.name;
@@ -498,7 +500,10 @@ async function mcpApi(req, res, o, id, action, method, body) {
     const result = await o.connectors.rpc(o.needEnv(req), 'mcp-test', { name: s.name, config: o.mcpConfig(s) }, 60000);
     s.lastTest = { status: result.status, error: result.error || null, tools: result.tools.length, at: Date.now() };
     o.save();
-    return send(res, 200, result);
+    // o que de fato foi enviado (só os nomes): ajuda a ver um token que não chegou
+    const cfg = o.mcpConfig(s);
+    const sent = Object.entries(cfg.headers || cfg.env || {}).filter(([, v]) => v).map(([k]) => k);
+    return send(res, 200, { ...result, sent, lost: o.mcpLost(s) });
   }
   if (method === 'PATCH') {
     mcpValidate(o, body, s);

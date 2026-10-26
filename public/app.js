@@ -1413,6 +1413,7 @@ function renderMcp(win) {
         ${s.enabled ? '' : '<span class="muted">(desligado)</span>'}</div>
       <div class="sub mono">${esc(s.type === 'stdio' ? [s.command, ...s.args].join(' ') : s.url)}</div>
       <div class="sub">Mesas: ${s.projects === 'all' ? 'todas' : esc(s.projects.map(projectName).join(', ') || 'nenhuma')}</div>
+      ${s.lost?.length ? `<div class="sub" style="color:var(--bad)">⚠️ Segredo guardado com outra chave: ${esc(s.lost.join(', '))}. Edite e digite de novo.</div>` : ''}
       ${s.lastTest ? `<div class="sub">Último teste: ${MCP_STATUS[s.lastTest.status] || esc(s.lastTest.status)}${s.lastTest.status === 'connected' ? ` · ${s.lastTest.tools} ferramentas` : ''} · ${timeAgo(s.lastTest.at)}</div>` : ''}
       <div class="mcp-test-result"></div>
       <div class="row">
@@ -1439,7 +1440,15 @@ function renderMcp(win) {
       out.innerHTML = `<p class="muted">Ligando o servidor no PC ${esc(state.env?.name || '')}…</p>`;
       try {
         const r = await api('POST', `/api/mcp/${s.id}/test`, {}, { quiet: true });
+        const hint = r.lost?.length
+          ? `Estes segredos não abrem mais (HUB_SECRET_KEY mudou depois de cadastrar): edite e digite de novo: ${esc(r.lost.join(', '))}.`
+          : r.status === 'needs-auth'
+            ? (!r.sent?.length ? 'Nenhum cabeçalho foi enviado: edite o servidor e preencha, por exemplo, <code>Authorization: Bearer seu-token</code>.'
+              : `O servidor recusou o que foi enviado (${esc(r.sent.join(', '))}): confira se o token está certo e completo, com "Bearer " na frente, e se não expirou.`)
+            : '';
         out.innerHTML = `<p><b>${MCP_STATUS[r.status] || esc(r.status)}</b>${r.error ? ` <span class="muted">— ${esc(r.error)}</span>` : ''}</p>
+          ${r.sent ? `<p class="muted">Enviado: ${r.sent.length ? esc(r.sent.join(', ')) : 'nenhum cabeçalho/variável'}</p>` : ''}
+          ${hint ? `<p class="login-error">${hint}</p>` : ''}
           ${r.tools.length ? `<div class="mcp-tools">${r.tools.map((t) => `<code title="${esc(t.description)}">${esc(t.name)}</code>`).join(' ')}</div>` : ''}`;
         setTimeout(() => loadMcp(win), 4000); // atualiza o "último teste"
       } catch (err) {
@@ -1484,14 +1493,33 @@ async function scanMcp(win) {
 
 // "Nome: valor" por linha <-> objeto (cabeçalhos); "NOME=valor" por linha <-> objeto (variáveis)
 const toLines = (obj, sep) => Object.entries(obj || {}).map(([k, v]) => `${k}${sep}${v}`).join('\n');
-const fromLines = (text, sep) => Object.fromEntries(String(text || '').split('\n').map((l) => l.trim()).filter(Boolean)
-  .map((l) => { const i = l.indexOf(sep); return i < 0 ? [l, ''] : [l.slice(0, i).trim(), l.slice(i + 1).trim()]; }));
+// aceita também o trecho do .mcp.json colado: { "Authorization": "Bearer …" } ou "Authorization": "Bearer …",
+const unquote = (s) => s.trim().replace(/,$/, '').trim().replace(/^(["'])(.*)\1$/, '$2');
+const fromLines = (text, sep) => {
+  const raw = String(text || '').trim();
+  try {
+    const obj = JSON.parse(raw.startsWith('{') ? raw : `{${raw.replace(/,\s*$/, '')}}`);
+    if (obj && typeof obj === 'object') return Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, String(v)]));
+  } catch {}
+  return Object.fromEntries(raw.split('\n').map((l) => l.trim()).filter((l) => l && l !== '{' && l !== '}')
+    .map((l) => {
+      // no formato JSON o separador é ":" mesmo nas variáveis
+      const s = /^["']/.test(l) ? ':' : sep;
+      const i = l.indexOf(s);
+      return i < 0 ? [unquote(l), ''] : [unquote(l.slice(0, i)), unquote(l.slice(i + 1))];
+    }));
+};
 
 function openMcpDialog(win, s) {
   const type = s?.type || 'http';
   const projects = s?.projects || 'all';
   openDialog(`
     <h2>${s ? 'Editar servidor MCP' : 'Novo servidor MCP'}</h2>
+    ${s ? '' : `<details class="mcp-paste"><summary>Colar a configuração do .mcp.json</summary>
+      <textarea rows="6" placeholder='{ "mcpServers": { "bitrix": { "type": "http", "url": "https://…", "headers": { "Authorization": "Bearer …" } } } }'></textarea>
+      <div class="row"><button type="button" data-act="paste">Preencher com o JSON</button><span class="muted" data-field="paste-msg"></span></div>
+    </details>`}
+    ${s?.lost?.length ? `<p class="login-error">⚠️ Estes segredos foram guardados com outra chave (HUB_SECRET_KEY mudou) e não abrem mais: <b>${esc(s.lost.join(', '))}</b>. Digite de novo.</p>` : ''}
     <label>Nome (aparece nas ferramentas como mcp__nome__…)<input name="name" required maxlength="40" pattern="[A-Za-z0-9_\\-]+" value="${esc(s?.name || '')}" placeholder="bitrix" /></label>
     <label>Tipo<select name="type">
       <option value="http" ${type === 'http' ? 'selected' : ''}>HTTP (endereço na internet)</option>
@@ -1537,6 +1565,33 @@ function openMcpDialog(win, s) {
   };
   form.elements.type.onchange = sync;
   sync();
+  // colar o JSON do .mcp.json: aceita { mcpServers: { nome: {...} } }, { nome: {...} } ou o servidor direto
+  form.querySelector('[data-act=paste]')?.addEventListener('click', () => {
+    const msg = form.querySelector('[data-field=paste-msg]');
+    let obj;
+    try {
+      obj = JSON.parse(form.querySelector('.mcp-paste textarea').value);
+    } catch {
+      msg.textContent = 'JSON inválido';
+      return;
+    }
+    let name = '';
+    let cfg = obj.mcpServers || obj;
+    if (!cfg.url && !cfg.command) [name, cfg] = Object.entries(cfg)[0] || [];
+    if (!cfg || (!cfg.url && !cfg.command)) {
+      msg.textContent = 'não achei url nem command';
+      return;
+    }
+    if (name) form.elements.name.value = name.replace(/[^\w-]/g, '_');
+    form.elements.type.value = cfg.command ? 'stdio' : cfg.type === 'sse' ? 'sse' : 'http';
+    form.elements.url.value = cfg.url || '';
+    form.elements.headers.value = toLines(cfg.headers, ': ');
+    form.elements.command.value = cfg.command || '';
+    form.elements.args.value = (cfg.args || []).join('\n');
+    form.elements.env.value = toLines(cfg.env, '=');
+    sync();
+    msg.textContent = '✓ preenchido: confira e salve';
+  });
 }
 
 // ---------- Janela de memória do agente ----------
