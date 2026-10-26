@@ -51,7 +51,8 @@ Os princípios:
 
 - **Senhas** com `scrypt` (N=16384) e sal próprio, comparadas com `timingSafeEqual`. **Limite de tentativas** por IP: 8 erros bloqueiam por 15 min.
 - **Sessão:** token aleatório no cookie `hub_sessao` (`HttpOnly`, `SameSite=Lax`, `Secure` sob HTTPS), 30 dias. No disco fica só o hash. Trocar a senha encerra as outras sessões.
-- **Primeira conta** sem convite; as seguintes exigem um código de convite.
+- **Primeira conta** sem convite; as seguintes exigem um código de convite. Com o hub **exposto na rede** (`HUB_HOST` diferente de 127.0.0.1), a primeira conta exige o **código de instalação** (`HUB_SETUP_CODE`, ou um gerado e mostrado nos logs).
+- **Limite de tentativas** por IP e por tipo (senha, cadastro/convite, pareamento): 8 erros bloqueiam por 15 min. O IP vem do `X-Forwarded-For` só com `HUB_TRUST_PROXY=1`, atrás do proxy.
 - **Pareamento de PC:** `POST /api/pairing` gera um código (10 min, só em memória). O conector chama `POST /api/connector/pair` com o código e o id do PC (`X-Hub-Env`) e recebe um **token permanente ligado ao escritório e àquele PC**. Toda requisição do conector precisa do token **e** do mesmo id de PC. Remover o PC apaga o token e derruba a conexão.
 - **Conector embutido:** no modo local, o hub emite um token para o PC local no escritório da primeira conta (`data/hub.json`) e grava `~/.techtie-hub/conector.json` (se apontar para este hub) para o `hub-hook.js`.
 - **Migração:** a primeira conta criada recebe os arquivos que estavam soltos em `data/` (`state.json`, `chats/`, `sessions/`).
@@ -160,7 +161,9 @@ O estado transmitido ao navegador tem dois campos que não são salvos:
 - **Eventos do conector** (`POST /api/connector/event`, em ordem): `chat-push` (nova linha), `chat-update` (sessão, commit, memória…), `status` (agente da mesa) e `live` (andamento/pendências).
 - **PC caiu.** Quando o stream de um conector fecha, os comandos pendentes falham, os pedidos que rodavam nele são encerrados no `live` e a conversa ganha um aviso (`onDisconnect`).
 - **Proteções:**
-  - escuta só em `127.0.0.1` até existir login (`HUB_HOST` muda);
+  - escuta só em `127.0.0.1` por padrão (`HUB_HOST` muda; na VPS, atrás do proxy HTTPS);
+  - corpo das rotas sem login limitado (100 KB; pareamento 10 KB);
+  - cabeçalhos: `X-Frame-Options: DENY` e CSP com `frame-ancestors 'none'` (contra clickjacking nos botões de permissão), `nosniff`, HSTS sob HTTPS;
   - recusa corpos que não sejam `application/json` (contra CSRF via `<form>`);
   - login obrigatório; cada conta só acessa o próprio escritório;
   - conectores, hooks e `report.js` usam o token do PC (`Authorization: Bearer`);
@@ -246,6 +249,15 @@ O ciclo de atualização:
 - **Nova rota de API:** adicione um bloco em `api()`. Se mudar o estado, termine com `save()`. Se precisar do PC do usuário, crie um comando em `handlers` no `conector.js` e chame com `connectors.rpc(needEnv(req), …)`.
 - **Novo móvel ou decoração:** desenhe nas funções `drawCopa`, `drawMeeting`, `drawRest` ou `drawRoom` com `rect()`. As coordenadas são em pixels de mundo.
 - **Opções do agente** (modelo, modo de permissão, prompt de sistema): ficam em `runner.runQuery`, nas `options` do `query()`. Veja a [referência do SDK](https://code.claude.com/docs/en/agent-sdk/typescript).
+
+## Rodar como servidor (Docker)
+
+O `Dockerfile` gera a imagem **só do hub** (`HUB_SEM_CONECTOR=1`). O hub não usa nenhuma dependência npm, porque o SDK do Claude só é carregado pelo conector, então a imagem não roda `npm install`. Os dados ficam no volume `/data`. Passo a passo no Coolify: [DEPLOY-COOLIFY.md](DEPLOY-COOLIFY.md).
+
+```bash
+docker build -t techtie-hub .
+docker run -p 4321:4321 -v techtie-hub-data:/data -e HUB_PUBLIC_URL=http://localhost:4321 techtie-hub
+```
 
 ## Testar
 

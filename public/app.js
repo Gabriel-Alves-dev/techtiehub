@@ -822,13 +822,14 @@ async function boot() {
   } catch {
     return setTimeout(boot, 3000); // hub fora do ar
   }
-  if (!status.user) return showLogin(status.setup);
+  if (!status.user) return showLogin(status.setup, status.setupCode);
   me = status.user;
   document.getElementById('login').hidden = true;
   connect();
 }
 
-function showLogin(setup = false) {
+// setup: ainda não há conta; needCode: o hub está exposto e a primeira conta pede o código de instalação
+function showLogin(setup = false, needCode = false) {
   events?.close();
   const box = document.getElementById('login');
   if (!box.hidden && box.dataset.setup === String(setup)) return;
@@ -846,6 +847,8 @@ function showLogin(setup = false) {
         <label>E-mail<input name="email" type="email" required autocomplete="email" /></label>
         <label>Senha<input name="password" type="password" required minlength="${signup ? 8 : 1}" autocomplete="${signup ? 'new-password' : 'current-password'}" /></label>
         ${mode === 'invite' ? '<label>Código do convite<input name="invite" required placeholder="XXXX-XXXX" /></label>' : ''}
+        ${mode === 'setup' && needCode ? `<label>Código de instalação<input name="setup" required placeholder="XXXX-XXXX" /></label>
+          <p class="muted login-hint">Aparece nos logs do servidor (no Coolify: aba Logs) ou é o valor de HUB_SETUP_CODE.</p>` : ''}
         <p class="login-error" hidden></p>
         <div class="row"><button class="primary">${signup ? 'Criar conta' : 'Entrar'}</button></div>
       </form>

@@ -88,7 +88,7 @@ class Office {
   }
 
   attachBrowser(req, res) {
-    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     res.write(`data: ${JSON.stringify(this.snapshot())}\n\n`);
     this.browsers.add(res);
     const ping = setInterval(() => res.write(': ping\n\n'), 25000);

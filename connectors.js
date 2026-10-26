@@ -13,7 +13,7 @@ class Connectors {
 
   attach(envId, name, req, res) {
     this.byEnv.get(envId)?.res.end(); // a mesma identidade conectou de novo: fica a conexão nova
-    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     res.write(': conectado\n\n');
     const entry = { name, res, since: Date.now() };
     this.byEnv.set(envId, entry);

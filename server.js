@@ -8,7 +8,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const git = require('./git');
-const { Auth, token } = require('./auth');
+const { Auth, token, shortCode } = require('./auth');
 const { Office, HttpError, STATUSES, FLOORS, AREAS } = require('./office');
 const conector = require('./conector');
 
@@ -20,7 +20,12 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 const DATA_DIR = path.dirname(process.env.HUB_DATA || path.join(__dirname, 'data', 'state.json'));
 const COOKIE = 'hub_sessao';
 
-const auth = new Auth(DATA_DIR);
+const EXPOSED = !['127.0.0.1', 'localhost', '::1'].includes(HOST); // acessível de fora desta máquina
+const TRUST_PROXY = process.env.HUB_TRUST_PROXY === '1'; // atrás de proxy (Coolify/Traefik): IP real vem no X-Forwarded-For
+
+// Exposto na rede, a PRIMEIRA conta exige um código de instalação (HUB_SETUP_CODE ou um
+// gerado e mostrado nos logs) — senão quem achasse o endereço antes poderia tomar o hub.
+const auth = new Auth(DATA_DIR, { setupCode: process.env.HUB_SETUP_CODE || (EXPOSED ? shortCode() : null) });
 const LOCAL_ENV = EMBEDDED ? conector.loadEnv() : null;
 
 // ---------- Escritórios ----------
@@ -47,12 +52,16 @@ function createOfficeDir() {
 }
 
 // ---------- Utilidades HTTP ----------
-function readBody(req) {
+// limit: rotas sem login aceitam pouco; com login, importação e sessões podem ser grandes
+function readBody(req, limit = 200e6) {
   return new Promise((resolve, reject) => {
     let body = '';
     req.on('data', (c) => {
       body += c;
-      if (body.length > 200e6) req.destroy(); // importação e sessões podem ser grandes
+      if (body.length > limit) {
+        reject(new Error('requisição grande demais'));
+        req.destroy();
+      }
     });
     req.on('end', () => {
       try {
@@ -74,7 +83,7 @@ const cookies = (req) => Object.fromEntries(String(req.headers.cookie || '').spl
 const isHttps = (req) => req.socket.encrypted || req.headers['x-forwarded-proto'] === 'https' || PUBLIC_URL?.startsWith('https');
 const publicUrl = (req) => PUBLIC_URL || `${isHttps(req) ? 'https' : 'http'}://${req.headers.host}`;
 const bearer = (req) => String(req.headers.authorization || '').replace(/^Bearer /, '') || null;
-const clientIp = (req) => String(req.headers['x-forwarded-for'] || req.socket.remoteAddress).split(',')[0].trim();
+const clientIp = (req) => String((TRUST_PROXY && req.headers['x-forwarded-for']) || req.socket.remoteAddress).split(',')[0].trim();
 
 function setSession(req, res, value) {
   const parts = [`${COOKIE}=${value ? encodeURIComponent(value) : ''}`, 'Path=/', 'HttpOnly', 'SameSite=Lax',
@@ -109,14 +118,16 @@ async function authApi(req, res, action, body) {
   const session = cookies(req)[COOKIE];
   const user = auth.userForSession(session);
 
-  if (action === 'status') return send(res, 200, { setup: !auth.hasUsers(), user: auth.publicUser(user) });
+  if (action === 'status') {
+    return send(res, 200, { setup: !auth.hasUsers(), setupCode: !auth.hasUsers() && !!auth.setupCode, user: auth.publicUser(user) });
+  }
 
   if (action === 'signup' && req.method === 'POST') {
     const first = !auth.hasUsers();
     const officeId = createOfficeDir();
     let created;
     try {
-      created = auth.createUser({ ...body, officeId });
+      created = auth.createUser({ ...body, officeId }, clientIp(req));
     } catch (e) {
       fs.rmSync(path.join(DATA_DIR, 'offices', officeId), { recursive: true, force: true });
       return send(res, 400, { error: e.message });
@@ -161,9 +172,9 @@ async function authApi(req, res, action, body) {
 // ---------- Rotas dos conectores (autenticadas pelo token do PC) ----------
 async function connectorApi(req, res, url, op, sub) {
   if (op === 'pair' && req.method === 'POST') {
-    const body = await readBody(req);
+    const body = await readBody(req, 10e3);
     try {
-      return send(res, 200, { token: auth.pair(body.code, req.headers['x-hub-env'], body.name) });
+      return send(res, 200, { token: auth.pair(body.code, req.headers['x-hub-env'], body.name, clientIp(req)) });
     } catch (e) {
       return send(res, 400, { error: e.message });
     }
@@ -495,7 +506,7 @@ async function api(req, res, url) {
     return send(res, 415, { error: 'use Content-Type: application/json' });
   }
 
-  if (resource === 'auth') return authApi(req, res, id, req.method === 'POST' ? await readBody(req) : {});
+  if (resource === 'auth') return authApi(req, res, id, req.method === 'POST' ? await readBody(req, 100e3) : {});
 
   // hooks e report.js se identificam pelo token do conector do PC
   if (resource === 'hook' || resource === 'report') {
@@ -527,6 +538,16 @@ function serveStatic(res, url) {
 
 http
   .createServer(async (req, res) => {
+    // a interface tem botões de "Permitir": não pode ser embutida em outro site (clickjacking)
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'same-origin');
+    res.setHeader('Content-Security-Policy', [
+      "default-src 'self'", "frame-ancestors 'none'", "base-uri 'none'", "form-action 'self'",
+      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com", "font-src https://fonts.gstatic.com",
+      "img-src 'self' data:", "connect-src 'self'",
+    ].join('; '));
+    if (isHttps(req)) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
     const url = new URL(req.url, `http://${req.headers.host}`);
     try {
       if (url.pathname.startsWith('/api/')) await api(req, res, url);
@@ -537,7 +558,10 @@ http
   })
   .listen(PORT, HOST, () => {
     console.log(`Techtie Hub rodando em http://localhost:${PORT}`);
-    if (!auth.hasUsers()) console.log('Abra o endereço acima e crie a sua conta.');
+    if (!auth.hasUsers()) {
+      console.log('Abra o endereço do hub e crie a sua conta.');
+      if (auth.setupCode) console.log(`Código de instalação (pedido ao criar a primeira conta): ${auth.setupCode}`);
+    }
     // modo local: o conector deste PC pertence ao dono (primeira conta)
     else startEmbedded(auth.db.users[0].offices[0]);
   });

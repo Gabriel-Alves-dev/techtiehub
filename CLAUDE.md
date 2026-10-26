@@ -16,6 +16,7 @@ Leia `docs/ARQUITETURA.md` antes de mudanças estruturais.
 - `git.js`: HEAD, remote e comparação de commits das pastas dos projetos.
 - `public/app.js`: canvas do escritório, balões HTML, janelas flutuantes e diálogos. JS puro, sem build.
 - `hub-hook.js` / `instalar-hook.js`: integração com o Claude Code do VS Code via hooks.
+- `Dockerfile` / `docs/DEPLOY-COOLIFY.md`: o hub em servidor (Coolify, `hub.techtie.digital`). **O hub não pode depender de pacotes npm**: a imagem não roda `npm install`. Só o conector carrega o SDK do Claude (import dinâmico em `runner.js`).
 - `data/`: dados locais do usuário. **Nunca versionar** (está no `.gitignore`).
 - **Pasta por PC:** a pasta de uma mesa fica em `project.folders[envId]`. Nunca grave `project.folder` no hub (no front, `p.folder` é só a pasta do PC em uso, calculada em `resolveEnv`). A identidade do PC fica em `~/.techtie-hub/ambiente.json`, e a configuração do conector em `~/.techtie-hub/conector.json`.
 

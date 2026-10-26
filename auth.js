@@ -34,7 +34,8 @@ function checkPassword(password, user) {
 }
 
 class Auth {
-  constructor(dir) {
+  constructor(dir, { setupCode } = {}) {
+    this.setupCode = setupCode ? String(setupCode).trim().toUpperCase() : null;
     this.file = path.join(dir, 'auth.json');
     fs.mkdirSync(dir, { recursive: true });
     try {
@@ -64,16 +65,26 @@ class Auth {
   }
 
   // ---------- Contas ----------
-  createUser({ email, name, password, invite, officeId }) {
+  // setupCode: exigido na PRIMEIRA conta quando o hub está exposto (ver server.js);
+  // sem ele, qualquer um que achasse o endereço poderia tomar o hub.
+  createUser({ email, name, password, invite, setup, officeId }, ip) {
+    this.guard(ip, 'signup');
     email = String(email || '').trim().toLowerCase();
     name = String(name || '').trim().slice(0, 40) || email.split('@')[0];
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error('e-mail inválido');
     if (String(password || '').length < 8) throw new Error('a senha precisa de pelo menos 8 caracteres');
     if (this.db.users.some((u) => u.email === email)) throw new Error('já existe uma conta com esse e-mail');
+    if (!this.hasUsers() && this.setupCode && String(setup || '').trim().toUpperCase() !== this.setupCode) {
+      this.fail(ip, 'signup');
+      throw new Error('código de instalação inválido (veja nos logs do servidor)');
+    }
     if (this.hasUsers()) {
       // depois da primeira conta, só com convite
       const inv = this.db.invites[sha(String(invite || '').trim().toUpperCase())];
-      if (!inv || inv.exp < Date.now()) throw new Error('convite inválido ou vencido');
+      if (!inv || inv.exp < Date.now()) {
+        this.fail(ip, 'signup');
+        throw new Error('convite inválido ou vencido');
+      }
       delete this.db.invites[sha(String(invite).trim().toUpperCase())];
     }
     const user = { id: 'u' + token(6), email, name, ...hashPassword(password), offices: [officeId], createdAt: Date.now() };
@@ -96,17 +107,30 @@ class Auth {
     this.save();
   }
 
+  // ---------- Freio contra tentativas repetidas (senha, convite, código de PC) ----------
+  // 8 erros do mesmo IP no mesmo tipo de tentativa bloqueiam por 15 minutos.
+  guard(ip, kind) {
+    const f = this.failures.get(kind + ip);
+    if (f && f.n >= 8 && f.until > Date.now()) throw new Error('muitas tentativas; espere alguns minutos');
+  }
+
+  fail(ip, kind) {
+    const f = this.failures.get(kind + ip);
+    const n = (f && f.until > Date.now() ? f.n : 0) + 1;
+    this.failures.set(kind + ip, { n, until: Date.now() + 15 * 60 * 1000 });
+  }
+
   // ---------- Login ----------
   login(email, password, ip) {
-    const f = this.failures.get(ip);
-    if (f && f.n >= 8 && f.until > Date.now()) throw new Error('muitas tentativas; espere alguns minutos');
+    this.guard(ip, 'login');
     const user = this.db.users.find((u) => u.email === String(email || '').trim().toLowerCase());
-    if (!user || !checkPassword(password, user)) {
-      const n = (f && f.until > Date.now() ? f.n : 0) + 1;
-      this.failures.set(ip, { n, until: Date.now() + 15 * 60 * 1000 });
+    // sem usuário, calcula um hash mesmo assim: o tempo de resposta não revela quais e-mails existem
+    const ok = user ? checkPassword(password, user) : (hashPassword(password), false);
+    if (!ok) {
+      this.fail(ip, 'login');
       throw new Error('e-mail ou senha incorretos');
     }
-    this.failures.delete(ip);
+    this.failures.delete('login' + ip);
     return this.startSession(user.id);
   }
 
@@ -150,9 +174,13 @@ class Auth {
   }
 
   // O conector troca o código (uso único) por um token permanente para aquele PC.
-  pair(code, envId, name) {
+  pair(code, envId, name, ip) {
+    this.guard(ip, 'pair');
     const p = this.pairings.get(String(code || '').trim().toUpperCase());
-    if (!p || p.exp < Date.now()) throw new Error('código inválido ou vencido; gere outro no hub');
+    if (!p || p.exp < Date.now()) {
+      this.fail(ip, 'pair');
+      throw new Error('código inválido ou vencido; gere outro no hub');
+    }
     if (!/^[\w-]{3,40}$/.test(String(envId || ''))) throw new Error('identidade do PC inválida');
     this.pairings.delete(String(code).trim().toUpperCase());
     return this.issueConnector(p.officeId, envId, name);
@@ -192,4 +220,4 @@ class Auth {
   }
 }
 
-module.exports = { Auth, sha, token };
+module.exports = { Auth, sha, token, shortCode };

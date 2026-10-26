@@ -28,6 +28,10 @@ Você vê de relance quem está trabalhando, quem terminou e quem precisa de voc
 - **API simples** para qualquer script ou agente reportar status.
 - **Roda só na sua máquina.** Sem banco de dados, sem nuvem.
 
+## Publicar na VPS
+
+O hub pode rodar num servidor, acessível de qualquer lugar com HTTPS, com os seus PCs conectados a ele. O `Dockerfile` está pronto para o Coolify. Passo a passo completo, inclusive como levar o escritório que você já tem: **[docs/DEPLOY-COOLIFY.md](docs/DEPLOY-COOLIFY.md)**.
+
 ## Requisitos
 
 - **Windows 10/11.** O servidor e a API são multiplataforma, mas o seletor de pastas e os botões "Abrir pasta" / "VS Code" usam recursos do Windows.
@@ -121,12 +125,13 @@ node conector.js --hub https://endereco-do-hub --codigo XXXX-XXXX --nome "PC do 
 
 O conector troca o código por um token só daquele PC e salva em `~/.techtie-hub/`; das próximas vezes basta `npm run conector`. Para tirar o acesso de um PC, use **Remover** na janela de PCs.
 
-> **Por padrão o hub só aceita conexões do próprio computador** (`127.0.0.1`). Para outros PCs alcançarem o hub, ele precisa estar publicado com HTTPS (próxima etapa: VPS). Até lá, para levar o escritório a outro PC, use **PC → Backup** (exportar/importar).
+> **No modo local, o hub só aceita conexões do próprio computador** (`127.0.0.1`). Para outros PCs alcançarem o hub, publique-o com HTTPS ([docs/DEPLOY-COOLIFY.md](docs/DEPLOY-COOLIFY.md)). Depois de parear, abra o conector com dois cliques em **`conectar.bat`**.
 
 ## Contas e convites
 
 - **Cada conta tem o seu escritório**, com mesas, agentes, conversas, memória e PCs próprios. Ninguém vê o escritório de outra conta.
 - **Primeira conta:** criada livremente na primeira vez que o hub abre; herda os dados que já existiam.
+- **Hub publicado na internet:** a primeira conta pede um **código de instalação**, que aparece nos logs do servidor ou vem de `HUB_SETUP_CODE`. Assim ninguém toma o hub antes de você.
 - **Outras contas:** só com convite. Em **Conta → Gerar convite**, envie o código (vale 7 dias, uso único) e o endereço do hub; a pessoa clica em *Recebi um convite* na tela de entrada.
 - **Conta:** trocar a senha (encerra as outras sessões) e sair.
 - O trabalho dos agentes usa o login do Claude Code **do PC onde o conector roda**, não a conta do hub.
@@ -213,13 +218,16 @@ techtiehub/
 ├── hub-hook.js        # Hook do Claude Code → repassa eventos para /api/hook
 ├── instalar-hook.js   # Instala/remove o hook em ~/.claude/settings.json
 ├── report.js          # CLI para reportar status de um agente
-├── iniciar.bat        # Atalho do Windows: instala dependências, sobe o servidor e abre o navegador
+├── iniciar.bat        # Atalho do Windows: hub local + conector deste PC, e abre o navegador
+├── conectar.bat       # Atalho do Windows: só o conector (para um hub na VPS)
+├── Dockerfile         # Imagem do hub para servidor (Coolify)
 ├── public/
 │   ├── index.html     # Página única
 │   ├── style.css      # Tema escuro + estilos de balões e janelas
 │   └── app.js         # Escritório em canvas, balões, janelas flutuantes, diálogos
 ├── docs/
 │   ├── ARQUITETURA.md # Como as peças se conectam (leitura recomendada para quem vai mexer)
+│   ├── DEPLOY-COOLIFY.md # Publicar na VPS com Coolify
 │   └── *.png          # Capturas de tela
 └── data/              # Criado em tempo de execução, fora do git
     ├── auth.json      # Contas (senhas com scrypt), sessões, convites e tokens dos PCs (só hashes)
@@ -246,7 +254,9 @@ O hub abre pastas e programas e executa agentes que editam arquivos, então:
 - **Login obrigatório.** Senhas com scrypt e sal; sessão em cookie `HttpOnly` + `SameSite=Lax` (e `Secure` sob HTTPS), válida por 30 dias; limite de tentativas de senha por IP.
 - **Cada conta só enxerga o próprio escritório.**
 - **PCs pareados por código** de uso único (10 min). Cada PC recebe um token próprio, revogável; no disco ficam só os hashes de sessões, convites e tokens.
-- **O hub escuta só em `127.0.0.1`** por padrão. Publicar na internet só atrás de HTTPS (próxima etapa).
+- **O hub escuta só em `127.0.0.1`** por padrão. Na VPS, ele fica atrás do proxy HTTPS do Coolify.
+- **Exposto na rede**, a primeira conta exige o código de instalação; requisições sem login têm limite de tamanho; tentativas de senha, convite e pareamento têm limite por IP.
+- **Cabeçalhos de segurança:** a interface não pode ser embutida em outros sites (evita que alguém engane você a clicar em "Permitir"), além de CSP e HSTS sob HTTPS.
 - **A API só aceita requisições JSON.** Isso impede que um site qualquer dispare ações com um formulário (CSRF).
 - **Os agentes rodam com as permissões do Claude Code.** Nada destrutivo acontece sem passar pelo cartão de permissão, a não ser o que você já liberou com "Sempre permitir" ou nas suas configurações.
 
@@ -255,7 +265,6 @@ O hub abre pastas e programas e executa agentes que editam arquivos, então:
 - Notificação do Windows quando um agente ficar esperando você
 - Reunião de verdade: escolher agentes e um tema para eles discutirem e devolverem um resumo
 - Modo de edição para montar e decorar as salas (arrastar mesas, móveis)
-- Publicação na VPS com HTTPS
 - Escritório compartilhado entre contas (vários membros)
 - Vários agentes na mesma mesa
 - Contador de horas trabalhadas por projeto
