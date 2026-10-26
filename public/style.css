@@ -430,3 +430,11 @@ button.warn { color: var(--warn); border-color: var(--warn); }
 [hidden] { display: none !important; }
 
 .stop-asking { display: inline-block; margin-top: 8px; font-size: 11px; color: var(--muted); }
+
+/* ---------- servidores MCP ---------- */
+.mcp-card .title { flex-wrap: wrap; }
+.mcp-type { font: 8px var(--pixel); padding: 3px 5px; color: var(--muted); border: 1px solid var(--line); }
+.mono { font-family: Consolas, monospace; word-break: break-all; }
+.mcp-tools { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.mcp-tools code { font-size: 11px; background: var(--bg); padding: 2px 5px; }
+.mcp-projects { padding-left: 22px; }

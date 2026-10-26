@@ -18,6 +18,7 @@ const { Runner } = require('./runner');
 const { RemoteSessionStore } = require('./remote-store');
 const { describeTool } = require('./describe');
 const { FILES, versionOf } = require('./connector-files');
+const mcpLocal = require('./mcp-local');
 
 const VERSION = versionOf(__dirname);
 const RESTART_CODE = 75; // o "Iniciar Techtie.bat" reabre o conector quando ele sai com este código
@@ -134,6 +135,8 @@ function start({ hub, token, envFile = ENV_FILE, log = console.log, embedded = f
     'folder-info': ({ folder }) => ops.folderInfo(folder),
     'pick-folder': () => ops.pickFolder(),
     'set-mode': ({ projectId, mode }) => runner.setMode(projectId, mode),
+    'mcp-scan': ({ folders }) => mcpLocal.scan(folders),
+    'mcp-test': ({ name, config }) => mcpLocal.test(name, config),
     open: ({ folder, app }) => ops.openFolder(folder, app),
     rename: ({ name }) => {
       env.name = name;

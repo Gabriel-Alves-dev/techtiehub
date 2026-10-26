@@ -12,6 +12,7 @@ const { Auth, token, shortCode } = require('./auth');
 const { Office, HttpError, STATUSES, FLOORS, AREAS } = require('./office');
 const conector = require('./conector');
 const { createZip } = require('./zip');
+const { Secrets, isMask, mask } = require('./secrets');
 
 // ---------- Pacote do conector (baixado pelo navegador) ----------
 // Os arquivos que rodam no PC + o atalho de Windows (pacote/) + a configuração com o
@@ -51,13 +52,14 @@ const TRUST_PROXY = process.env.HUB_TRUST_PROXY === '1'; // atrás de proxy (Coo
 
 // Exposto na rede, a PRIMEIRA conta exige um código de instalação (HUB_SETUP_CODE ou um
 // gerado e mostrado nos logs) — senão quem achasse o endereço antes poderia tomar o hub.
+const secrets = new Secrets(DATA_DIR);
 const auth = new Auth(DATA_DIR, { setupCode: process.env.HUB_SETUP_CODE || (EXPOSED ? shortCode() : null) });
 const LOCAL_ENV = EMBEDDED ? conector.loadEnv() : null;
 
 // ---------- Escritórios ----------
 const offices = new Map();
 function getOffice(id) {
-  if (!offices.has(id)) offices.set(id, new Office(id, path.join(DATA_DIR, 'offices', id), { legacyEnvId: LOCAL_ENV?.id, connectorVersion: CONNECTOR_VERSION }));
+  if (!offices.has(id)) offices.set(id, new Office(id, path.join(DATA_DIR, 'offices', id), { legacyEnvId: LOCAL_ENV?.id, connectorVersion: CONNECTOR_VERSION, secrets }));
   return offices.get(id);
 }
 
@@ -319,6 +321,100 @@ function report(o, body, res) {
   return send(res, 200, agent);
 }
 
+// ---------- Servidores MCP ----------
+const mcpScans = new Map(); // resultados de "procurar neste PC" (com segredos) — nunca vão para o navegador
+
+const MCP_TYPES = ['http', 'sse', 'stdio'];
+const strMap = (m) => Object.fromEntries(Object.entries(m && typeof m === 'object' ? m : {})
+  .filter(([k]) => /^[\w.-]{1,80}$/.test(k)).map(([k, v]) => [k, String(v ?? '')]));
+
+function mcpValidate(o, body, current) {
+  const name = body.name ?? current?.name;
+  if (!/^[\w-]{1,40}$/.test(String(name || ''))) throw new HttpError(400, 'nome do servidor: só letras, números, _ e - (até 40)');
+  if (o.state.mcpServers.some((s) => s.name === name && s !== current)) throw new HttpError(400, `já existe um servidor "${name}"`);
+  const type = body.type ?? current?.type;
+  if (!MCP_TYPES.includes(type)) throw new HttpError(400, 'tipo inválido (http, sse ou stdio)');
+  if (body.projects !== undefined && body.projects !== 'all' &&
+    !(Array.isArray(body.projects) && body.projects.every((id) => o.state.projects.some((p) => p.id === id)))) {
+    throw new HttpError(400, 'lista de mesas inválida');
+  }
+}
+
+// segredos: valor mascarado ("••••") = manter o que já estava guardado
+function mergeSecretMap(next, old = {}) {
+  const out = {};
+  for (const [k, v] of Object.entries(strMap(next))) out[k] = isMask(v) ? old[k] : secrets.encrypt(v);
+  return Object.fromEntries(Object.entries(out).filter(([, v]) => v));
+}
+
+function mcpCreate(o, body) {
+  mcpValidate(o, body, null);
+  const s = {
+    id: 'm' + token(6), name: body.name, type: body.type, enabled: body.enabled !== false,
+    projects: body.projects || 'all', createdAt: Date.now(),
+  };
+  if (s.type === 'stdio') {
+    if (!String(body.command || '').trim()) throw new HttpError(400, 'informe o comando do servidor');
+    Object.assign(s, { command: String(body.command).trim(), args: [].concat(body.args || []).map(String), env: mergeSecretMap(body.env) });
+  } else {
+    if (!/^https?:\/\//i.test(String(body.url || ''))) throw new HttpError(400, 'informe a URL do servidor (http:// ou https://)');
+    Object.assign(s, { url: secrets.encrypt(String(body.url).trim()), headers: mergeSecretMap(body.headers) });
+  }
+  o.state.mcpServers.push(s);
+  return s;
+}
+
+async function mcpApi(req, res, o, id, action, method, body) {
+  if (!id && method === 'GET') return send(res, 200, o.mcpPublic());
+  if (!id && method === 'POST') {
+    mcpCreate(o, body);
+    o.save();
+    return send(res, 201, { ok: true });
+  }
+  const s = o.state.mcpServers.find((x) => x.id === id);
+  if (!s) return send(res, 404, { error: 'servidor não encontrado' });
+
+  if (action === 'test' && method === 'POST') {
+    // liga o servidor no PC escolhido e lista as ferramentas (sem gastar uso do plano)
+    const result = await o.connectors.rpc(o.needEnv(req), 'mcp-test', { name: s.name, config: o.mcpConfig(s) }, 60000);
+    s.lastTest = { status: result.status, error: result.error || null, tools: result.tools.length, at: Date.now() };
+    o.save();
+    return send(res, 200, result);
+  }
+  if (method === 'PATCH') {
+    mcpValidate(o, body, s);
+    if (body.name !== undefined) s.name = body.name;
+    if (body.type !== undefined) s.type = body.type;
+    if (body.enabled !== undefined) s.enabled = !!body.enabled;
+    if (body.projects !== undefined) s.projects = body.projects;
+    if (s.type === 'stdio') {
+      if (body.command !== undefined) s.command = String(body.command).trim();
+      if (body.args !== undefined) s.args = [].concat(body.args).map(String);
+      if (body.env !== undefined) s.env = mergeSecretMap(body.env, s.env);
+      delete s.url;
+      delete s.headers;
+    } else {
+      if (body.url !== undefined && !isMask(body.url)) {
+        if (!/^https?:\/\//i.test(String(body.url))) throw new HttpError(400, 'URL inválida');
+        s.url = secrets.encrypt(String(body.url).trim());
+      }
+      if (body.headers !== undefined) s.headers = mergeSecretMap(body.headers, s.headers);
+      delete s.command;
+      delete s.args;
+      delete s.env;
+    }
+    delete s.lastTest;
+    o.save();
+    return send(res, 200, { ok: true });
+  }
+  if (method === 'DELETE') {
+    o.state.mcpServers = o.state.mcpServers.filter((x) => x !== s);
+    o.save();
+    return send(res, 204, {});
+  }
+  send(res, 405, { error: 'método não permitido' });
+}
+
 async function officeApi(req, res, url, o, user) {
   const [, , resource, id, action] = url.pathname.split('/');
   const method = req.method;
@@ -408,6 +504,7 @@ async function officeApi(req, res, url, o, user) {
     const brief = (folder) => ({
       id, name: project.name, description: project.description, folder,
       model: agent?.model || '', effort: agent?.effort || '', permissionMode: project.permissionMode || '',
+      mcpServers: o.mcpFor(id), // servidores MCP do hub para esta mesa (segredos abertos, só para o conector)
     });
 
     if (action === 'chat' && method === 'GET') return send(res, 200, chat);
@@ -487,6 +584,44 @@ async function officeApi(req, res, url, o, user) {
     const oldSession = chats.reset(id);
     if (oldSession) await sessions.delete({ sessionId: oldSession });
     return send(res, 200, { ok: true });
+  }
+
+  // ---------- Servidores MCP do escritório ----------
+  if (resource === 'mcp') return mcpApi(req, res, o, id, action, method, body);
+  if (resource === 'mcp-scan' && method === 'POST') {
+    // procura no PC escolhido os MCPs que o Claude Code de lá já conhece
+    const envId = o.needEnv(req);
+    const folders = state.projects.map((p) => p.folders?.[envId]).filter(Boolean);
+    const items = await connectors.rpc(envId, 'mcp-scan', { folders }, 30000);
+    const scanId = token(8);
+    mcpScans.set(scanId, { officeId: o.id, items, exp: Date.now() + 10 * 60000 });
+    const names = new Set(state.mcpServers.map((s) => s.name));
+    return send(res, 200, {
+      scanId,
+      items: items.map((it, i) => ({
+        i, name: it.name, source: it.source, type: it.config.command ? 'stdio' : it.config.type || 'http',
+        target: it.config.command ? [it.config.command, ...(it.config.args || [])].join(' ') : mask(it.config.url),
+        exists: names.has(it.name),
+      })),
+    });
+  }
+  if (resource === 'mcp-import' && method === 'POST') {
+    const scan = mcpScans.get(body.scanId);
+    if (!scan || scan.officeId !== o.id || scan.exp < Date.now()) return send(res, 400, { error: 'busca expirada; procure de novo' });
+    const created = [];
+    for (const i of [].concat(body.picks || [])) {
+      const it = scan.items[i];
+      if (!it) continue;
+      let name = String(it.name).replace(/[^\w-]/g, '_').slice(0, 40);
+      while (state.mcpServers.some((s) => s.name === name)) name += '_2';
+      const c = it.config;
+      created.push(mcpCreate(o, {
+        name, type: c.command ? 'stdio' : c.type === 'sse' ? 'sse' : 'http',
+        url: c.url, command: c.command, args: c.args, headers: c.headers, env: c.env, projects: 'all',
+      }));
+    }
+    o.save();
+    return send(res, 201, { created: created.length });
   }
 
   if (FIELDS[resource]) {

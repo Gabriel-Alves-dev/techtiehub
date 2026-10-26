@@ -189,6 +189,8 @@ class Runner {
           // perguntas de decisão (AskUserQuestion) continuam chegando ao usuário em qualquer modo
           permissionMode: project.permissionMode || 'default',
           allowDangerouslySkipPermissions: project.permissionMode === 'bypassPermissions',
+          // servidores MCP configurados no hub para esta mesa (somam-se aos do Claude Code do PC)
+          mcpServers: project.mcpServers && Object.keys(project.mcpServers).length ? project.mcpServers : undefined,
           abortController: run.abort,
           canUseTool: (name, input, opts) => this.ask(project.id, run, name, input, opts),
         },

@@ -232,6 +232,12 @@ O fluxo de um pedido:
 
 **Modo de permissão (por mesa).** `project.permissionMode` (`''`, `acceptEdits`, `auto`, `bypassPermissions`) vai no `run` e vira `permissionMode` do SDK (`'default'` quando vazio; `bypassPermissions` exige `allowDangerouslySkipPermissions`). O `AskUserQuestion` sempre passa pelo `canUseTool`, em qualquer modo (testado), então as perguntas de decisão continuam chegando. Como o SDK só aplica o modo no início, uma troca no meio do pedido vai ao conector (`set-mode`), e o runner passa a aprovar sozinho o que o novo modo libera (`autoAllowed`), inclusive o pedido em aberto.
 
+**Servidores MCP do hub.** Ficam em `state.mcpServers` do escritório. A URL, os cabeçalhos e as variáveis de ambiente são criptografados com AES-256-GCM (`secrets.js`, chave `HUB_SECRET_KEY` ou `data/secret.key`). A API devolve sempre mascarado (`mcpPublic`), e um valor "••••" no PATCH significa manter o atual.
+
+- **No pedido:** o comando `run` leva `mcpServers` da mesa (`mcpFor`: ligados e que valem para ela), já abertos, e o runner passa ao SDK. Eles se somam aos MCPs que o Claude Code do PC já tiver.
+- **Testar** (`mcp-test`, `mcp-local.js`): abre uma `query` em modo streaming que nunca envia mensagem, consulta `mcpServerStatus()` e fecha. Não há chamada ao modelo.
+- **Importar** (`mcp-scan`): o conector lê `~/.claude.json` (usuário e projetos) e os `.mcp.json` das pastas das mesas. O resultado, com segredos, fica só na memória do hub por 10 min (`mcpScans`), e o navegador recebe a versão mascarada e escolhe pelo índice.
+
 **Imagens.** O navegador reduz a imagem (lado maior até 1568 px; PNG, ou JPEG se ficar grande) e manda em base64 no `POST …/chat`. O hub valida tipo, quantidade (até 6) e tamanho (5 MB cada) e guarda em `uploads/`, para o histórico (a entrada da conversa leva `images: [nomes]`, servidos em `/api/files/:nome`). Depois repassa as imagens no comando `run`. O runner manda o pedido como mensagem da API do Claude (`prompt` iterável com blocos `image` + `text`).
 
 **Modelo e fase.** O hub manda `model` e `effort` do agente da mesa no comando `run` (vazio = padrão do Claude Code do PC). O runner guarda o modelo real informado no `system/init` (`lastModel`) e acompanha a **fase**: `thinking` depois do pedido e de cada resposta de ferramenta, e `tool` enquanto espera uma ferramenta. Ela segue no `live` com `age` (ms). O hub converte em `since` no relógio dele e manda `now` no estado, para o navegador acertar o cronômetro (`renderActivity`) mesmo com relógios diferentes.

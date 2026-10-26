@@ -1312,6 +1312,174 @@ async function refreshGit(win) {
   if (p && wins.has(win.key)) renderBanner(win, p);
 }
 
+// ---------- Janela de servidores MCP ----------
+// Os servidores ficam no hub (segredos criptografados) e vão para os agentes de qualquer PC.
+// A lista não vem no estado do escritório (tem dados sensíveis): é buscada ao abrir.
+const MCP_STATUS = {
+  connected: '✓ conectado',
+  failed: '✗ falhou',
+  'needs-auth': '🔑 precisa de login (OAuth) no PC',
+  disabled: 'desligado',
+  pending: '… sem resposta',
+};
+
+function openMcpWindow() {
+  const win = openWindow('mcp', { w: 580, h: 620, cls: 'win-mcp' }, (win) => {
+    win.titleEl.textContent = '🔌 Servidores MCP';
+  });
+  loadMcp(win);
+}
+
+async function loadMcp(win) {
+  win.mcp = await api('GET', '/api/mcp');
+  renderMcp(win);
+}
+
+const projectName = (id) => state.projects.find((p) => p.id === id)?.name || '(mesa removida)';
+
+function renderMcp(win) {
+  const list = win.mcp || [];
+  win.body.innerHTML = `
+    <p class="muted">Servidores MCP dão ferramentas extras aos agentes (Bitrix, bancos de dados, APIs…). Configurados aqui,
+      funcionam em <b>qualquer PC conectado</b>, sem <code>.mcp.json</code> na pasta. URLs, tokens e variáveis ficam criptografados no hub.</p>
+    <div class="row">
+      <button class="primary" data-act="add">+ Adicionar</button>
+      <button data-act="scan" title="Procura os MCPs que o Claude Code do PC em uso já conhece">Importar do PC${state.env ? ' ' + esc(state.env.name) : ''}</button>
+    </div>
+    <div class="mcp-scan"></div>
+    <h3>Servidores</h3>
+    ${list.map((s) => `<div class="card mcp-card" data-id="${s.id}">
+      <div class="title"><i class="dot" style="background:${!s.enabled ? 'var(--muted)' : s.lastTest?.status === 'connected' ? 'var(--ok)' : s.lastTest ? 'var(--bad)' : 'var(--line)'}"></i>
+        ${esc(s.name)} <span class="mcp-type">${s.type === 'stdio' ? 'programa' : s.type.toUpperCase()}</span>
+        ${s.enabled ? '' : '<span class="muted">(desligado)</span>'}</div>
+      <div class="sub mono">${esc(s.type === 'stdio' ? [s.command, ...s.args].join(' ') : s.url)}</div>
+      <div class="sub">Mesas: ${s.projects === 'all' ? 'todas' : esc(s.projects.map(projectName).join(', ') || 'nenhuma')}</div>
+      ${s.lastTest ? `<div class="sub">Último teste: ${MCP_STATUS[s.lastTest.status] || esc(s.lastTest.status)}${s.lastTest.status === 'connected' ? ` · ${s.lastTest.tools} ferramentas` : ''} · ${timeAgo(s.lastTest.at)}</div>` : ''}
+      <div class="mcp-test-result"></div>
+      <div class="row">
+        <button data-act="test">Testar</button><button data-act="edit">Editar</button>
+        <button data-act="toggle">${s.enabled ? 'Desligar' : 'Ligar'}</button><button class="danger" data-act="del">Remover</button>
+      </div>
+    </div>`).join('') || '<p class="muted">Nenhum servidor ainda. Adicione ou importe do PC.</p>'}`;
+
+  win.body.querySelector('[data-act=add]').onclick = () => openMcpDialog(win);
+  win.body.querySelector('[data-act=scan]').onclick = () => scanMcp(win);
+  win.body.querySelectorAll('.mcp-card').forEach((card) => {
+    const s = list.find((x) => x.id === card.dataset.id);
+    const on = (act, fn) => (card.querySelector(`[data-act=${act}]`).onclick = fn);
+    on('edit', () => openMcpDialog(win, s));
+    on('toggle', async () => { await api('PATCH', `/api/mcp/${s.id}`, { enabled: !s.enabled }); loadMcp(win); });
+    on('del', async () => {
+      if (!confirm(`Remover o servidor "${s.name}"? Os agentes perdem acesso às ferramentas dele.`)) return;
+      await api('DELETE', `/api/mcp/${s.id}`);
+      loadMcp(win);
+    });
+    on('test', async (e) => {
+      const out = card.querySelector('.mcp-test-result');
+      e.target.disabled = true;
+      out.innerHTML = `<p class="muted">Ligando o servidor no PC ${esc(state.env?.name || '')}…</p>`;
+      try {
+        const r = await api('POST', `/api/mcp/${s.id}/test`, {}, { quiet: true });
+        out.innerHTML = `<p><b>${MCP_STATUS[r.status] || esc(r.status)}</b>${r.error ? ` <span class="muted">— ${esc(r.error)}</span>` : ''}</p>
+          ${r.tools.length ? `<div class="mcp-tools">${r.tools.map((t) => `<code title="${esc(t.description)}">${esc(t.name)}</code>`).join(' ')}</div>` : ''}`;
+        setTimeout(() => loadMcp(win), 4000); // atualiza o "último teste"
+      } catch (err) {
+        out.innerHTML = `<p class="login-error">${esc(err.message)}</p>`;
+      } finally {
+        e.target.disabled = false;
+      }
+    });
+  });
+}
+
+async function scanMcp(win) {
+  const box = win.body.querySelector('.mcp-scan');
+  box.innerHTML = `<p class="muted">Procurando no PC ${esc(state.env?.name || '')}…</p>`;
+  let r;
+  try {
+    r = await api('POST', '/api/mcp-scan', {}, { quiet: true });
+  } catch (err) {
+    box.innerHTML = `<p class="login-error">${esc(err.message)}</p>`;
+    return;
+  }
+  if (!r.items.length) {
+    box.innerHTML = '<p class="muted">Nenhum MCP encontrado nas configurações do Claude Code deste PC nem nos .mcp.json das pastas das mesas.</p>';
+    return;
+  }
+  box.innerHTML = `<div class="pending">
+    <div class="pending-title">Encontrados no PC</div>
+    ${r.items.map((it) => `<label class="option"><input type="checkbox" value="${it.i}" ${it.exists ? '' : 'checked'} />
+      <span><b>${esc(it.name)}</b> <span class="mcp-type">${it.type === 'stdio' ? 'programa' : it.type.toUpperCase()}</span>
+      ${it.exists ? '<span class="muted">(já existe um com esse nome)</span>' : ''}<br>
+      <span class="muted">${esc(it.source)} · ${esc(it.target || '')}</span></span></label>`).join('')}
+    <div class="row"><button class="primary" data-act="import">Importar selecionados</button><button data-act="cancel">Cancelar</button></div>
+  </div>`;
+  box.querySelector('[data-act=cancel]').onclick = () => (box.innerHTML = '');
+  box.querySelector('[data-act=import]').onclick = async () => {
+    const picks = [...box.querySelectorAll('input:checked')].map((i) => +i.value);
+    if (!picks.length) return;
+    await api('POST', '/api/mcp-import', { scanId: r.scanId, picks });
+    loadMcp(win);
+  };
+}
+
+// "Nome: valor" por linha <-> objeto (cabeçalhos); "NOME=valor" por linha <-> objeto (variáveis)
+const toLines = (obj, sep) => Object.entries(obj || {}).map(([k, v]) => `${k}${sep}${v}`).join('\n');
+const fromLines = (text, sep) => Object.fromEntries(String(text || '').split('\n').map((l) => l.trim()).filter(Boolean)
+  .map((l) => { const i = l.indexOf(sep); return i < 0 ? [l, ''] : [l.slice(0, i).trim(), l.slice(i + 1).trim()]; }));
+
+function openMcpDialog(win, s) {
+  const type = s?.type || 'http';
+  const projects = s?.projects || 'all';
+  openDialog(`
+    <h2>${s ? 'Editar servidor MCP' : 'Novo servidor MCP'}</h2>
+    <label>Nome (aparece nas ferramentas como mcp__nome__…)<input name="name" required maxlength="40" pattern="[A-Za-z0-9_\\-]+" value="${esc(s?.name || '')}" placeholder="bitrix" /></label>
+    <label>Tipo<select name="type">
+      <option value="http" ${type === 'http' ? 'selected' : ''}>HTTP (endereço na internet)</option>
+      <option value="sse" ${type === 'sse' ? 'selected' : ''}>SSE (endereço na internet, formato antigo)</option>
+      <option value="stdio" ${type === 'stdio' ? 'selected' : ''}>Programa no PC (comando)</option>
+    </select></label>
+    <div class="only-net">
+      <label>URL<input name="url" value="${esc(s?.url || '')}" placeholder="https://…" /></label>
+      <label>Cabeçalhos (um por linha: <code>Nome: valor</code>)<textarea name="headers" rows="3" placeholder="Authorization: Bearer …">${esc(toLines(s?.headers, ': '))}</textarea></label>
+    </div>
+    <div class="only-stdio">
+      <label>Comando<input name="command" value="${esc(s?.command || '')}" placeholder="npx" /></label>
+      <label>Argumentos (um por linha)<textarea name="args" rows="3" placeholder="-y&#10;nome-do-pacote-mcp">${esc((s?.args || []).join('\n'))}</textarea></label>
+      <label>Variáveis de ambiente (uma por linha: <code>NOME=valor</code>)<textarea name="env" rows="3" placeholder="API_TOKEN=…">${esc(toLines(s?.env, '='))}</textarea></label>
+      <p class="muted dialog-hint">O comando roda no PC que executa o pedido: ele precisa existir lá (ex.: Node.js para <code>npx</code>).</p>
+    </div>
+    <fieldset class="areas"><legend>Mesas que usam este servidor</legend>
+      <label class="option"><input type="radio" name="scope" value="all" ${projects === 'all' ? 'checked' : ''} /><span>Todas as mesas</span></label>
+      <label class="option"><input type="radio" name="scope" value="some" ${projects === 'all' ? '' : 'checked'} /><span>Só estas:</span></label>
+      <div class="mcp-projects">${state.projects.map((p) => `<label class="option"><input type="checkbox" name="proj" value="${p.id}"
+        ${projects !== 'all' && projects.includes(p.id) ? 'checked' : ''} /><span>${esc(p.name)}</span></label>`).join('')}</div>
+    </fieldset>
+    ${s ? '<p class="muted dialog-hint">Valores com •••• estão guardados e não aparecem por segurança: deixe como está para manter, ou apague e digite um novo.</p>' : ''}
+  `, async (d) => {
+    const body = { name: d.name.trim(), type: d.type };
+    if (d.type === 'stdio') Object.assign(body, { command: d.command, args: d.args.split('\n').map((a) => a.trim()).filter(Boolean), env: fromLines(d.env, '=') });
+    else Object.assign(body, { url: d.url.trim(), headers: fromLines(d.headers, ':') });
+    body.projects = d.scope === 'all' ? 'all' : [...form.querySelectorAll('input[name=proj]:checked')].map((i) => i.value);
+    try {
+      if (s) await api('PATCH', `/api/mcp/${s.id}`, body, { quiet: true });
+      else await api('POST', '/api/mcp', body, { quiet: true });
+      loadMcp(win);
+    } catch (e) {
+      alert(e.message);
+    }
+  }, s && { label: 'Remover', confirm: `Remover o servidor "${s.name}"?`, action: async () => { await api('DELETE', `/api/mcp/${s.id}`); loadMcp(win); } });
+  const sync = () => {
+    const stdio = form.elements.type.value === 'stdio';
+    form.querySelector('.only-net').hidden = stdio;
+    form.querySelector('.only-stdio').hidden = !stdio;
+    form.elements.url.required = !stdio;
+    form.elements.command.required = stdio;
+  };
+  form.elements.type.onchange = sync;
+  sync();
+}
+
 // ---------- Janela de memória do agente ----------
 function openMemoryWindow(projectId) {
   const p = state.projects.find((x) => x.id === projectId);
@@ -1819,6 +1987,7 @@ document.getElementById('btn-team').onclick = () => openTeamWindow();
 document.getElementById('btn-log').onclick = () => openLogWindow();
 document.getElementById('btn-env').onclick = () => openEnvWindow();
 document.getElementById('btn-account').onclick = () => openAccountWindow();
+document.getElementById('btn-mcp').onclick = () => openMcpWindow();
 
 // ---------- Início ----------
 boot();

@@ -36,6 +36,7 @@ A propagação costuma levar alguns minutos. Confira com `nslookup hub.techtie.d
    | Variável | Valor | Para quê |
    |---|---|---|
    | `HUB_PUBLIC_URL` | `https://hub.techtie.digital` | Endereço mostrado no comando de parear PCs; cookie `Secure` |
+   | `HUB_SECRET_KEY` | uma frase longa e aleatória sua | **Recomendado.** Chave que criptografa os segredos dos servidores MCP (tokens, URLs). Fica fora do volume de dados, então um backup vazado não revela os tokens. Defina **antes** de cadastrar MCPs: trocar a chave depois faz os segredos guardados precisarem ser digitados de novo |
    | `HUB_SETUP_CODE` | um código seu, ex.: `ABCD-1234` | Opcional. Código para criar a primeira conta. Se não definir, o hub gera um e mostra nos **Logs** |
 
    O `Dockerfile` já define `HUB_HOST=0.0.0.0`, `HUB_SEM_CONECTOR=1`, `HUB_TRUST_PROXY=1` e `HUB_DATA=/data/state.json`.

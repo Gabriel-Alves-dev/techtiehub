@@ -7,6 +7,7 @@ const { ChatStore } = require('./chats');
 const { Connectors } = require('./connectors');
 const { FileSessionStore } = require('./session-store');
 const { describeTool } = require('./describe');
+const { mask } = require('./secrets');
 
 const STATUSES = ['trabalhando', 'ocioso', 'bloqueado', 'concluido'];
 const FLOORS = ['madeira', 'carpete', 'piso', 'escuro'];
@@ -39,8 +40,9 @@ class HttpError extends Error {
 class Office {
   // legacyEnvId: PC do modo local, para migrar dados antigos de pasta única
   // connectorVersion: versão atual do conector (para a interface apontar PCs desatualizados)
-  constructor(id, dir, { legacyEnvId, connectorVersion } = {}) {
-    Object.assign(this, { id, dir, legacyEnvId, connectorVersion });
+  // secrets: criptografia dos tokens/URLs dos servidores MCP (secrets.js)
+  constructor(id, dir, { legacyEnvId, connectorVersion, secrets } = {}) {
+    Object.assign(this, { id, dir, legacyEnvId, connectorVersion, secrets });
     this.file = path.join(dir, 'state.json');
     this.state = this.load();
     this.browsers = new Set();
@@ -71,6 +73,7 @@ class Office {
       delete p.folder;
     }
     s.environments ??= {};
+    s.mcpServers ??= [];
     return s;
   }
 
@@ -242,6 +245,41 @@ class Office {
     // não lota o histórico com cada ferramenta
     this.setStatus(project.id, status, message, !(ev.event === 'PreToolUse' && agent.status === 'trabalhando'));
     return { agent: agent.name, status };
+  }
+
+  // ---------- Servidores MCP ----------
+  // Guardados com URL, cabeçalhos e variáveis criptografados. Cada servidor vale para todas as
+  // mesas (projects: 'all') ou para uma lista de mesas; enabled liga/desliga sem apagar.
+
+  // Versão para a tela: segredos mascarados.
+  mcpPublic() {
+    const secret = (v) => mask(this.secrets.decrypt(v));
+    return this.state.mcpServers.map((s) => ({
+      id: s.id, name: s.name, type: s.type, enabled: s.enabled !== false, projects: s.projects || 'all',
+      url: s.url ? secret(s.url) : undefined,
+      command: s.command, args: s.args || [],
+      headers: Object.fromEntries(Object.entries(s.headers || {}).map(([k, v]) => [k, secret(v)])),
+      env: Object.fromEntries(Object.entries(s.env || {}).map(([k, v]) => [k, secret(v)])),
+      lastTest: s.lastTest || null,
+    }));
+  }
+
+  // Configuração pronta para o Claude Agent SDK (segredos abertos) — só vai para o conector.
+  mcpConfig(server) {
+    const open = (map) => Object.fromEntries(Object.entries(map || {}).map(([k, v]) => [k, this.secrets.decrypt(v)]));
+    if (server.type === 'stdio') return { type: 'stdio', command: server.command, args: server.args || [], env: open(server.env) };
+    return { type: server.type, url: this.secrets.decrypt(server.url), headers: open(server.headers) };
+  }
+
+  // MCPs que valem para uma mesa: { nome: configuração }
+  mcpFor(projectId) {
+    const out = {};
+    for (const s of this.state.mcpServers) {
+      if (s.enabled === false) continue;
+      if (s.projects && s.projects !== 'all' && !s.projects.includes(projectId)) continue;
+      out[s.name] = this.mcpConfig(s);
+    }
+    return out;
   }
 
   // ---------- Imagens dos pedidos (data/offices/<id>/uploads/) ----------
