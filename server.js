@@ -224,7 +224,7 @@ async function connectorApi(req, res, url, op, sub) {
   if (op === 'event') {
     const { type, projectId } = body;
     if (!o.state.projects.some((p) => p.id === projectId)) return send(res, 200, { ignored: true });
-    if (type === 'chat-push') o.chats.push(projectId, body.role, body.text);
+    if (type === 'chat-push') o.chats.push(projectId, body.role, body.text, [].concat(body.images || []).filter((n) => o.hasUpload(n)));
     else if (type === 'chat-update') o.chats.update(projectId, body.fields || {});
     else if (type === 'status') o.setStatus(projectId, body.status, body.message, body.log);
     else if (type === 'live') {
@@ -253,6 +253,10 @@ async function connectorApi(req, res, url, op, sub) {
 
 // ---------- Rotas do navegador (escritório da conta logada) ----------
 const newId = (prefix) => prefix + token(6);
+
+// imagens aceitas nos pedidos (as mesmas da API do Claude) → extensão do arquivo guardado
+const IMAGE_TYPES = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp' };
+const MAX_IMAGES = 6;
 
 function pick(obj, fields) {
   const out = {};
@@ -302,6 +306,15 @@ async function officeApi(req, res, url, o, user) {
   const { state, live, chats, sessions, connectors } = o;
 
   if (resource === 'state' && method === 'GET') return send(res, 200, o.snapshot());
+
+  // imagens da conversa (só do escritório da conta logada)
+  if (resource === 'files' && method === 'GET') {
+    const file = o.uploadPath(id);
+    if (!file) return send(res, 404, { error: 'não encontrado' });
+    const type = Object.entries(IMAGE_TYPES).find(([, ext]) => file.endsWith(ext))?.[0] || 'application/octet-stream';
+    res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'private, max-age=31536000, immutable' });
+    return fs.createReadStream(file).pipe(res);
+  }
   if (resource === 'events' && method === 'GET') return o.attachBrowser(req, res);
 
   if (resource === 'export' && method === 'GET') {
@@ -403,11 +416,20 @@ async function officeApi(req, res, url, o, user) {
       if (live[id]) return send(res, 409, { error: 'o agente ainda está trabalhando nesta mesa' });
       const folder = project.folders[envId];
       if (!folder) return send(res, 400, { error: `defina a pasta desta mesa no PC "${o.envName(envId)}" em ⚙ Mesa` });
-      const text = String(body.message || '').trim();
+      // imagens coladas/anexadas: [{ mediaType, data (base64) }] — limites da API do Claude
+      const images = [].concat(body.images || []);
+      if (images.length > MAX_IMAGES) return send(res, 400, { error: `no máximo ${MAX_IMAGES} imagens por pedido` });
+      for (const img of images) {
+        if (!IMAGE_TYPES[img?.mediaType] || typeof img.data !== 'string') return send(res, 400, { error: 'formato de imagem não suportado (use PNG, JPEG, GIF ou WebP)' });
+        if (Buffer.byteLength(img.data, 'base64') > 5 * 1024 * 1024) return send(res, 400, { error: 'imagem grande demais (máximo 5 MB cada)' });
+      }
+      const text = String(body.message || '').trim() || (images.length ? 'Veja a imagem anexada.' : '');
       if (!text) return send(res, 400, { error: 'mensagem vazia' });
+      // guardadas no escritório para aparecerem no histórico da conversa
+      const imageRefs = images.map((img) => o.saveUpload(Buffer.from(img.data, 'base64'), IMAGE_TYPES[img.mediaType]));
       live[id] = { running: true, pending: null, envId }; // reserva a mesa até o conector confirmar
       try {
-        await connectors.rpc(envId, 'run', { project: brief(folder), text, chat });
+        await connectors.rpc(envId, 'run', { project: brief(folder), text, chat, images, imageRefs }, 60000);
       } catch (e) {
         delete live[id];
         o.broadcast(null, o.snapshot());

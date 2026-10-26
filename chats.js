@@ -34,9 +34,11 @@ class ChatStore {
     fs.writeFileSync(path.join(this.dir, projectId + '.json'), JSON.stringify(this.get(projectId)));
   }
 
-  push(projectId, role, text) {
+  // images: nomes de arquivos já guardados no escritório (ver Office.saveUpload)
+  push(projectId, role, text, images) {
     const chat = this.get(projectId);
     const entry = { t: Date.now(), role, text: String(text) };
+    if (images?.length) entry.images = images;
     chat.entries.push(entry);
     if (chat.entries.length > MAX_ENTRIES) chat.entries.splice(0, chat.entries.length - MAX_ENTRIES);
     this.save(projectId);

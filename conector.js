@@ -83,7 +83,7 @@ function start({ hub, token, envFile = ENV_FILE, log = console.log }) {
     store,
     describeTool,
     hub: {
-      push: (projectId, role, text) => emit('chat-push', { projectId, role, text }),
+      push: (projectId, role, text, images) => emit('chat-push', { projectId, role, text, images }),
       update: (projectId, fields) => emit('chat-update', { projectId, fields }),
       status: (projectId, status, message, logIt) => emit('status', { projectId, status, message, log: logIt }),
       live: (projectId, live) => emit('live', { projectId, live }),
@@ -91,9 +91,9 @@ function start({ hub, token, envFile = ENV_FILE, log = console.log }) {
   });
 
   const handlers = {
-    run: ({ project, text, chat }) => {
+    run: ({ project, text, chat, images, imageRefs }) => {
       if (!ops.isDir(project.folder)) throw new Error(`a pasta ${project.folder} não existe neste PC`);
-      return runner.send(project, text, chat);
+      return runner.send(project, text, chat, { images, imageRefs });
     },
     answer: ({ projectId, ...body }) => runner.answer(projectId, body),
     stop: ({ projectId }) => runner.stop(projectId),

@@ -74,6 +74,7 @@ No Windows, você também pode dar dois cliques em **`iniciar.bat`**. Ele instal
 
 Na janela de uma mesa:
 
+- **Imagens.** Cole um print com **Ctrl+V** na caixa de texto, arraste uma imagem para a janela ou use **📎**. Até 6 por pedido (PNG, JPEG, GIF ou WebP); imagens grandes são reduzidas antes de enviar. Ficam no histórico da conversa.
 - **Enviar.** Enter envia e Shift+Enter quebra a linha. Cada mesa executa uma tarefa por vez, mas mesas diferentes trabalham em paralelo.
 - **Pedido de permissão.** Mostra o comando ou o arquivo envolvido.
   - **Permitir** libera só essa vez.
@@ -197,7 +198,8 @@ O hub escuta só em `127.0.0.1:4321` (variáveis `PORT` e `HUB_HOST`). As rotas 
 | `GET /api/connectors` · `DELETE /api/connectors/:id` | PCs pareados com a conta; remover um PC |
 | `GET /api/export` · `POST /api/import` | Exporta/importa o escritório inteiro (estado, conversas e sessões) |
 | `/api/connector/*` | Canal dos conectores: `pair` (código → token) e, com o token, stream de comandos, respostas, eventos e sessões |
-| `POST /api/projects/:id/chat` | Envia um pedido ao agente da mesa: `{ message }` |
+| `POST /api/projects/:id/chat` | Envia um pedido ao agente da mesa: `{ message, images?: [{ mediaType, data (base64) }] }` |
+| `GET /api/files/:nome` | Imagem anexada a uma conversa (só do escritório da conta logada) |
 | `POST /api/projects/:id/answer` | Responde o pedido pendente: `{ requestId, decision: "allow" \| "always" \| "deny" }` ou `{ requestId, answers: [...] }` |
 | `POST /api/projects/:id/stop` | Interrompe o agente |
 | `POST /api/projects/:id/reset` | Começa uma conversa nova (antes, guarda um resumo na memória) |
@@ -251,6 +253,7 @@ techtiehub/
     └── offices/<id>/  # Um escritório por conta
         ├── state.json      # Salas, mesas, agentes e histórico
         ├── chats/<id>.json # Conversa, memória e último commit de cada mesa
+        ├── uploads/        # Imagens anexadas aos pedidos
         └── sessions/       # Sessões completas do Claude (uma por conversa)
 ```
 

@@ -30,9 +30,9 @@ class Runner {
   }
 
   // ---------- Conversa (cópia local + avisos ao hub) ----------
-  push(projectId, role, text) {
-    this.chats.get(projectId)?.entries.push({ t: Date.now(), role, text });
-    this.hub.push(projectId, role, text);
+  push(projectId, role, text, images) {
+    this.chats.get(projectId)?.entries.push({ t: Date.now(), role, text, ...(images?.length && { images }) });
+    this.hub.push(projectId, role, text, images);
   }
 
   update(projectId, fields) {
@@ -86,13 +86,14 @@ class Runner {
   // ---------- Execução ----------
   // project.folder = pasta da mesa NESTE PC; chat = conversa atual (vinda do hub).
   // Devolve logo: o andamento chega ao hub pelos eventos.
-  send(project, text, chat) {
+  // attachments: { images: [{ mediaType, data }] (base64), imageRefs: nomes guardados no hub }
+  send(project, text, chat, { images = [], imageRefs = [] } = {}) {
     if (this.isRunning(project.id)) throw new Error('o agente ainda está trabalhando nesta mesa');
     chat = { entries: [], ...chat };
     this.chats.set(project.id, chat);
     const run = { running: true, pending: null, abort: new AbortController(), phase: { kind: 'thinking', since: Date.now() } };
     this.runs.set(project.id, run);
-    this.push(project.id, 'user', text);
+    this.push(project.id, 'user', text, imageRefs);
     this.hub.status(project.id, 'trabalhando', text, true);
     this.emitLive(project.id);
 
@@ -112,13 +113,13 @@ class Runner {
             `antes nesta conversa podem não valer mais — use a pasta atual. O código pode ter mudado desde a última vez.\n\n${text}`;
         }
 
-        let ok = await this.runQuery(project, prompt, run);
+        let ok = await this.runQuery(project, prompt, run, images);
         if (ok === 'resume-failed') {
           // plano B: sessão nova, com a memória atualizada a partir do histórico
           this.push(project.id, 'system', 'Não consegui retomar a sessão completa — continuando com a memória do agente.');
           await this.refreshMemory(project, chat).then((m) => this.update(project.id, m)).catch(() => {});
           this.update(project.id, { sessionId: null });
-          ok = await this.runQuery(project, text, run);
+          ok = await this.runQuery(project, text, run, images);
         }
         if (ok === true) {
           this.update(project.id, {
@@ -146,7 +147,7 @@ class Runner {
 
   // Uma rodada do Claude. Devolve true (sucesso), false (terminou com erro)
   // ou 'resume-failed' (a sessão salva não pôde ser retomada).
-  async runQuery(project, prompt, run) {
+  async runQuery(project, prompt, run, images = []) {
     const { query } = await loadSdk();
     const chat = this.chats.get(project.id);
     const resuming = !!chat.sessionId;
@@ -154,7 +155,20 @@ class Runner {
     let started = false, success = false;
     try {
       const q = query({
-        prompt,
+        // com imagens, o pedido vai como mensagem da API do Claude: blocos de imagem + o texto
+        prompt: images.length ? (async function* () {
+          yield {
+            type: 'user',
+            parent_tool_use_id: null,
+            message: {
+              role: 'user',
+              content: [
+                ...images.map((img) => ({ type: 'image', source: { type: 'base64', media_type: img.mediaType, data: img.data } })),
+                { type: 'text', text: prompt },
+              ],
+            },
+          };
+        })() : prompt,
         options: {
           cwd: project.folder,
           resume: chat.sessionId || undefined,
@@ -300,7 +314,7 @@ class Runner {
     const fresh = (chat.entries || []).filter((e) => e.t > (chat.memoryAt || 0));
     if (!fresh.length) return { memory: chat.memory || '', memoryAt: chat.memoryAt || null };
     const label = { user: 'Usuário', assistant: 'Agente', tool: 'Ação', system: 'Hub' };
-    const convo = fresh.map((e) => `${label[e.role] || e.role}: ${clip(e.text, e.role === 'tool' ? 150 : 1500)}`)
+    const convo = fresh.map((e) => `${label[e.role] || e.role}: ${clip(e.text, e.role === 'tool' ? 150 : 1500)}${e.images?.length ? ` [${e.images.length} imagem(ns) anexada(s)]` : ''}`)
       .join('\n\n').slice(-60000);
     const prompt = `Projeto: ${project.name}${project.description ? ` — ${project.description}` : ''}\n\n` +
       `Memória atual:\n<memoria>\n${chat.memory?.trim() || '(vazia)'}\n</memoria>\n\n` +

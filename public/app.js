@@ -1091,25 +1091,57 @@ function openProjectWindow(projectId) {
       <div class="pending-box"></div>
       <div class="pw-activity" hidden></div>
       <div class="chat-input">
+        <div class="attachments" hidden></div>
         <textarea rows="2"></textarea>
         <div class="row">
           <button class="primary" data-act="send">Enviar</button>
           <button class="danger" data-act="stop" hidden>Parar</button>
+          <button data-act="attach" title="Anexar imagem (ou cole um print com Ctrl+V, ou arraste para a janela)">📎</button>
+          <input type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden />
           <span class="spacer"></span>
           <button data-act="reset" title="Começa uma conversa do zero (o agente esquece o contexto)">Nova conversa</button>
         </div>
       </div>`;
     const input = win.body.querySelector('textarea');
     const sendBtn = win.body.querySelector('[data-act=send]');
+    win.attachments = [];
     const sendMsg = async () => {
       const text = input.value.trim();
-      if (!text || sendBtn.disabled) return;
+      const images = win.attachments;
+      if ((!text && !images.length) || sendBtn.disabled) return;
       input.value = '';
+      setAttachments(win, []);
       try {
-        await api('POST', `/api/projects/${projectId}/chat`, { message: text });
+        await api('POST', `/api/projects/${projectId}/chat`, {
+          message: text,
+          images: images.map(({ mediaType, data }) => ({ mediaType, data })),
+        });
       } catch {
         input.value = text;
+        setAttachments(win, images);
       }
+    };
+    // imagens: colar (Ctrl+V), arrastar para a janela ou 📎
+    input.addEventListener('paste', (e) => {
+      const files = [...(e.clipboardData?.files || [])].filter((f) => f.type.startsWith('image/'));
+      if (!files.length) return;
+      e.preventDefault();
+      addImages(win, files);
+    });
+    win.el.addEventListener('dragover', (e) => {
+      if ([...e.dataTransfer.items].some((i) => i.type.startsWith('image/'))) e.preventDefault();
+    });
+    win.el.addEventListener('drop', (e) => {
+      const files = [...e.dataTransfer.files].filter((f) => f.type.startsWith('image/'));
+      if (!files.length) return;
+      e.preventDefault();
+      addImages(win, files);
+    });
+    const picker = win.body.querySelector('input[type=file]');
+    win.body.querySelector('[data-act=attach]').onclick = () => picker.click();
+    picker.onchange = () => {
+      addImages(win, [...picker.files]);
+      picker.value = '';
     };
     sendBtn.onclick = sendMsg;
     input.onkeydown = (e) => {
@@ -1427,7 +1459,54 @@ function chatEntry(e) {
   const div = document.createElement('div');
   div.className = 'msg msg-' + e.role;
   div.innerHTML = e.role === 'tool' ? '🔧 ' + esc(e.text) : formatText(e.text);
+  if (e.images?.length) {
+    // clicar abre a imagem inteira; se não estiver neste hub (ex.: backup importado), avisa
+    const strip = document.createElement('div');
+    strip.className = 'msg-images';
+    strip.innerHTML = e.images.map((n) => `<a href="/api/files/${esc(n)}" target="_blank" rel="noopener"><img src="/api/files/${esc(n)}" alt="imagem anexada" loading="lazy" /></a>`).join('');
+    strip.querySelectorAll('img').forEach((img) => (img.onerror = () => img.closest('a').replaceWith('[imagem indisponível]')));
+    div.prepend(strip);
+  }
   return div;
+}
+
+// ---------- Imagens no pedido ----------
+const MAX_IMAGES = 6;
+const MAX_SIDE = 1568; // o Claude reduz imagens maiores que isso; reduzir antes deixa o envio leve
+
+// Lê a imagem, reduz se for grande e devolve { mediaType, data (base64), preview (data URL) }.
+async function prepareImage(file) {
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, MAX_SIDE / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+  canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  // print de tela fica nítido em PNG; foto grande vira JPEG para não passar do limite
+  let url = canvas.toDataURL('image/png');
+  if (url.length > 4.5 * 1024 * 1024) url = canvas.toDataURL('image/jpeg', 0.88);
+  const [head, data] = url.split(',');
+  return { mediaType: head.slice(5, head.indexOf(';')), data, preview: url };
+}
+
+async function addImages(win, files) {
+  for (const file of files) {
+    if (win.attachments.length >= MAX_IMAGES) { alert(`No máximo ${MAX_IMAGES} imagens por pedido.`); break; }
+    try {
+      setAttachments(win, [...win.attachments, await prepareImage(file)]);
+    } catch {
+      alert(`Não consegui ler a imagem "${file.name || 'colada'}".`);
+    }
+  }
+  win.body.querySelector('textarea').focus();
+}
+
+function setAttachments(win, list) {
+  win.attachments = list;
+  const box = win.body.querySelector('.attachments');
+  box.hidden = !list.length;
+  box.innerHTML = list.map((a, i) => `<div class="thumb"><img src="${a.preview}" alt="" /><button data-rm="${i}" title="Tirar">✕</button></div>`).join('');
+  box.querySelectorAll('[data-rm]').forEach((b) => (b.onclick = () => setAttachments(win, list.filter((_, i) => i !== +b.dataset.rm))));
 }
 
 // Cartão de permissão / pergunta. Só redesenha quando chega um pedido novo,

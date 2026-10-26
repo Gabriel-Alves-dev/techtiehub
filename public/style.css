@@ -416,3 +416,12 @@ button.warn { color: var(--warn); border-color: var(--warn); }
 }
 .model-chip { text-transform: none; }
 .dialog-hint { margin: -2px 0 10px; font-size: 11px; }
+
+/* ---------- imagens no pedido e na conversa ---------- */
+.attachments { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.attachments[hidden] { display: none; }
+.thumb { position: relative; width: 64px; height: 64px; border: 2px solid var(--line); background: var(--bg); }
+.thumb img { width: 100%; height: 100%; object-fit: cover; }
+.thumb button { position: absolute; top: -8px; right: -8px; padding: 2px 5px; font-size: 8px; box-shadow: none; }
+.msg-images { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.msg-images img { max-width: 160px; max-height: 120px; border: 2px solid #fff4; display: block; }

@@ -2,6 +2,7 @@
 // Cada conta é dona de um escritório (data/offices/<id>/); nada é compartilhado entre eles.
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { ChatStore } = require('./chats');
 const { Connectors } = require('./connectors');
 const { FileSessionStore } = require('./session-store');
@@ -185,6 +186,24 @@ class Office {
     // não lota o histórico com cada ferramenta
     this.setStatus(project.id, status, message, !(ev.event === 'PreToolUse' && agent.status === 'trabalhando'));
     return { agent: agent.name, status };
+  }
+
+  // ---------- Imagens dos pedidos (data/offices/<id>/uploads/) ----------
+  saveUpload(buffer, ext) {
+    const dir = path.join(this.dir, 'uploads');
+    fs.mkdirSync(dir, { recursive: true });
+    const name = crypto.randomBytes(12).toString('hex') + ext;
+    fs.writeFileSync(path.join(dir, name), buffer);
+    return name;
+  }
+
+  // nome seguro (sem caminhos) de um arquivo que existe neste escritório
+  hasUpload(name) {
+    return /^[a-f0-9]{24}\.(png|jpg|gif|webp)$/.test(String(name)) && fs.existsSync(path.join(this.dir, 'uploads', name));
+  }
+
+  uploadPath(name) {
+    return this.hasUpload(name) ? path.join(this.dir, 'uploads', name) : null;
   }
 
   // Mesas vinculadas antes de o hub guardar o repositório: registra o remote quando o PC conecta.

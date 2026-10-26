@@ -212,6 +212,8 @@ O fluxo de um pedido:
    - **pergunta** → `updatedInput: { questions, answers }`. As respostas chegam **na ordem das perguntas** e o runner monta o mapa `texto da pergunta → resposta`. Usar o índice evita problemas de codificação com acentos.
 6. **Parar** chama `abort()` no `AbortController`. O pedido pendente é negado automaticamente.
 
+**Imagens.** O navegador reduz a imagem (lado maior até 1568 px; PNG, ou JPEG se ficar grande) e manda em base64 no `POST …/chat`. O hub valida tipo, quantidade (até 6) e tamanho (5 MB cada) e guarda em `uploads/`, para o histórico (a entrada da conversa leva `images: [nomes]`, servidos em `/api/files/:nome`). Depois repassa as imagens no comando `run`. O runner manda o pedido como mensagem da API do Claude (`prompt` iterável com blocos `image` + `text`).
+
 **Modelo e fase.** O hub manda `model` e `effort` do agente da mesa no comando `run` (vazio = padrão do Claude Code do PC). O runner guarda o modelo real informado no `system/init` (`lastModel`) e acompanha a **fase**: `thinking` depois do pedido e de cada resposta de ferramenta, e `tool` enquanto espera uma ferramenta. Ela segue no `live` com `age` (ms). O hub converte em `since` no relógio dele e manda `now` no estado, para o navegador acertar o cronômetro (`renderActivity`) mesmo com relógios diferentes.
 
 ### Continuidade: sessão completa, memória e commit
