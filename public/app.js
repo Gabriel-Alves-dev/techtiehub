@@ -1296,11 +1296,15 @@ function renderEnv(win) {
       <input data-field="name" maxlength="40" value="${esc(state.env.name)}" />
       <button data-act="rename">Salvar</button></div></label>` : ''}
     <h3>Conectar um PC</h3>
-    <p class="muted">No outro computador: instale o Node.js, faça login no Claude Code, clone este repositório e rode <code>npm install</code>.
-      Depois gere um código aqui (vale 10 minutos) e rode o comando lá:</p>
+    <p class="muted">No PC que vai trabalhar, entre no hub com a sua conta e baixe o conector. Extraia o zip e dê dois cliques em
+      <b>Iniciar Techtie.bat</b>: ele instala o que faltar, pareia o PC e abre o login do Claude se precisar.</p>
+    <div class="row"><a class="btn primary" href="/api/connector-download" download>Baixar conector (Windows)</a></div>
+    <p class="muted">O pacote liga o PC à <b>sua</b> conta e vale por 24 horas. Não envie para outras pessoas: cada uma baixa o dela.</p>
+    <details class="pair-cli" ${p ? 'open' : ''}><summary>Já tenho o repositório clonado (linha de comando)</summary>
     ${p ? `<div class="code" data-field="cmd">node conector.js --hub ${esc(p.hub)} --codigo ${esc(p.code)} --nome "Nome do PC"</div>
       <div class="row"><button data-act="copy">Copiar comando</button><span class="muted">vale até ${new Date(p.exp).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</span></div>`
-      : '<div class="row"><button class="primary" data-act="pair">Gerar código</button></div>'}
+      : '<div class="row"><button data-act="pair">Gerar código</button></div>'}
+    </details>
     <h3>Backup</h3>
     <p class="muted">Exporte tudo (mesas, agentes, conversas, memória e sessões) para um arquivo, ou restaure um backup.</p>
     <div class="row">

@@ -61,9 +61,11 @@ O código existe para que ninguém crie a "primeira conta" antes de você só po
 
 ## 5. Conectar os PCs
 
-Em cada computador que vai trabalhar, você precisa do Node.js 18+, do Claude Code com login feito, e do repositório clonado com `npm install`.
+**Jeito fácil:** no PC que vai trabalhar, entre em `https://hub.techtie.digital` com a sua conta, clique em **PC → Conectar um PC → Baixar conector (Windows)**, extraia o zip numa pasta fixa e dê dois cliques em **`Iniciar Techtie.bat`**. Ele baixa o Node.js portátil se faltar, instala, pareia o PC, abre o login do Claude se precisar e conecta. Não precisa clonar o repositório nem usar linha de comando.
 
-1. No hub: **PC → Conectar um PC → Gerar código** (vale 10 minutos).
+**Pela linha de comando** (PC com o repositório clonado, Node.js 18+, `npm install` feito e Claude Code logado):
+
+1. No hub: **PC → Conectar um PC → Já tenho o repositório clonado → Gerar código** (vale 10 minutos).
 2. Na pasta do repositório, no PC:
 
    ```bash
@@ -83,7 +85,7 @@ Das próximas vezes, basta dar dois cliques em **`conectar.bat`** (ou `npm run c
 ## 6. Atualizar
 
 - **Hub:** dê `git push` no repositório e clique em **Redeploy** no Coolify. Também dá para ativar *Auto Deploy* com o webhook do GitHub. Os dados ficam no volume e não se perdem.
-- **Conectores:** em cada PC, `git pull` na pasta do repositório e abra o `conectar.bat` de novo.
+- **Conectores:** quem usa o pacote baixa de novo no hub e extrai por cima da pasta antiga (o PC continua o mesmo). Quem usa o repositório: `git pull` e abra o `conectar.bat` de novo.
 
 ## 7. Backup
 

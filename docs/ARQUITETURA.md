@@ -178,6 +178,20 @@ O estado transmitido ao navegador tem dois campos que não são salvos:
 - **Eventos em fila:** `emit()` manda os eventos um de cada vez, na ordem, para a conversa não embaralhar.
 - **No modo local**, o hub chama `conector.start()` no mesmo processo, com o token do PC local (ver Contas e credenciais).
 
+### Pacote baixável (Windows)
+
+`GET /api/connector-download` (logado) monta na hora um `.zip` (`zip.js`, formato ZIP com deflate do `zlib`, sem dependências) com os arquivos do conector, os extras de `pacote/` (com quebras de linha CRLF), um `package.json` mínimo (só o SDK do Claude) e `conector-config.json` com o endereço do hub e um **código de pareamento de 24 h**. Os códigos ficam guardados (só o hash) em `auth.json`, para sobreviver a um redeploy.
+
+No PC, `Iniciar Techtie.bat`:
+
+1. Usa o Node do sistema ou baixa um portátil para `runtime/` (`baixar-node.ps1`).
+2. Roda `npm install` na primeira vez.
+3. Roda `preparar.js`:
+   - troca o código por um token (e apaga o código do arquivo);
+   - confere o login do Claude com o `claude.exe` que vem no SDK (`auth status`) e, se faltar, chama `auth login`;
+   - na primeira vez, oferece atalho na Inicialização do Windows e o hook do VS Code.
+4. Abre o `conector.js`.
+
 ## Runner (`runner.js`, dentro do conector)
 
 Executa o Claude por mesa usando `query()` do Claude Agent SDK. O SDK sobe o processo do Claude Code, que usa o login do Claude **daquele PC**. O runner recebe uma cópia da conversa a cada pedido e manda as novidades ao hub pelos callbacks `hub.push / update / status / live`.

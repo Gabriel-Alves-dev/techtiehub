@@ -1,0 +1,25 @@
+TECHTIE HUB - CONECTOR
+======================
+
+Este pacote liga este computador ao seu escritório no Techtie Hub. Os agentes
+passam a poder trabalhar nas pastas deste PC, usando o login do Claude deste PC.
+
+COMO USAR
+1. Extraia este .zip para uma pasta fixa (ex.: Documentos\Techtie Conector).
+2. Dê dois cliques em "Iniciar Techtie.bat".
+3. Na primeira vez ele:
+   - baixa o Node.js portátil, se o PC não tiver (nada é instalado no Windows);
+   - instala o conector;
+   - pareia este PC com a sua conta (o código vem no pacote e vale 24 horas);
+   - abre o login do Claude no navegador, se este PC ainda não estiver logado;
+   - pergunta se deve iniciar junto com o Windows.
+4. Deixe a janela aberta (pode minimizar) enquanto usa o hub.
+
+No hub, abra a mesa do projeto e, em "Mesa", escolha onde está a pasta do
+projeto neste PC (clone o repositório antes, se for o caso).
+
+IMPORTANTE
+- O pacote tem um código que liga um PC à SUA conta. Não envie para outras
+  pessoas; cada pessoa baixa o próprio pacote, logada na própria conta.
+- Para tirar o acesso deste PC: no hub, PC -> Remover.
+- Para atualizar o conector: baixe o pacote de novo no hub e extraia por cima.

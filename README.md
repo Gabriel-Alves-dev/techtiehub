@@ -117,7 +117,17 @@ Como a continuidade funciona:
 
 ### Conectar um PC
 
-No computador novo: instale o Node.js, faça login no Claude Code, clone este repositório e rode `npm install`. No hub, abra **PC → Conectar um PC → Gerar código** (vale 10 minutos) e rode no computador novo o comando mostrado:
+**Jeito fácil (Windows):** no computador novo, entre no hub com a sua conta e clique em **PC → Conectar um PC → Baixar conector (Windows)**. Extraia o zip e dê dois cliques em **`Iniciar Techtie.bat`**. Na primeira vez ele:
+
+1. baixa o Node.js portátil, se o PC não tiver (nada é instalado no Windows; não precisa de administrador);
+2. instala o conector;
+3. pareia o PC com a sua conta, usando o código que vem no pacote (uso único, vale 24 h);
+4. abre o login do Claude no navegador, se o PC ainda não estiver logado;
+5. pergunta se deve iniciar com o Windows e se deve instalar o hook do VS Code.
+
+Depois é só deixar a janela aberta (pode minimizar). O pacote liga o PC à **sua** conta: não envie para outras pessoas; cada uma baixa o dela.
+
+**Pela linha de comando** (quem já tem o repositório clonado e `npm install` feito): no hub, **PC → Conectar um PC → Já tenho o repositório clonado → Gerar código** (vale 10 minutos) e rode o comando mostrado:
 
 ```bash
 node conector.js --hub https://endereco-do-hub --codigo XXXX-XXXX --nome "PC do escritório"
@@ -181,6 +191,7 @@ O hub escuta só em `127.0.0.1:4321` (variáveis `PORT` e `HUB_HOST`). As rotas 
 | `GET /api/projects/:id/git` | Situação do git da pasta neste PC: `{ head, branch, dirty, last, state: "ok" \| "ahead" \| "missing" \| "diverged" }` |
 | `PATCH /api/environment` | Renomeia o PC em uso: `{ name }` |
 | `POST /api/pairing` | Gera um código de pareamento de PC (10 min) |
+| `GET /api/connector-download` | Pacote `.zip` do conector para Windows, com o endereço do hub e um código de pareamento (24 h) |
 | `GET /api/connectors` · `DELETE /api/connectors/:id` | PCs pareados com a conta; remover um PC |
 | `GET /api/export` · `POST /api/import` | Exporta/importa o escritório inteiro (estado, conversas e sessões) |
 | `/api/connector/*` | Canal dos conectores: `pair` (código → token) e, com o token, stream de comandos, respostas, eventos e sessões |
@@ -210,10 +221,13 @@ techtiehub/
 ├── connectors.js      # PCs conectados: comandos (RPC) e eventos
 ├── session-store.js   # Sessões do Claude guardadas no hub (data/sessions/)
 ├── conector.js        # CONECTOR: roda em cada PC e se liga ao hub
+├── preparar.js        # (no conector) primeira execução: pareia, confere login do Claude, inicia com o Windows
 ├── runner.js          # (no conector) Claude Agent SDK por mesa; permissões, perguntas, memória
 ├── remote-store.js    # (no conector) sessões do Claude lidas/gravadas no hub
 ├── local-ops.js       # (no conector) pastas, seletor de pastas, Explorer/VS Code
 ├── git.js             # Commit atual, remote e comparação com o commit em que o agente parou
+├── zip.js             # Gera o .zip do conector (sem dependências)
+├── pacote/            # Arquivos extras do pacote baixável (Iniciar Techtie.bat, baixar-node.ps1, LEIA-ME.txt)
 ├── describe.js        # Texto curto para cada ação do Claude ("Editando app.js")
 ├── hub-hook.js        # Hook do Claude Code → repassa eventos para /api/hook
 ├── instalar-hook.js   # Instala/remove o hook em ~/.claude/settings.json

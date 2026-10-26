@@ -11,6 +11,26 @@ const git = require('./git');
 const { Auth, token, shortCode } = require('./auth');
 const { Office, HttpError, STATUSES, FLOORS, AREAS } = require('./office');
 const conector = require('./conector');
+const { createZip } = require('./zip');
+
+// ---------- Pacote do conector (baixado pelo navegador) ----------
+// Os arquivos que rodam no PC + o atalho de Windows (pacote/) + a configuração com o
+// endereço do hub e um código de pareamento. Arquivos de Windows vão com CRLF.
+const PACKAGE_FILES = ['conector.js', 'runner.js', 'git.js', 'local-ops.js', 'remote-store.js', 'describe.js',
+  'preparar.js', 'hub-hook.js', 'instalar-hook.js', 'report.js'];
+const PACKAGE_EXTRAS = ['Iniciar Techtie.bat', 'baixar-node.ps1', 'LEIA-ME.txt'];
+
+function connectorPackage(hub, code) {
+  const root = 'Techtie Conector/';
+  const sdk = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')).dependencies['@anthropic-ai/claude-agent-sdk'];
+  const crlf = (s) => s.replace(/\r?\n/g, '\r\n');
+  return createZip([
+    ...PACKAGE_FILES.map((f) => ({ name: root + f, data: fs.readFileSync(path.join(__dirname, f)) })),
+    ...PACKAGE_EXTRAS.map((f) => ({ name: root + f, data: crlf(fs.readFileSync(path.join(__dirname, 'pacote', f), 'utf8')) })),
+    { name: root + 'package.json', data: JSON.stringify({ name: 'techtie-conector', private: true, dependencies: { '@anthropic-ai/claude-agent-sdk': sdk } }, null, 2) },
+    { name: root + 'conector-config.json', data: JSON.stringify({ hub, code }, null, 2) },
+  ]);
+}
 
 const PORT = process.env.PORT || 4321;
 const HOST = process.env.HUB_HOST || '127.0.0.1'; // na VPS: atrás de um proxy HTTPS (ver docs)
@@ -295,6 +315,16 @@ async function officeApi(req, res, url, o, user) {
 
   // ---------- PCs da conta ----------
   if (resource === 'pairing' && method === 'POST') return send(res, 201, { ...auth.createPairing(o.id), hub: publicUrl(req) });
+  if (resource === 'connector-download' && method === 'GET') {
+    // pacote pronto para Windows, já ligado a esta conta (código de 24 h, uso único)
+    const { code } = auth.createPairing(o.id, 24 * 60);
+    res.writeHead(200, {
+      'Content-Type': 'application/zip',
+      'Content-Disposition': 'attachment; filename="techtie-conector.zip"',
+      'Cache-Control': 'no-store',
+    });
+    return res.end(connectorPackage(publicUrl(req), code));
+  }
   if (resource === 'connectors' && method === 'GET') return send(res, 200, auth.listConnectors(o.id));
   if (resource === 'connectors' && method === 'DELETE') {
     const removed = auth.revokeConnector(o.id, id);

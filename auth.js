@@ -46,9 +46,9 @@ class Auth {
     // users: [{ id, email, name, salt, hash, offices: [officeId], createdAt }]
     // sessions: { sha(token): { userId, exp } }      invites: { sha(code): { by, exp } }
     // connectors: { sha(token): { id, officeId, envId, name, createdAt, lastSeen } }
+    // pairings: { sha(código): { officeId, exp } } — códigos de parear PC, uso único
     for (const k of ['users']) this.db[k] ??= [];
-    for (const k of ['sessions', 'invites', 'connectors']) this.db[k] ??= {};
-    this.pairings = new Map(); // código -> { officeId, exp } (só em memória: vale 10 min)
+    for (const k of ['sessions', 'invites', 'connectors', 'pairings']) this.db[k] ??= {};
     this.failures = new Map(); // ip -> { n, until } (freio contra adivinhar senha)
   }
 
@@ -157,6 +157,7 @@ class Auth {
     const now = Date.now();
     for (const [h, s] of Object.entries(this.db.sessions)) if (s.exp < now) delete this.db.sessions[h];
     for (const [h, i] of Object.entries(this.db.invites)) if (i.exp < now) delete this.db.invites[h];
+    for (const [h, p] of Object.entries(this.db.pairings)) if (p.exp < now) delete this.db.pairings[h];
   }
 
   createInvite(userId) {
@@ -167,22 +168,28 @@ class Auth {
   }
 
   // ---------- Conectores ----------
-  createPairing(officeId) {
+  // minutes: 10 para o código digitado; 24 h para o que vai dentro do pacote baixado
+  // (a pessoa ainda precisa extrair e instalar). Guardado em disco para sobreviver a um redeploy.
+  createPairing(officeId, minutes = PAIR_MINUTES) {
     const code = shortCode();
-    this.pairings.set(code, { officeId, exp: Date.now() + PAIR_MINUTES * 60000 });
-    return { code, exp: Date.now() + PAIR_MINUTES * 60000 };
+    const exp = Date.now() + minutes * 60000;
+    this.db.pairings[sha(code)] = { officeId, exp };
+    this.prune();
+    this.save();
+    return { code, exp };
   }
 
   // O conector troca o código (uso único) por um token permanente para aquele PC.
   pair(code, envId, name, ip) {
     this.guard(ip, 'pair');
-    const p = this.pairings.get(String(code || '').trim().toUpperCase());
+    const key = sha(String(code || '').trim().toUpperCase());
+    const p = this.db.pairings[key];
     if (!p || p.exp < Date.now()) {
       this.fail(ip, 'pair');
       throw new Error('código inválido ou vencido; gere outro no hub');
     }
     if (!/^[\w-]{3,40}$/.test(String(envId || ''))) throw new Error('identidade do PC inválida');
-    this.pairings.delete(String(code).trim().toUpperCase());
+    delete this.db.pairings[key];
     return this.issueConnector(p.officeId, envId, name);
   }
 
