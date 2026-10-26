@@ -1199,6 +1199,7 @@ function updateProjectWindow(win) {
       e.target.textContent = 'Gerando…';
       try {
         await api('POST', `/api/projects/${p.id}/report`, {});
+        alert('📋 Relatório de hoje enviado para a secretária. Ele aparece em Memória → Relatórios de hoje.');
       } finally {
         e.target.disabled = false;
         e.target.textContent = '📋 Relatório';
@@ -1357,6 +1358,10 @@ function renderOfficeMemory(win) {
       <div class="msg-assistant office-text">${formatText(b.text)}</div>
       <div class="row"><button class="danger" data-rm="${id}">Tirar do escritório</button></div>
     </details>`).join('') || '<p class="muted">Nenhuma mesa enviou a memória ainda.</p>'}
+    <h3>Recados para a secretária (hoje)</h3>
+    ${(state.inbox || []).filter((m) => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date(m.at)) === today)
+      .map((m) => `<div class="log-item"><time>${timeAgo(m.at)}</time><b>${esc(name(m.projectId))}</b>${m.agent ? ` (${esc(m.agent)})` : ''}: ${esc(m.text)}</div>`).join('')
+      || '<p class="muted">Nenhum recado hoje.</p>'}
     <h3>Relatórios de hoje</h3>
     ${Object.entries(reports).map(([id, r]) => `<details class="card office-block">
       <summary><b>${esc(name(id))}</b> <span class="muted">· ${r.agent ? esc(r.agent) + ' · ' : ''}${timeAgo(r.at)}</span></summary>

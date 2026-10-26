@@ -237,8 +237,13 @@ O fluxo de um pedido:
 - **Memória do escritório e relatórios.** `state.officeMemory` = `{ general, projects: { id: { text, at, agent } } }`, preenchido por "Enviar para o escritório" (copia a memória da mesa). `state.reports[dia][projectId]` traz os relatórios do dia: o conector resume as entradas daquele dia com uma chamada curta, sem ferramentas (`dailyReport`). O dia segue o fuso `HUB_TZ` (padrão America/Sao_Paulo), e os relatórios ficam por 30 dias.
 - **Mesa da secretária** (`project.role = 'secretaria'`):
   - **Sem pasta:** não precisa de pasta, e o conector usa `~/.techtie-hub/secretaria` (`folder: '@secretaria'`).
-  - **Contexto a cada pedido:** o `briefFor` manda `secretary.context` (`secretaryContext()`: instruções, mesas, memória do escritório e relatórios de hoje), que entra no `append` do prompt de sistema.
-  - **Ferramentas próprias:** o runner cria um servidor MCP em processo (`createSdkMcpServer`, nome `escritorio`) com `listar_mesas`, `ler_mesa`, `delegar`, `ler_relatorios` e `anotar_memoria_escritorio`. Elas chamam `/api/connector/office/*` com o token do PC (o hub confere que o pedido vem de uma mesa de secretária) e são aprovadas automaticamente, porque só mexem no hub.
+  - **Contexto a cada pedido:** o `briefFor` manda `office = { role: 'secretaria', context: secretaryContext() }` (instruções, mesas, memória do escritório, relatórios e recados de hoje), que entra no `append` do prompt de sistema.
+  - **Ferramentas próprias:** além das comuns (abaixo), `ler_mesa`, `delegar`, `ler_relatorios` e `anotar_memoria_escritorio`.
+- **Todas as mesas** recebem `office = { role: 'mesa', context: deskContext(id) }`: quem é o agente, a mesa, a secretária, as outras mesas, e a orientação de usar as ferramentas em vez de procurar arquivos no projeto.
+- **Ferramentas do escritório** (`officeTools` no `runner.js`): um servidor MCP em processo (`createSdkMcpServer`, nome `escritorio`).
+  - **Comuns:** `listar_mesas` e `ler_memoria_escritorio`.
+  - **Das mesas:** `enviar_relatorio` (grava `state.reports[dia][id]`), `salvar_memoria_projeto` (memória da mesa e, por padrão, do escritório) e `avisar_secretaria` (`state.inbox`, os 200 mais recentes).
+  - **Como funcionam:** chamam `/api/connector/office/*` com o token do PC e `mesa_id`. O hub recusa as ferramentas só da secretária vindas de outras mesas. São aprovadas automaticamente, porque só mexem no hub.
 - **Delegar** (`delegate` no `server.js`):
   - acha a mesa pelo nome do projeto ou do agente (`findDesk`, sem acento e sem maiúscula);
   - escolhe um PC conectado onde a mesa tem pasta, de preferência o da secretária (`envForDesk`);

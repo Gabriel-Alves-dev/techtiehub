@@ -161,7 +161,7 @@ class Runner {
     if (!resuming) this.update(project.id, { sessionAppend: this.memoryPrompt(chat) });
     // MCPs do hub para esta mesa + as ferramentas do escritório, se for a secretária
     const mcp = { ...(project.mcpServers || {}) };
-    if (project.secretary) mcp.escritorio = await this.secretaryTools(project);
+    if (project.office) mcp.escritorio = await this.officeTools(project);
     let started = false, success = false;
     try {
       const q = query({
@@ -187,7 +187,7 @@ class Runner {
           // git do PC atual (gravado na sessão, ele carregaria a pasta do PC antigo)
           systemPrompt: {
             type: 'preset', preset: 'claude_code', snapshot: false,
-            append: [chat.sessionAppend, project.secretary?.context].filter(Boolean).join('\n\n') || undefined,
+            append: [project.office?.context, chat.sessionAppend].filter(Boolean).join('\n\n') || undefined,
           },
           // modelo e esforço escolhidos para o agente; vazio = o padrão do Claude Code deste PC
           model: project.model || undefined,
@@ -342,12 +342,14 @@ class Runner {
     return { ok: true, wasRunning }; // false: o hub achava que rodava, mas aqui já tinha acabado
   }
 
-  // ---------- Secretária ----------
-  // Ferramentas que rodam aqui no conector e consultam/delegam pelo hub (servidor MCP "escritorio").
-  async secretaryTools(project) {
+  // ---------- Ferramentas do escritório ----------
+  // Rodam aqui no conector e falam com o hub (servidor MCP "escritorio"). Toda mesa tem as básicas
+  // (relatório, memória, recado, ver o escritório); a secretária também lê mesas e delega.
+  async officeTools(project) {
     const { createSdkMcpServer, tool } = await loadSdk();
     const { z } = require('zod');
-    const call = (method, sub, data = {}) => this.hub.office(method, sub, { secretaria: project.id, ...data });
+    const isSec = project.office.role === 'secretaria';
+    const call = (method, sub, data = {}) => this.hub.office(method, sub, { mesa_id: project.id, ...data });
     const reply = (v) => ({ content: [{ type: 'text', text: typeof v === 'string' ? v : JSON.stringify(v, null, 2) }] });
     const safe = (fn) => async (args) => {
       try {
@@ -362,6 +364,28 @@ class Runner {
       tools: [
         tool('listar_mesas', 'Lista as mesas (projetos) do escritório: agente responsável, descrição, sala e status.', {},
           safe(() => call('GET', 'desks'))),
+        tool('ler_memoria_escritorio', 'Lê a memória do escritório: notas gerais e o resumo de cada projeto.', {},
+          safe(() => call('GET', 'memory'))),
+        ...(isSec ? this.secretaryOnly(tool, z, call, safe) : [
+          tool('enviar_relatorio', 'Envia o relatório do dia desta mesa para a secretária. Escreva você mesmo, em tópicos: o que foi feito hoje, ' +
+            'o que ficou pendente, bloqueios e próximos passos.',
+            { texto: z.string().describe('o relatório completo') },
+            safe(({ texto }) => call('POST', 'report', { texto }))),
+          tool('salvar_memoria_projeto', 'Salva o resumo do que você sabe sobre este projeto (memória da mesa) e, por padrão, também na memória ' +
+            'do escritório. Escreva a memória completa (substitui a anterior): projeto, feito até agora, decisões, próximos passos.',
+            { texto: z.string(), enviar_para_escritorio: z.boolean().optional().describe('padrão: sim') },
+            safe(({ texto, enviar_para_escritorio }) => call('POST', 'project-memory', { texto, enviar: enviar_para_escritorio !== false }))),
+          tool('avisar_secretaria', 'Deixa um recado para a secretária (ela vê no próximo pedido dela). Use para avisar que terminou algo, ' +
+            'pedir que uma demanda vá para outra mesa, ou reportar um bloqueio.',
+            { mensagem: z.string() },
+            safe(({ mensagem }) => call('POST', 'inbox', { mensagem }))),
+        ]),
+      ],
+    });
+  }
+
+  secretaryOnly(tool, z, call, safe) {
+    return [
         tool('ler_mesa', 'Detalhes de uma mesa: memória do projeto e últimas mensagens. Aceita o nome da mesa ou do agente.',
           { mesa: z.string().describe('nome da mesa/projeto ou do agente') },
           safe(({ mesa }) => call('GET', 'desk', { q: mesa }))),
@@ -375,8 +399,7 @@ class Runner {
         tool('anotar_memoria_escritorio', 'Acrescenta uma nota às notas gerais da memória do escritório.',
           { nota: z.string() },
           safe(({ nota }) => call('POST', 'note', { nota }))),
-      ],
-    });
+    ];
   }
 
   // Relatório do dia para a secretária (chamada curta ao Claude, sem ferramentas).

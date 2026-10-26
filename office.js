@@ -81,6 +81,8 @@ class Office {
     for (const day of Object.keys(s.reports).sort().slice(0, -30)) delete s.reports[day];
     // demandas esperando a mesa ficar livre: { projectId: [{ text, from, at }] }
     s.queue ??= {};
+    // recados das mesas para a secretária (ferramenta avisar_secretaria) — guarda os 200 mais recentes
+    s.inbox ??= [];
     return s;
   }
 
@@ -235,6 +237,26 @@ class Office {
     return { error: `nenhuma mesa ou agente chamado "${q}". Mesas: ${cands.map((c) => c.p.name).join(', ')}` };
   }
 
+  // Contexto de um agente de projeto: quem ele é, onde está e o que pode fazer no escritório.
+  deskContext(projectId) {
+    const p = this.state.projects.find((x) => x.id === projectId);
+    const a = this.agentOf(projectId);
+    const sec = this.state.projects.find((x) => x.role === 'secretaria');
+    const secName = sec ? this.agentOf(sec.id)?.name || 'a secretária' : null;
+    const others = this.roster().filter((d) => d.id !== projectId && !d.secretaria)
+      .map((d) => `- ${d.mesa}${d.agente ? ` — ${d.agente}` : ''}${d.descricao ? ` · ${d.descricao}` : ''}`);
+    return [
+      '# Você trabalha no escritório Techtie Hub',
+      `Você é ${a ? `${a.name}${a.role ? `, ${a.role}` : ''}` : 'o agente'}, responsável pela mesa "${p.name}"${p.description ? ` (${p.description})` : ''}. ` +
+      'O escritório tem outros agentes, cada um cuidando de um projeto' + (secName ? `, e uma secretária (${secName}) que organiza e distribui as demandas.` : '.'),
+      'Ferramentas do escritório (servidor "escritorio"): enviar_relatorio, salvar_memoria_projeto, avisar_secretaria, ler_memoria_escritorio e listar_mesas. ' +
+      'Quando o usuário pedir para mandar o relatório, avisar ou falar com a secretária, ou salvar algo na memória do projeto/escritório, ' +
+      'use essas ferramentas: não procure arquivos ou configurações no projeto para isso.',
+      'Pedidos que começam com "📨 Demanda da secretária" foram passados por ela: trabalhe neles normalmente. O usuário acompanha e responde por aqui.',
+      '## Outras mesas', others.join('\n') || '(nenhuma)',
+    ].join('\n\n');
+  }
+
   // Contexto que vai no prompt de sistema da secretária a cada pedido (sempre atualizado).
   secretaryContext() {
     const desks = this.roster().filter((d) => !d.secretaria).map((d) =>
@@ -255,6 +277,8 @@ class Office {
       '## Mesas do escritório', desks.join('\n') || '(nenhuma)',
       '## Memória do escritório', mem.general?.trim() || '(sem notas gerais)', ...blocks,
       '## Relatórios de hoje', reports.join('\n\n') || '(nenhum relatório enviado hoje)',
+      '## Recados das mesas (hoje)', this.state.inbox.filter((m) => this.day(m.at) === this.day())
+        .map((m) => `- ${this.state.projects.find((p) => p.id === m.projectId)?.name || 'Mesa'}${m.agent ? ` (${m.agent})` : ''}: ${m.text}`).join('\n') || '(nenhum)',
     ].join('\n\n');
   }
 

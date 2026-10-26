@@ -237,8 +237,48 @@ async function connectorApi(req, res, url, op, sub) {
   // ferramentas da secretária: só para uma mesa marcada como secretária neste escritório
   if (op === 'office') {
     const body = req.method === 'GET' ? Object.fromEntries(url.searchParams) : await readBody(req);
-    const sec = o.state.projects.find((p) => p.id === body.secretaria && p.role === 'secretaria');
-    if (!sec) return send(res, 403, { error: 'só a mesa da secretária usa estas ferramentas' });
+    // quem está chamando: a mesa do agente (mesa_id); algumas ferramentas são só da secretária
+    const me = o.state.projects.find((p) => p.id === (body.mesa_id || body.secretaria));
+    if (!me) return send(res, 403, { error: 'mesa desconhecida' });
+    const isSec = me.role === 'secretaria';
+    if (['desk', 'delegate', 'note'].includes(sub) && !isSec) return send(res, 403, { error: 'só a secretária usa esta ferramenta' });
+    const meAgent = o.agentOf(me.id)?.name || null;
+    if (sub === 'memory') {
+      const mem = o.state.officeMemory;
+      return send(res, 200, {
+        notasGerais: mem.general || '(vazio)',
+        projetos: Object.fromEntries(Object.entries(mem.projects).map(([id, b]) => [o.state.projects.find((p) => p.id === id)?.name || id, b.text])),
+      });
+    }
+    if (sub === 'report' && req.method === 'POST') {
+      const texto = String(body.texto || '').trim();
+      if (!texto) return send(res, 400, { error: 'relatório vazio' });
+      (o.state.reports[o.day()] ??= {})[me.id] = { text: texto.slice(0, 20000), at: Date.now(), agent: meAgent };
+      o.chats.push(me.id, 'system', '📋 Relatório do dia enviado para a secretária.');
+      o.addLog(o.agentOf(me.id)?.id || null, me.id, 'Relatório do dia enviado');
+      o.save();
+      return send(res, 200, { ok: true, mensagem: 'Relatório enviado para a secretária.' });
+    }
+    if (sub === 'project-memory' && req.method === 'POST') {
+      const texto = String(body.texto || '').trim();
+      if (!texto) return send(res, 400, { error: 'memória vazia' });
+      o.chats.setMemory(me.id, texto);
+      if (body.enviar !== false && body.enviar !== 'false') {
+        o.state.officeMemory.projects[me.id] = { text: texto.slice(0, 20000), at: Date.now(), agent: meAgent };
+      }
+      o.addLog(o.agentOf(me.id)?.id || null, me.id, 'Memória do projeto atualizada pelo agente');
+      o.save();
+      return send(res, 200, { ok: true });
+    }
+    if (sub === 'inbox' && req.method === 'POST') {
+      const mensagem = String(body.mensagem || '').trim();
+      if (!mensagem) return send(res, 400, { error: 'recado vazio' });
+      o.state.inbox.push({ projectId: me.id, agent: meAgent, text: mensagem.slice(0, 4000), at: Date.now() });
+      o.state.inbox.splice(0, Math.max(0, o.state.inbox.length - 200));
+      o.chats.push(me.id, 'system', '✉️ Recado deixado para a secretária.');
+      o.save();
+      return send(res, 200, { ok: true, mensagem: 'Recado deixado; a secretária vê no próximo pedido dela.' });
+    }
     if (sub === 'desks') return send(res, 200, o.roster().filter((d) => !d.secretaria));
     if (sub === 'desk') {
       const found = o.findDesk(body.q);
@@ -379,7 +419,10 @@ function briefFor(o, project, folder) {
     model: agent?.model || '', effort: agent?.effort || '', permissionMode: project.permissionMode || '',
     mcpServers: o.mcpFor(project.id), // servidores MCP do hub para esta mesa (segredos abertos, só para o conector)
     // a secretária recebe, a cada pedido, a visão atualizada do escritório
-    secretary: project.role === 'secretaria' ? { context: o.secretaryContext() } : undefined,
+    // todo agente sabe onde está: a secretária recebe a visão do escritório; os outros, a da sua mesa
+    office: project.role === 'secretaria'
+      ? { role: 'secretaria', context: o.secretaryContext() }
+      : { role: 'mesa', context: o.deskContext(project.id) },
   };
 }
 
