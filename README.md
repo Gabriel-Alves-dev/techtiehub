@@ -22,6 +22,7 @@ Você vê de relance quem está trabalhando, quem terminou e quem precisa de voc
 - **Janelas flutuantes de conversa.** Clique no balão, no personagem ou na mesa para abrir. As janelas podem ser arrastadas, redimensionadas e minimizadas, e dá para abrir várias ao mesmo tempo.
 - **Agentes de verdade.** O hub roda o Claude (via [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk)) na pasta de cada projeto, usando o seu login do Claude Code. As conversas continuam de onde pararam.
 - **Permissões e perguntas no hub.** Quando o agente quer rodar um comando ou editar um arquivo, aparece um cartão com **Permitir / Sempre permitir / Negar**. Quando ele faz uma pergunta de múltipla escolha, as opções aparecem para você clicar.
+- **Contas.** Login com e-mail e senha; cada conta tem o seu próprio escritório, isolado dos outros. Novas contas só entram com convite.
 - **Hub e conectores.** O hub guarda tudo; um conector em cada PC roda os agentes com as pastas e o login do Claude daquele computador. Cada PC tem a sua pasta para cada mesa, e o agente **continua a mesma conversa** em qualquer PC conectado. Se a sessão completa não estiver disponível, ele recebe a **memória** do projeto. O hub também avisa quando falta `git pull`.
 - **Integração com o Claude Code do VS Code (opcional).** Por hooks, sessões abertas no VS Code dentro da pasta de uma mesa também atualizam o escritório.
 - **API simples** para qualquer script ou agente reportar status.
@@ -43,12 +44,13 @@ npm install
 npm start
 ```
 
-Depois abra <http://localhost:4321>.
+Depois abra <http://localhost:4321> e **crie a sua conta**. A primeira conta é criada livremente e herda o escritório que já existir nesta pasta; o conector deste PC é pareado com ela automaticamente.
 
 No Windows, você também pode dar dois cliques em **`iniciar.bat`**. Ele instala as dependências na primeira vez, inicia o servidor e abre o navegador.
 
 ### Primeiros passos
 
+1. **Entre na sua conta.** O login fica salvo por 30 dias.
 1. **Contrate agentes** no botão **+ Contratar**: escolha nome, cargo e as cores do personagem.
 2. **Crie salas, se quiser,** pela aba **+ Sala**. Clique na aba da sala atual (⚙) para mudar o nome, as mesas por fileira, as áreas especiais e o piso.
 3. **Crie uma mesa** no botão **+ Mesa** ou clicando na mesa tracejada. Dê um nome, escolha a **pasta do projeto** com o botão "Escolher…" e o agente que vai sentar nela.
@@ -111,15 +113,23 @@ Como a continuidade funciona:
 
 ### Conectar um PC
 
-No computador novo: instale o Node.js, faça login no Claude Code, clone este repositório e rode `npm install`. Depois copie o comando que aparece em **PC → Conectar um PC** (com o endereço do hub e a chave):
+No computador novo: instale o Node.js, faça login no Claude Code, clone este repositório e rode `npm install`. No hub, abra **PC → Conectar um PC → Gerar código** (vale 10 minutos) e rode no computador novo o comando mostrado:
 
 ```bash
-node conector.js --hub http://endereco-do-hub:4321 --chave <chave> --nome "PC do escritório"
+node conector.js --hub https://endereco-do-hub --codigo XXXX-XXXX --nome "PC do escritório"
 ```
 
-A configuração fica salva em `~/.techtie-hub/`; das próximas vezes basta `npm run conector`.
+O conector troca o código por um token só daquele PC e salva em `~/.techtie-hub/`; das próximas vezes basta `npm run conector`. Para tirar o acesso de um PC, use **Remover** na janela de PCs.
 
-> **Hoje o hub só aceita conexões do próprio computador**, porque ainda não tem login. Conectores de outros PCs vão funcionar quando o hub estiver na VPS, com contas (próximas etapas). Até lá, para levar o escritório a outro PC, use **PC → Backup** (exportar/importar).
+> **Por padrão o hub só aceita conexões do próprio computador** (`127.0.0.1`). Para outros PCs alcançarem o hub, ele precisa estar publicado com HTTPS (próxima etapa: VPS). Até lá, para levar o escritório a outro PC, use **PC → Backup** (exportar/importar).
+
+## Contas e convites
+
+- **Cada conta tem o seu escritório**, com mesas, agentes, conversas, memória e PCs próprios. Ninguém vê o escritório de outra conta.
+- **Primeira conta:** criada livremente na primeira vez que o hub abre; herda os dados que já existiam.
+- **Outras contas:** só com convite. Em **Conta → Gerar convite**, envie o código (vale 7 dias, uso único) e o endereço do hub; a pessoa clica em *Recebi um convite* na tela de entrada.
+- **Conta:** trocar a senha (encerra as outras sessões) e sair.
+- O trabalho dos agentes usa o login do Claude Code **do PC onde o conector roda**, não a conta do hub.
 
 ## Integração com o Claude Code do VS Code (opcional)
 
@@ -149,11 +159,12 @@ Pastas sem mesa são ignoradas. Se o hub estiver desligado, o hook sai em silên
 
 ## API
 
-O hub escuta só em `127.0.0.1:4321` (variáveis `PORT` e `HUB_HOST`). Requisições que não são `GET` precisam de `Content-Type: application/json`. Rotas que dependem de um PC (conversa, pasta, git, seletor de pastas) usam o PC do cabeçalho `X-Hub-Env`, ou o único PC conectado.
+O hub escuta só em `127.0.0.1:4321` (variáveis `PORT` e `HUB_HOST`). As rotas do escritório exigem login (cookie de sessão); hooks, `report.js` e conectores usam o token do PC (`Authorization: Bearer`). Requisições que não são `GET` precisam de `Content-Type: application/json`. Rotas que dependem de um PC (conversa, pasta, git, seletor de pastas) usam o PC do cabeçalho `X-Hub-Env`, ou o único PC conectado.
 
 | Método e rota | O que faz |
 |---|---|
-| `GET /api/state` | Estado completo: mesas, agentes, histórico e `live` (execuções em andamento) |
+| `GET /api/auth/status` · `POST /api/auth/{signup,login,logout,password,invite}` | Contas: cadastro (`{ email, name, password, invite }`), login, sair, trocar senha, gerar convite |
+| `GET /api/state` | Estado completo do escritório: mesas, agentes, histórico, `live` e `connectors` |
 | `GET /api/events` | Stream SSE. Evento padrão = estado completo; evento `chat` = nova mensagem `{ projectId, entry }` |
 | `POST /api/report` | Atualiza um agente: `{ agent, status, message?, project? }`. `agent` e `project` aceitam id ou nome |
 | `POST /api/hook` | Recebe eventos do `hub-hook.js` |
@@ -164,9 +175,10 @@ O hub escuta só em `127.0.0.1:4321` (variáveis `PORT` e `HUB_HOST`). Requisiç
 | `GET /api/projects/:id/memory` · `PUT` · `POST` | Ler, salvar `{ memory }` ou atualizar a memória a partir da conversa |
 | `GET /api/projects/:id/git` | Situação do git da pasta neste PC: `{ head, branch, dirty, last, state: "ok" \| "ahead" \| "missing" \| "diverged" }` |
 | `PATCH /api/environment` | Renomeia o PC em uso: `{ name }` |
-| `GET /api/connector-info` | Endereço do hub e chave dos conectores |
+| `POST /api/pairing` | Gera um código de pareamento de PC (10 min) |
+| `GET /api/connectors` · `DELETE /api/connectors/:id` | PCs pareados com a conta; remover um PC |
 | `GET /api/export` · `POST /api/import` | Exporta/importa o escritório inteiro (estado, conversas e sessões) |
-| `/api/connector/*` | Canal dos conectores (stream de comandos, respostas, eventos, sessões). Exige `Authorization: Bearer <chave>` |
+| `/api/connector/*` | Canal dos conectores: `pair` (código → token) e, com o token, stream de comandos, respostas, eventos e sessões |
 | `POST /api/projects/:id/chat` | Envia um pedido ao agente da mesa: `{ message }` |
 | `POST /api/projects/:id/answer` | Responde o pedido pendente: `{ requestId, decision: "allow" \| "always" \| "deny" }` ou `{ requestId, answers: [...] }` |
 | `POST /api/projects/:id/stop` | Interrompe o agente |
@@ -186,7 +198,9 @@ node report.js "Ana" trabalhando "Escrevendo testes" --projeto "Site Techtie"
 
 ```
 techtiehub/
-├── server.js          # HUB: estado, API, SSE, interface, canal dos conectores, hooks
+├── server.js          # HUB: rotas, login, canal dos conectores, hooks
+├── auth.js            # Contas, sessões, convites e tokens dos PCs (data/auth.json)
+├── office.js          # Um escritório: estado, conversas, sessões, PCs conectados
 ├── chats.js           # Conversas das mesas (data/chats/)
 ├── connectors.js      # PCs conectados: comandos (RPC) e eventos
 ├── session-store.js   # Sessões do Claude guardadas no hub (data/sessions/)
@@ -208,10 +222,12 @@ techtiehub/
 │   ├── ARQUITETURA.md # Como as peças se conectam (leitura recomendada para quem vai mexer)
 │   └── *.png          # Capturas de tela
 └── data/              # Criado em tempo de execução, fora do git
-    ├── state.json     # Salas, mesas, agentes e histórico
-    ├── chats/<id>.json# Conversa, memória e último commit de cada mesa
-    ├── sessions/      # Sessões completas do Claude (uma por conversa)
-    └── hub.json       # Chave dos conectores
+    ├── auth.json      # Contas (senhas com scrypt), sessões, convites e tokens dos PCs (só hashes)
+    ├── hub.json       # Token do conector embutido (modo local)
+    └── offices/<id>/  # Um escritório por conta
+        ├── state.json      # Salas, mesas, agentes e histórico
+        ├── chats/<id>.json # Conversa, memória e último commit de cada mesa
+        └── sessions/       # Sessões completas do Claude (uma por conversa)
 ```
 
 Para entender o funcionamento interno (fluxo de dados, estados, como o canvas é desenhado e como as permissões são intermediadas), veja **[docs/ARQUITETURA.md](docs/ARQUITETURA.md)**.
@@ -227,8 +243,10 @@ Para entender o funcionamento interno (fluxo de dados, estados, como o canvas é
 
 O hub abre pastas e programas e executa agentes que editam arquivos, então:
 
-- **O hub só aceita conexões da própria máquina** (`127.0.0.1`) até existir login.
-- **Conectores e hooks precisam da chave** do hub (`data/hub.json`). Quem tem a chave pode mandar trabalho para os PCs conectados: não compartilhe.
+- **Login obrigatório.** Senhas com scrypt e sal; sessão em cookie `HttpOnly` + `SameSite=Lax` (e `Secure` sob HTTPS), válida por 30 dias; limite de tentativas de senha por IP.
+- **Cada conta só enxerga o próprio escritório.**
+- **PCs pareados por código** de uso único (10 min). Cada PC recebe um token próprio, revogável; no disco ficam só os hashes de sessões, convites e tokens.
+- **O hub escuta só em `127.0.0.1`** por padrão. Publicar na internet só atrás de HTTPS (próxima etapa).
 - **A API só aceita requisições JSON.** Isso impede que um site qualquer dispare ações com um formulário (CSRF).
 - **Os agentes rodam com as permissões do Claude Code.** Nada destrutivo acontece sem passar pelo cartão de permissão, a não ser o que você já liberou com "Sempre permitir" ou nas suas configurações.
 
@@ -237,7 +255,8 @@ O hub abre pastas e programas e executa agentes que editam arquivos, então:
 - Notificação do Windows quando um agente ficar esperando você
 - Reunião de verdade: escolher agentes e um tema para eles discutirem e devolverem um resumo
 - Modo de edição para montar e decorar as salas (arrastar mesas, móveis)
-- Contas e login no hub, e publicação na VPS com HTTPS
+- Publicação na VPS com HTTPS
+- Escritório compartilhado entre contas (vários membros)
 - Vários agentes na mesma mesa
 - Contador de horas trabalhadas por projeto
 - Sons e mais animações (comemoração ao concluir, por exemplo)

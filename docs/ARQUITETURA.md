@@ -4,7 +4,7 @@ Este documento explica como as peças do hub se conectam, para quem vai manter o
 
 ## Visão geral
 
-O sistema tem duas partes: o **hub**, que é o escritório central, e um **conector** em cada PC, onde os agentes de fato trabalham.
+O sistema tem duas partes: o **hub**, que é o escritório central (com contas), e um **conector** em cada PC, onde os agentes de fato trabalham.
 
 ```
 ┌──────────── navegador (qualquer PC) ────────────┐
@@ -12,7 +12,7 @@ O sistema tem duas partes: o **hub**, que é o escritório central, e um **conec
 └───────▲────────────────────────────┬────────────┘
         │ SSE /api/events             │ fetch /api/...  (+ X-Hub-Env: PC escolhido)
 ┌───────┴────────────────────────────▼────────────────────────────────────┐
-│ HUB  server.js                                                          │
+│ HUB  server.js (rotas, login) · auth.js (contas, tokens) · office.js    │
 │  estado (data/state.json) · conversas (chats.js → data/chats/)          │
 │  sessões do Claude (session-store.js → data/sessions/) · API · SSE      │
 │  connectors.js: PCs conectados, comandos (RPC) e eventos                │
@@ -29,15 +29,36 @@ O sistema tem duas partes: o **hub**, que é o escritório central, e um **conec
 
 Os princípios:
 
+- **Uma conta, um escritório.** Cada conta é dona de um escritório (`data/offices/<id>/`), carregado sob demanda como uma instância de `Office`. A conta guarda a lista `offices`, preparada para, no futuro, um escritório ter vários membros.
 - **O hub é a única fonte da verdade.** O navegador e os conectores não guardam estado próprio. Toda ação vira uma chamada de API: o hub altera o estado, salva e transmite o resultado por SSE.
 - **O hub nunca toca no PC de ninguém.** Pastas, git, seletor de pastas, VS Code e o próprio Claude rodam no conector. O hub só manda comandos. É isso que permite colocar o hub numa VPS.
 - **A conexão sai do PC.** O conector abre um stream SSE com o hub e responde por HTTP. O PC não precisa de porta aberta nem de IP público, e funciona atrás de proxy e HTTPS. Não há dependência de WebSocket.
 - **Modo local por padrão.** `npm start` sobe o hub com um **conector embutido** para o próprio PC (`HUB_SEM_CONECTOR=1` desliga). Para quem usa um computador só, nada muda.
 - **Sem frameworks.** Servidor com `http` do Node, front em JavaScript puro. A única dependência é o `@anthropic-ai/claude-agent-sdk`.
 
-## Modelo de dados (no hub)
+## Contas e credenciais (`auth.js`)
 
-`data/state.json`:
+`data/auth.json`:
+
+```jsonc
+{
+  "users": [{ "id": "u…", "email": "…", "name": "…", "salt": "…", "hash": "…", "offices": ["o…"], "createdAt": 0 }],
+  "sessions":   { "<sha256 do token>": { "userId": "u…", "exp": 0 } },   // login (cookie hub_sessao)
+  "invites":    { "<sha256 do código>": { "by": "u…", "exp": 0 } },      // convite: 7 dias, uso único
+  "connectors": { "<sha256 do token>": { "id": "…", "officeId": "o…", "envId": "e…", "name": "PC", "createdAt": 0, "lastSeen": 0 } }
+}
+```
+
+- **Senhas** com `scrypt` (N=16384) e sal próprio, comparadas com `timingSafeEqual`. **Limite de tentativas** por IP: 8 erros bloqueiam por 15 min.
+- **Sessão:** token aleatório no cookie `hub_sessao` (`HttpOnly`, `SameSite=Lax`, `Secure` sob HTTPS), 30 dias. No disco fica só o hash. Trocar a senha encerra as outras sessões.
+- **Primeira conta** sem convite; as seguintes exigem um código de convite.
+- **Pareamento de PC:** `POST /api/pairing` gera um código (10 min, só em memória). O conector chama `POST /api/connector/pair` com o código e o id do PC (`X-Hub-Env`) e recebe um **token permanente ligado ao escritório e àquele PC**. Toda requisição do conector precisa do token **e** do mesmo id de PC. Remover o PC apaga o token e derruba a conexão.
+- **Conector embutido:** no modo local, o hub emite um token para o PC local no escritório da primeira conta (`data/hub.json`) e grava `~/.techtie-hub/conector.json` (se apontar para este hub) para o `hub-hook.js`.
+- **Migração:** a primeira conta criada recebe os arquivos que estavam soltos em `data/` (`state.json`, `chats/`, `sessions/`).
+
+## Modelo de dados (por escritório)
+
+`data/offices/<id>/state.json`:
 
 ```jsonc
 {
@@ -79,7 +100,7 @@ Regras:
 - **O histórico (`log`) guarda as 300 entradas mais recentes**, com a mais nova primeiro.
 - **O id ganha o prefixo da coleção** (`p…` para mesas, `a…` para agentes, `r…` para salas) mais 8 caracteres hexadecimais.
 
-`data/chats/<projectId>.json` guarda a conversa de cada mesa (`chats.js`):
+`data/offices/<id>/chats/<projectId>.json` guarda a conversa de cada mesa (`chats.js`):
 
 ```jsonc
 {
@@ -94,7 +115,7 @@ Regras:
 }
 ```
 
-`data/sessions/<sessionId>.jsonl` guarda as sessões completas do Claude, espelhadas pelo SDK (`session-store.js`). `data/hub.json` guarda a **chave dos conectores**.
+`data/offices/<id>/sessions/<sessionId>.jsonl` guarda as sessões completas do Claude, espelhadas pelo SDK (`session-store.js`).
 
 O estado transmitido ao navegador tem dois campos que não são salvos:
 
@@ -116,11 +137,13 @@ O estado transmitido ao navegador tem dois campos que não são salvos:
 "connectors": { "e1a2b3c4": { "name": "PC de casa", "since": 1729700000000 } } // PCs conectados agora
 ```
 
-## Hub (`server.js`)
+## Hub (`server.js` + `office.js`)
 
+- **Quem é quem:** `api()` decide pela rota. `/api/auth/*` (contas) não exige login; `/api/connector/*`, `/api/hook` e `/api/report` usam o token do PC; o resto exige o cookie de sessão e usa o escritório da conta (`getOffice(user.offices[0])`) em `officeApi()`.
+- **`Office`** (`office.js`) reúne o que antes era global: `state`, `live`, `chats`, `sessions`, `connectors`, navegadores conectados, `save()`, `setStatus()`, `envFor/needEnv`, `handleHook`.
 - **`save()`** grava `state.json` e transmite o estado completo, `snapshot()` = estado + `live` + `connectors`, para todos os navegadores. **Qualquer mudança de estado deve terminar em `save()`.**
 - **`broadcast(event, data)`** transmite eventos SSE. O evento sem nome carrega o estado completo, e o evento `chat` carrega uma nova linha de conversa.
-- **Rotas** são resolvidas em `api()` a partir de `/api/<resource>/<id>/<action>`. As rotas dos conectores ficam em `connectorApi()`.
+- **Rotas** são resolvidas a partir de `/api/<resource>/<id>/<action>`: `authApi()`, `connectorApi()` e `officeApi()`.
 - **PC de cada pedido.** O navegador manda o cabeçalho `X-Hub-Env` com o PC escolhido. `envFor()` usa esse PC se estiver conectado, ou o único conectado. `needEnv()` responde 409 com uma mensagem amigável quando não há PC. Comandos para um pedido em andamento (`answer`, `stop`) vão para o PC onde ele está rodando (`live[id].envId`), venha de onde vier a resposta.
 - **Comandos ao conector** (`connectors.rpc(envId, tipo, dados, timeout)`):
 
@@ -139,17 +162,18 @@ O estado transmitido ao navegador tem dois campos que não são salvos:
 - **Proteções:**
   - escuta só em `127.0.0.1` até existir login (`HUB_HOST` muda);
   - recusa corpos que não sejam `application/json` (contra CSRF via `<form>`);
-  - conectores e hooks precisam da chave (`Authorization: Bearer`);
+  - login obrigatório; cada conta só acessa o próprio escritório;
+  - conectores, hooks e `report.js` usam o token do PC (`Authorization: Bearer`);
   - impede path traversal nos arquivos estáticos.
 - **`handleHook(ev)`** converte eventos do Claude Code em status. A mesa é encontrada pela pasta **naquele PC** (`projectForPath(cwd, env)`). Eventos de sessões do próprio hub são ignorados, porque já chegam pelo conector.
 
 ## Conector (`conector.js`)
 
-- **Identidade do PC** em `~/.techtie-hub/ambiente.json` (id + nome) e **configuração** em `~/.techtie-hub/conector.json` (endereço do hub + chave). `HUB_ENV_FILE` e `HUB_CONNECTOR_FILE` mudam esses caminhos, o que é útil para simular vários PCs numa máquina.
-- **Linha de comando:** `node conector.js --hub <URL> --chave <chave> [--nome "PC"]`. Grava a configuração; das próximas vezes basta `node conector.js`.
+- **Identidade do PC** em `~/.techtie-hub/ambiente.json` (id + nome) e **configuração** em `~/.techtie-hub/conector.json` (endereço do hub + token do PC). `HUB_ENV_FILE` e `HUB_CONNECTOR_FILE` mudam esses caminhos, o que é útil para simular vários PCs numa máquina.
+- **Linha de comando:** `node conector.js --hub <URL> --codigo XXXX-XXXX [--nome "PC"]`. Troca o código por um token (`pair`) e grava a configuração; das próximas vezes basta `node conector.js`. Se o hub recusar o token (PC removido), o conector avisa e tenta de novo só a cada minuto.
 - **Conexão:** abre `GET /api/connector/stream` e lê os comandos (`event: cmd`). Se cair, reconecta sozinho com espera crescente e reenvia o andamento dos pedidos em curso (`runner.resendLive`).
 - **Eventos em fila:** `emit()` manda os eventos um de cada vez, na ordem, para a conversa não embaralhar.
-- **No modo local**, o hub chama `conector.start()` no mesmo processo e grava `conector.json`, se não existir, para o `hub-hook.js` saber onde está o hub.
+- **No modo local**, o hub chama `conector.start()` no mesmo processo, com o token do PC local (ver Contas e credenciais).
 
 ## Runner (`runner.js`, dentro do conector)
 
@@ -184,7 +208,7 @@ O fluxo de um pedido:
 
 O Claude Code executa o hook a cada evento configurado (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `Notification`, `Stop`, `SessionEnd`), passando um JSON no stdin. O script:
 
-- **Lê o hub e a chave** em `~/.techtie-hub/conector.json` e a **identidade do PC** em `ambiente.json`. Com vários PCs, a mesma pasta pode existir em computadores diferentes, por isso o PC vai junto.
+- **Lê o hub e o token** em `~/.techtie-hub/conector.json` e a **identidade do PC** em `ambiente.json`. Com vários PCs, a mesma pasta pode existir em computadores diferentes, por isso o PC vai junto.
 - **Resume o evento**, tirando conteúdo de arquivos e textos grandes, e envia para `POST /api/hook` com timeout de 1,5 s.
 - **Sempre termina com código 0**, mesmo com o hub desligado, para nunca atrapalhar o Claude Code.
 
@@ -196,6 +220,7 @@ O arquivo é dividido em seções comentadas:
 
 | Seção | O que faz |
 |---|---|
+| **Login** | `boot()` consulta `/api/auth/status`: sem conta logada mostra a tela de entrada (`showLogin`: criar a primeira conta, entrar ou cadastrar com convite); com conta, conecta o SSE. Qualquer 401 da API volta para a tela de entrada. |
 | **PC ativo** | `resolveEnv()` escolhe o PC que executa os pedidos deste navegador: o escolhido na janela de PCs (`localStorage`), se estiver conectado, ou o único conectado. Define `state.env` e `p.folder` (pasta da mesa nesse PC). `api()` manda o cabeçalho `X-Hub-Env`. |
 | **Salas** | Só a sala exibida (`roomId`, lembrada no `localStorage`) é desenhada. `roomProjects()` lista as mesas dela, e `visibleAgents()` lista os agentes com mesa nela, mais os agentes sem mesa, que ficam no lounge da primeira sala. Trocar de sala (`switchRoom`) recria os personagens já sentados. |
 | **Layout do mundo** | Geometria em "pixels de mundo" (tile de 16 px), multiplicada por `SCALE` na tela. Fileiras de `room.cols` mesas (5×5 tiles cada), áreas especiais à direita, parede com janelas no topo. A sala cresce conforme o número de mesas. |
@@ -229,11 +254,11 @@ Não há testes automatizados ainda. Para testar sem mexer nos seus dados, suba 
 ```bash
 # hub + conector embutido ("PC A")
 PORT=4399 HUB_DATA=/tmp/t/data/state.json HUB_ENV_FILE=/tmp/t/a.json HUB_CONNECTOR_FILE=/tmp/t/a-con.json node server.js
-# segundo PC ("PC B"); a chave está em /tmp/t/data/hub.json
-HUB_ENV_FILE=/tmp/t/b.json HUB_CONNECTOR_FILE=/tmp/t/b-con.json node conector.js --hub http://localhost:4399 --chave <chave> --nome "PC B"
+# crie a conta em http://localhost:4399; depois, em PC → Conectar um PC, gere um código para o segundo PC ("PC B")
+HUB_ENV_FILE=/tmp/t/b.json HUB_CONNECTOR_FILE=/tmp/t/b-con.json node conector.js --hub http://localhost:4399 --codigo XXXX-XXXX --nome "PC B"
 ```
 
 Depois:
 
-- **Para verificar a API**, use `curl` com `-H "Content-Type: application/json"` e `-H "X-Hub-Env: <id do PC>"`.
+- **Para verificar a API**, faça login (`POST /api/auth/login`) guardando o cookie (`curl -c/-b`) e use `-H "Content-Type: application/json"` e `-H "X-Hub-Env: <id do PC>"`.
 - **Para simular eventos do Claude Code**, envie um JSON para o hook com as mesmas variáveis do PC: `echo '{"hook_event_name":"Stop","cwd":"..."}' | HUB_ENV_FILE=... HUB_CONNECTOR_FILE=... node hub-hook.js`.

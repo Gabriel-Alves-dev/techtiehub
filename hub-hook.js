@@ -42,7 +42,7 @@ process.stdin.on('end', async () => {
     };
     await fetch(`${hub}/api/hook`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.key || ''}` },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.token || ''}` },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(1500),
     });

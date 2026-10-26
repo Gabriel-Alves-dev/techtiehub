@@ -5,8 +5,9 @@
 // ("rode este pedido nesta pasta", "abra o seletor de pastas"...) e executa aqui, com o
 // login do Claude Code deste computador. Conversas, memória e sessões ficam no hub.
 //
-// Uso:  node conector.js --hub https://meu-hub.com --chave XXXX [--nome "PC do escritório"]
-//       (a configuração fica salva; das próximas vezes basta: node conector.js)
+// Uso:  node conector.js --hub https://meu-hub.com --codigo XXXX-XXXX [--nome "PC do escritório"]
+//       O código aparece no hub em PC → Conectar um PC e vale 10 minutos. O conector troca
+//       o código por um token só deste PC e salva; das próximas vezes basta: node conector.js
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -44,11 +45,24 @@ function loadEnv(file = ENV_FILE) {
   return env;
 }
 
-// hub: URL do hub; key: chave dos conectores (mostrada no hub em PC → Conectar outro PC)
-function start({ hub, key, envFile = ENV_FILE, log = console.log }) {
+// Troca o código de pareamento (gerado no hub) pelo token permanente deste PC.
+async function pair(hub, code, envFile = ENV_FILE) {
+  const env = loadEnv(envFile);
+  const res = await fetch(hub.replace(/\/$/, '') + '/api/connector/pair', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Hub-Env': env.id },
+    body: JSON.stringify({ code, name: env.name }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `hub respondeu ${res.status}`);
+  return data.token;
+}
+
+// hub: URL do hub; token: credencial deste PC (obtida com pair)
+function start({ hub, token, envFile = ENV_FILE, log = console.log }) {
   hub = hub.replace(/\/$/, '');
   const env = loadEnv(envFile);
-  const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${key}`, 'X-Hub-Env': env.id };
+  const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, 'X-Hub-Env': env.id };
 
   async function post(route, body) {
     const res = await fetch(hub + route, { method: 'POST', headers, body: JSON.stringify(body) });
@@ -111,7 +125,11 @@ function start({ hub, key, envFile = ENV_FILE, log = console.log }) {
     while (!stopped) {
       try {
         const res = await fetch(`${hub}/api/connector/stream?name=${encodeURIComponent(env.name)}`, { headers });
-        if (res.status === 401) throw new Error('chave do conector recusada pelo hub');
+        if (res.status === 401) {
+          // removido no hub (ou pareado com outro hub): não adianta insistir rápido
+          wait = 60000;
+          throw new Error('este PC não está pareado com o hub; gere um código em PC → Conectar um PC e rode: node conector.js --codigo XXXX-XXXX');
+        }
         if (!res.ok) throw new Error(`hub respondeu ${res.status}`);
         log(`Conectado ao hub ${hub} como "${env.name}"`);
         wait = 1000;
@@ -147,26 +165,34 @@ function start({ hub, key, envFile = ENV_FILE, log = console.log }) {
   return { env, runner, stop: () => (stopped = true) };
 }
 
-module.exports = { start, loadEnv, readJson, writeJson, ENV_FILE, CONFIG_FILE, HOME_DIR };
+module.exports = { start, pair, loadEnv, readJson, writeJson, ENV_FILE, CONFIG_FILE, HOME_DIR };
 
 // ---------- Linha de comando ----------
 if (require.main === module) {
-  const args = process.argv.slice(2);
-  const arg = (name) => {
-    const i = args.indexOf('--' + name);
-    return i >= 0 ? args[i + 1] : undefined;
-  };
-  const saved = readJson(CONFIG_FILE) || {};
-  const config = {
-    hub: arg('hub') || process.env.HUB_URL || saved.hub,
-    key: arg('chave') || process.env.HUB_KEY || saved.key,
-  };
-  if (!config.hub || !config.key) {
-    console.error('Uso: node conector.js --hub <URL do hub> --chave <chave> [--nome "Nome deste PC"]');
-    console.error('A chave aparece no hub em: PC → Conectar outro PC.');
+  (async () => {
+    const args = process.argv.slice(2);
+    const arg = (name) => {
+      const i = args.indexOf('--' + name);
+      return i >= 0 ? args[i + 1] : undefined;
+    };
+    if (arg('nome')) writeJson(ENV_FILE, { ...loadEnv(), name: arg('nome') });
+    const saved = readJson(CONFIG_FILE) || {};
+    const hub = arg('hub') || process.env.HUB_URL || saved.hub;
+    let token = saved.hub === hub ? saved.token : null;
+    if (arg('codigo')) {
+      if (!hub) throw new Error('informe também --hub <endereço do hub>');
+      token = await pair(hub, arg('codigo'));
+      console.log('PC pareado com o hub.');
+    }
+    if (!hub || !token) {
+      console.error('Uso: node conector.js --hub <endereço do hub> --codigo <XXXX-XXXX> [--nome "Nome deste PC"]');
+      console.error('O código aparece no hub em: PC → Conectar um PC (vale 10 minutos).');
+      process.exit(1);
+    }
+    writeJson(CONFIG_FILE, { hub, token }); // usado também pelo hub-hook.js e pelo report.js
+    start({ hub, token });
+  })().catch((e) => {
+    console.error('Falha:', e.message);
     process.exit(1);
-  }
-  writeJson(CONFIG_FILE, config); // usado também pelo hub-hook.js
-  if (arg('nome')) writeJson(ENV_FILE, { ...loadEnv(), name: arg('nome') });
-  start(config);
+  });
 }

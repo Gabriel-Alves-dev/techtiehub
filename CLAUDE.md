@@ -7,7 +7,9 @@ Leia `docs/ARQUITETURA.md` antes de mudanças estruturais.
 ## Mapa rápido
 
 - **Duas partes:** o HUB (`server.js`) guarda tudo e serve a interface, mas nunca roda o Claude nem toca em pastas. O CONECTOR (`conector.js`), um por PC, executa tudo que depende do computador e recebe comandos do hub (`connectors.rpc`). `npm start` sobe o hub com um conector embutido.
-- `server.js`: hub. Servidor HTTP nativo (sem framework), API REST, SSE, canal dos conectores (`/api/connector/*`) e hooks. O estado fica em memória e é salvo em `data/state.json`.
+- `server.js`: hub. Servidor HTTP nativo (sem framework): rotas, login, canal dos conectores (`/api/connector/*`) e hooks.
+- `auth.js`: contas (scrypt), sessões, convites e tokens dos PCs, em `data/auth.json` (só hashes).
+- `office.js`: um escritório por conta (`data/offices/<id>/`): estado, conversas, sessões, PCs conectados. **Nunca misture escritórios**: toda rota do navegador recebe o `Office` da conta logada.
 - `chats.js` / `session-store.js`: conversas e sessões do Claude, guardadas no hub.
 - `runner.js`: roda no conector. Uma execução do Claude por mesa; `canUseTool` fica pendente até o usuário responder. Também cuida da memória do agente.
 - `remote-store.js` / `local-ops.js`: no conector, as sessões lidas/gravadas no hub e as operações locais (pastas, seletor, VS Code).
@@ -26,12 +28,14 @@ Leia `docs/ARQUITETURA.md` antes de mudanças estruturais.
 - **Segurança:**
   - o servidor escuta só em `127.0.0.1`;
   - requisições não-GET exigem `Content-Type: application/json`;
+  - rotas do escritório exigem login; conectores/hooks usam o token do PC;
   - mantenha essas proteções, porque a API abre programas e roda agentes.
 - **Comentários curtos explicando o porquê**, no estilo do código existente.
 
 ## Rodar e testar
 
 - `npm start` sobe em <http://localhost:4321>, e `iniciar.bat` faz o mesmo no Windows.
+- **Teste com login:** crie a conta via `POST /api/auth/signup` (a primeira não precisa de convite) e guarde o cookie `hub_sessao`.
 - **Instância de teste isolada:** `PORT=4399 HUB_DATA=/tmp/t/data/state.json HUB_ENV_FILE=/tmp/t/a.json HUB_CONNECTOR_FILE=/tmp/t/a-con.json node server.js`. Sempre isole `HUB_ENV_FILE` e `HUB_CONNECTOR_FILE`, senão o teste grava em `~/.techtie-hub/` do usuário. Um segundo PC: `node conector.js` com outros arquivos (veja docs/ARQUITETURA.md → Testar). Não use os dados reais do usuário em testes.
 - **Checagem de sintaxe:** `for f in *.js public/app.js; do node --check "$f"; done`.
 - Não há testes automatizados. Valide pela API (`curl`) e abrindo o navegador.

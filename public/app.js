@@ -795,17 +795,122 @@ async function api(method, url, body, { quiet } = {}) {
   });
   if (!res.ok && res.status !== 204) {
     const err = await res.json().catch(() => ({}));
-    if (!quiet) alert(err.error || 'Erro ao falar com o servidor');
+    if (res.status === 401) showLogin(); // sessão expirou
+    else if (!quiet) alert(err.error || 'Erro ao falar com o servidor');
     throw Object.assign(new Error(err.error || 'Erro ao falar com o servidor'), { code: err.code, status: res.status });
   }
   return res.status === 204 ? null : res.json();
 }
 
+let events = null;
 function connect() {
-  const es = new EventSource('/api/events');
-  es.onmessage = (e) => applyState(JSON.parse(e.data));
-  es.addEventListener('chat', (e) => onChatEvent(JSON.parse(e.data)));
-  es.onerror = () => { es.close(); setTimeout(connect, 2000); };
+  events?.close();
+  events = new EventSource('/api/events');
+  events.onmessage = (e) => applyState(JSON.parse(e.data));
+  events.addEventListener('chat', (e) => onChatEvent(JSON.parse(e.data)));
+  // caiu: confere o login antes de reconectar (a sessão pode ter expirado)
+  events.onerror = () => { events.close(); setTimeout(boot, 2000); };
+}
+
+// ---------- Login ----------
+let me = null; // conta logada
+
+async function boot() {
+  let status;
+  try {
+    status = await fetch('/api/auth/status').then((r) => r.json());
+  } catch {
+    return setTimeout(boot, 3000); // hub fora do ar
+  }
+  if (!status.user) return showLogin(status.setup);
+  me = status.user;
+  document.getElementById('login').hidden = true;
+  connect();
+}
+
+function showLogin(setup = false) {
+  events?.close();
+  const box = document.getElementById('login');
+  if (!box.hidden && box.dataset.setup === String(setup)) return;
+  box.hidden = false;
+  box.dataset.setup = String(setup);
+  let mode = setup ? 'setup' : 'login';
+  const render = () => {
+    const signup = mode !== 'login';
+    box.querySelector('.login-card').innerHTML = `
+      <h1>TECHTIE HUB</h1>
+      <h2>${mode === 'setup' ? 'Criar sua conta' : signup ? 'Criar conta com convite' : 'Entrar'}</h2>
+      ${mode === 'setup' ? '<p class="muted">Primeira conta deste hub. O escritório que já existe aqui passa a ser seu.</p>' : ''}
+      <form>
+        ${signup ? '<label>Nome<input name="name" maxlength="40" autocomplete="name" /></label>' : ''}
+        <label>E-mail<input name="email" type="email" required autocomplete="email" /></label>
+        <label>Senha<input name="password" type="password" required minlength="${signup ? 8 : 1}" autocomplete="${signup ? 'new-password' : 'current-password'}" /></label>
+        ${mode === 'invite' ? '<label>Código do convite<input name="invite" required placeholder="XXXX-XXXX" /></label>' : ''}
+        <p class="login-error" hidden></p>
+        <div class="row"><button class="primary">${signup ? 'Criar conta' : 'Entrar'}</button></div>
+      </form>
+      ${mode === 'setup' ? '' : `<p class="muted login-switch"><a href="#" data-mode="${mode === 'login' ? 'invite' : 'login'}">
+        ${mode === 'login' ? 'Recebi um convite' : 'Já tenho conta'}</a></p>`}`;
+    const form = box.querySelector('form');
+    form.querySelector('input').focus();
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const err = form.querySelector('.login-error');
+      const res = await fetch(`/api/auth/${signup ? 'signup' : 'login'}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(Object.fromEntries(new FormData(form))),
+      });
+      if (!res.ok) {
+        err.textContent = (await res.json().catch(() => ({}))).error || 'Não deu certo';
+        err.hidden = false;
+        return;
+      }
+      box.hidden = true;
+      boot();
+    };
+    box.querySelector('[data-mode]')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      mode = e.target.dataset.mode;
+      render();
+    });
+  };
+  render();
+}
+
+// ---------- Janela da conta ----------
+function openAccountWindow() {
+  const win = openWindow('account', { w: 400, h: 520, cls: 'win-account' }, (win) => {
+    win.titleEl.textContent = '👤 Conta';
+    win.body.innerHTML = `
+      <p><b>${esc(me?.name || '')}</b><br><span class="muted">${esc(me?.email || '')}</span></p>
+      <h3>Trocar senha</h3>
+      <form data-form="password">
+        <label>Senha atual<input name="current" type="password" required autocomplete="current-password" /></label>
+        <label>Nova senha<input name="next" type="password" required minlength="8" autocomplete="new-password" /></label>
+        <div class="row"><button>Trocar senha</button><span class="muted" data-field="pw-msg"></span></div>
+      </form>
+      <h3>Convidar alguém</h3>
+      <p class="muted">A pessoa cria a própria conta, com um escritório só dela, usando este código (vale 7 dias e só uma vez).</p>
+      <div data-field="invite"><div class="row"><button data-act="invite">Gerar convite</button></div></div>
+      <h3>Sessão</h3>
+      <div class="row"><button class="danger" data-act="logout">Sair</button></div>`;
+    win.body.querySelector('[data-form=password]').onsubmit = async (e) => {
+      e.preventDefault();
+      await api('POST', '/api/auth/password', Object.fromEntries(new FormData(e.target)));
+      e.target.reset();
+      win.body.querySelector('[data-field=pw-msg]').textContent = 'Senha trocada. As outras sessões foram encerradas.';
+    };
+    win.body.querySelector('[data-act=invite]').onclick = async () => {
+      const inv = await api('POST', '/api/auth/invite', {});
+      win.body.querySelector('[data-field=invite]').innerHTML = `<div class="code">${esc(inv.code)}</div>
+        <p class="muted">Envie o código e o endereço do hub. A pessoa clica em “Recebi um convite” na tela de entrada.</p>`;
+    };
+    win.body.querySelector('[data-act=logout]').onclick = async () => {
+      await api('POST', '/api/auth/logout', {});
+      location.reload();
+    };
+  });
 }
 
 // ---------- Utilidades ----------
@@ -1155,12 +1260,21 @@ function openEnvWindow() {
   renderEnv(win);
 }
 
-let connectorInfo = null; // chave e endereço do hub (buscados uma vez)
-
 function renderEnv(win) {
   if (win.body.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return; // não atrapalha quem digita
   const online = state.connectors || {};
+  // PCs pareados com a conta (para poder remover); recarrega quando alguém conecta/desconecta
+  const onlineKey = Object.keys(online).sort().join();
+  if (win.onlineKey !== onlineKey) {
+    win.onlineKey = onlineKey;
+    api('GET', '/api/connectors', undefined, { quiet: true }).then((list) => {
+      win.paired = list;
+      renderEnv(win);
+    }).catch(() => {});
+  }
+  const paired = Object.fromEntries((win.paired || []).map((c) => [c.envId, c]));
   const envs = Object.entries(state.environments || {}).sort((a, b) => (b[0] in online) - (a[0] in online) || b[1].lastSeen - a[1].lastSeen);
+  const p = win.pairing && win.pairing.exp > Date.now() ? win.pairing : null;
   win.body.innerHTML = `
     <p class="muted">Os agentes trabalham no PC escolhido aqui, com as pastas e o login do Claude daquele computador.
       Conversas, memória e sessões ficam no hub, então qualquer PC conectado continua de onde parou.</p>
@@ -1171,15 +1285,17 @@ function renderEnv(win) {
       <span class="muted">${id in online ? 'conectado' : 'visto ' + timeAgo(e.lastSeen)}</span>
       ${id === state.env?.id ? '<span class="badge st-concluido">em uso</span>'
         : id in online ? `<button data-use="${id}">Usar</button>` : ''}
+      ${paired[id] ? `<button class="danger" data-revoke="${paired[id].id}" title="Desconecta e exige parear de novo">Remover</button>` : ''}
     </div>`).join('') || '<p class="muted">Nenhum PC conectou ainda.</p>'}
     ${state.env ? `<label style="margin-top:12px">Nome do PC em uso<div class="folder-row">
       <input data-field="name" maxlength="40" value="${esc(state.env.name)}" />
       <button data-act="rename">Salvar</button></div></label>` : ''}
     <h3>Conectar um PC</h3>
-    <p class="muted">No outro computador: instale o Node.js, faça login no Claude Code, clone este repositório, rode <code>npm install</code> e depois:</p>
-    <div class="code" data-field="cmd">carregando…</div>
-    <div class="row"><button data-act="copy">Copiar comando</button></div>
-    <p class="muted">Enquanto o hub roda só neste computador, apenas conectores daqui conseguem alcançá-lo. Com o hub na VPS, qualquer PC conecta.</p>
+    <p class="muted">No outro computador: instale o Node.js, faça login no Claude Code, clone este repositório e rode <code>npm install</code>.
+      Depois gere um código aqui (vale 10 minutos) e rode o comando lá:</p>
+    ${p ? `<div class="code" data-field="cmd">node conector.js --hub ${esc(p.hub)} --codigo ${esc(p.code)} --nome "Nome do PC"</div>
+      <div class="row"><button data-act="copy">Copiar comando</button><span class="muted">vale até ${new Date(p.exp).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</span></div>`
+      : '<div class="row"><button class="primary" data-act="pair">Gerar código</button></div>'}
     <h3>Backup</h3>
     <p class="muted">Exporte tudo (mesas, agentes, conversas, memória e sessões) para um arquivo, ou restaure um backup.</p>
     <div class="row">
@@ -1190,12 +1306,19 @@ function renderEnv(win) {
   win.body.querySelectorAll('[data-use]').forEach((b) => (b.onclick = () => chooseEnv(b.dataset.use)));
   const rename = win.body.querySelector('[data-act=rename]');
   if (rename) rename.onclick = () => api('PATCH', '/api/environment', { name: win.body.querySelector('[data-field=name]').value });
-  connectorInfo ??= api('GET', '/api/connector-info');
-  connectorInfo.then(({ hub, key }) => {
-    const cmd = win.body.querySelector('[data-field=cmd]');
-    if (cmd) cmd.textContent = `node conector.js --hub ${hub} --chave ${key} --nome "Nome do PC"`;
-  });
-  win.body.querySelector('[data-act=copy]').onclick = (e) => {
+  win.body.querySelectorAll('[data-revoke]').forEach((b) => (b.onclick = async () => {
+    if (!confirm('Remover este PC? Ele desconecta e só volta pareando de novo com um código.')) return;
+    await api('DELETE', `/api/connectors/${b.dataset.revoke}`);
+    win.onlineKey = null;
+    renderEnv(win);
+  }));
+  const pairBtn = win.body.querySelector('[data-act=pair]');
+  if (pairBtn) pairBtn.onclick = async () => {
+    win.pairing = await api('POST', '/api/pairing', {});
+    renderEnv(win);
+  };
+  const copy = win.body.querySelector('[data-act=copy]');
+  if (copy) copy.onclick = (e) => {
     navigator.clipboard?.writeText(win.body.querySelector('[data-field=cmd]').textContent);
     e.target.textContent = 'Copiado!';
   };
@@ -1497,8 +1620,9 @@ document.getElementById('btn-new-agent').onclick = () => openAgentDialog();
 document.getElementById('btn-team').onclick = () => openTeamWindow();
 document.getElementById('btn-log').onclick = () => openLogWindow();
 document.getElementById('btn-env').onclick = () => openEnvWindow();
+document.getElementById('btn-account').onclick = () => openAccountWindow();
 
 // ---------- Início ----------
-connect();
+boot();
 requestAnimationFrame(frame);
 setInterval(() => { if (world) refreshUI(); }, 30000);
