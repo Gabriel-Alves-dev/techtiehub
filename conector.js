@@ -126,6 +126,7 @@ function start({ hub, token, envFile = ENV_FILE, log = console.log }) {
     git: ({ folder, last }) => git.status(folder, last),
     'folder-info': ({ folder }) => ops.folderInfo(folder),
     'pick-folder': () => ops.pickFolder(),
+    'set-mode': ({ projectId, mode }) => runner.setMode(projectId, mode),
     open: ({ folder, app }) => ops.openFolder(folder, app),
     rename: ({ name }) => {
       env.name = name;

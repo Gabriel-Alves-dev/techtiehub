@@ -1177,6 +1177,9 @@ function updateProjectWindow(win) {
       ${p.folder ? `<button data-act="folder" title="${esc(p.folder)}">📁 Pasta</button><button data-act="vscode">VS Code</button>` : ''}
       <button data-act="edit-desk" title="Editar mesa">⚙ Mesa</button>
       <button data-act="memory" title="O que o agente sabe deste projeto">🧠 Memória</button>
+      <select data-act="perm" title="Quando o agente pede permissão para agir nesta mesa">
+        ${Object.entries(PERMISSION_NAMES).map(([k, v]) => `<option value="${k}" ${k === (p.permissionMode || '') ? 'selected' : ''}>🔐 ${v}</option>`).join('')}
+      </select>
       <select data-act="assign" title="Agente nesta mesa">
         <option value="">— sem agente —</option>
         ${state.agents.map((x) => `<option value="${x.id}" ${x.id === p.agentId ? 'selected' : ''}>👤 ${esc(x.name)}</option>`).join('')}
@@ -1191,6 +1194,9 @@ function updateProjectWindow(win) {
     on('memory', () => openMemoryWindow(p.id));
     on('edit-agent', () => openAgentDialog(a));
     tb.querySelector('[data-act=assign]').onchange = (e) => api('PATCH', `/api/projects/${p.id}`, { agentId: e.target.value || null });
+    tb.querySelector('[data-act=perm]').onchange = (e) => {
+      if (!setPermissionMode(p, e.target.value)) e.target.value = p.permissionMode || '';
+    };
   }
 
   const who = a ? a.name : 'o agente';
@@ -1555,8 +1561,13 @@ function renderPending(win, p, pend) {
         ${pend.canRemember ? '<button data-d="always" title="Não pergunta de novo para ações iguais neste projeto">Sempre permitir</button>' : ''}
         <button class="danger" data-d="deny">Negar</button>
       </div>
+      ${p.permissionMode === 'bypassPermissions' ? '' : '<a href="#" class="stop-asking" data-act="bypass">Parar de pedir permissão nesta mesa…</a>'}
     </div>`;
     box.querySelectorAll('[data-d]').forEach((b) => (b.onclick = () => answer({ decision: b.dataset.d })));
+    box.querySelector('[data-act=bypass]')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      setPermissionMode(p, 'bypassPermissions'); // libera também este pedido em aberto
+    });
   }
 }
 
@@ -1734,6 +1745,23 @@ function openProjectDialog(p) {
       e.target.textContent = 'Escolher…';
     }
   };
+}
+
+// Modos de permissão da mesa (Claude Code). Em todos, perguntas de decisão continuam chegando.
+const PERMISSION_NAMES = {
+  '': 'Perguntar sempre',
+  acceptEdits: 'Editar sem pedir',
+  auto: 'Automático (Claude decide)',
+  bypassPermissions: 'Liberar tudo',
+};
+
+// Devolve false se o usuário desistiu no aviso.
+function setPermissionMode(p, mode) {
+  if (mode === 'bypassPermissions' && !confirm(
+    `Liberar tudo na mesa "${p.name}"?\n\nO agente vai rodar comandos e editar/apagar arquivos no PC sem pedir permissão. ` +
+    'As perguntas de decisão continuam chegando para você.\n\nUse em projetos com git (para poder desfazer). Dá para voltar a qualquer momento no 🔐 da mesa.')) return false;
+  api('PATCH', `/api/projects/${p.id}`, { permissionMode: mode });
+  return true;
 }
 
 const MODEL_NAMES = { '': 'Padrão do PC', opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku' };

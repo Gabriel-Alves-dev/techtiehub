@@ -259,6 +259,8 @@ const newId = (prefix) => prefix + token(6);
 // imagens aceitas nos pedidos (as mesmas da API do Claude) → extensão do arquivo guardado
 const IMAGE_TYPES = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp' };
 const MAX_IMAGES = 6;
+// '' = perguntar; acceptEdits = edita sem pedir; auto = o Claude decide; bypassPermissions = nunca pede
+const PERMISSION_MODES = ['', 'acceptEdits', 'auto', 'bypassPermissions'];
 
 function pick(obj, fields) {
   const out = {};
@@ -267,7 +269,7 @@ function pick(obj, fields) {
 }
 
 const FIELDS = {
-  projects: ['name', 'description', 'color', 'agentId', 'roomId'], // pasta: tratada à parte (uma por PC)
+  projects: ['name', 'description', 'color', 'agentId', 'roomId', 'permissionMode'], // pasta: tratada à parte (uma por PC)
   agents: ['name', 'role', 'shirt', 'hair', 'skin', 'status', 'message', 'model', 'effort'],
   rooms: ['name', 'cols', 'floor', 'areas'],
 };
@@ -388,7 +390,10 @@ async function officeApi(req, res, url, o, user) {
     const chat = chats.get(id);
     const agent = state.agents.find((a) => a.id === project.agentId);
     // modelo e esforço do agente da mesa (vazio = padrão do Claude Code do PC)
-    const brief = (folder) => ({ id, name: project.name, description: project.description, folder, model: agent?.model || '', effort: agent?.effort || '' });
+    const brief = (folder) => ({
+      id, name: project.name, description: project.description, folder,
+      model: agent?.model || '', effort: agent?.effort || '', permissionMode: project.permissionMode || '',
+    });
 
     if (action === 'chat' && method === 'GET') return send(res, 200, chat);
     if (action === 'memory' && method === 'GET') {
@@ -505,6 +510,8 @@ async function officeApi(req, res, url, o, user) {
     if (body.floor !== undefined && !FLOORS.includes(body.floor)) body.floor = 'madeira';
     // modelo/esforço do agente: '' = padrão do Claude Code do PC
     if (body.model !== undefined && !['', 'opus', 'sonnet', 'haiku'].includes(body.model)) body.model = '';
+    // modo de permissão da mesa: '' = perguntar sempre
+    if (body.permissionMode !== undefined && !PERMISSION_MODES.includes(body.permissionMode)) body.permissionMode = '';
     if (body.effort !== undefined && !['', 'low', 'medium', 'high', 'xhigh', 'max'].includes(body.effort)) body.effort = '';
     if (body.areas !== undefined) {
       // sempre sobra ao menos uma área, para os agentes ociosos terem para onde ir
@@ -548,6 +555,10 @@ async function officeApi(req, res, url, o, user) {
         delete changes.agentId;
       }
       Object.assign(item, changes);
+      // mudou o modo com um pedido rodando: vale na hora (libera o que estiver esperando)
+      if (resource === 'projects' && 'permissionMode' in changes && live[item.id]) {
+        connectors.rpc(live[item.id].envId, 'set-mode', { projectId: item.id, mode: item.permissionMode }).catch(() => {});
+      }
       applyFolder(item);
       o.save();
       return send(res, 200, item);

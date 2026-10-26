@@ -428,3 +428,5 @@ button.warn { color: var(--warn); border-color: var(--warn); }
 
 /* o atributo hidden sempre esconde (estilos como input { display: block } não podem anular) */
 [hidden] { display: none !important; }
+
+.stop-asking { display: inline-block; margin-top: 8px; font-size: 11px; color: var(--muted); }

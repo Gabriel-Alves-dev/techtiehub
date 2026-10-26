@@ -76,6 +76,13 @@ Na janela de uma mesa:
 
 - **Imagens.** Cole um print com **Ctrl+V** na caixa de texto, arraste uma imagem para a janela ou use **📎**. Até 6 por pedido (PNG, JPEG, GIF ou WebP); imagens grandes são reduzidas antes de enviar. Ficam no histórico da conversa.
 - **Enviar.** Enter envia e Shift+Enter quebra a linha. Cada mesa executa uma tarefa por vez, mas mesas diferentes trabalham em paralelo.
+- **🔐 Permissões da mesa** (seletor na janela da mesa). Vale na hora, inclusive para um pedido de permissão em aberto:
+  - **Perguntar sempre:** o padrão; pede antes de rodar comandos e editar arquivos.
+  - **Editar sem pedir:** edita arquivos direto; comandos ainda pedem.
+  - **Automático (Claude decide):** um classificador do Claude aprova o que é seguro e só pergunta no que é arriscado.
+  - **Liberar tudo:** nunca pede permissão (atalho no próprio cartão: *Parar de pedir permissão nesta mesa…*). Use em projetos com git.
+
+  Em todos os modos, as **perguntas de decisão** do agente continuam chegando para você.
 - **Pedido de permissão.** Mostra o comando ou o arquivo envolvido.
   - **Permitir** libera só essa vez.
   - **Sempre permitir** grava a regra em `.claude/settings.local.json` dentro da pasta do projeto.

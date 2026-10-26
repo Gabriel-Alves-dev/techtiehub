@@ -94,7 +94,11 @@ class Runner {
     if (this.isRunning(project.id)) throw new Error('o agente ainda está trabalhando nesta mesa');
     chat = { entries: [], ...chat };
     this.chats.set(project.id, chat);
-    const run = { running: true, pending: null, abort: new AbortController(), phase: { kind: 'thinking', since: Date.now() } };
+    const run = {
+      running: true, pending: null, abort: new AbortController(),
+      phase: { kind: 'thinking', since: Date.now() },
+      mode: project.permissionMode || '', // modo de permissão da mesa (pode mudar no meio: setMode)
+    };
     this.runs.set(project.id, run);
     this.push(project.id, 'user', text, imageRefs);
     this.hub.status(project.id, 'trabalhando', text, true);
@@ -182,6 +186,9 @@ class Runner {
           // modelo e esforço escolhidos para o agente; vazio = o padrão do Claude Code deste PC
           model: project.model || undefined,
           effort: project.effort || undefined,
+          // perguntas de decisão (AskUserQuestion) continuam chegando ao usuário em qualquer modo
+          permissionMode: project.permissionMode || 'default',
+          allowDangerouslySkipPermissions: project.permissionMode === 'bypassPermissions',
           abortController: run.abort,
           canUseTool: (name, input, opts) => this.ask(project.id, run, name, input, opts),
         },
@@ -247,7 +254,31 @@ class Runner {
   }
 
   // canUseTool: fica esperando até o usuário responder no hub.
+  // Mudança de modo com o pedido já rodando (o SDK só aplica o modo no início): a partir
+  // daqui o runner mesmo aprova o que o novo modo libera, inclusive o pedido em aberto.
+  setMode(projectId, mode) {
+    const run = this.runs.get(projectId);
+    if (!run?.running) return { ok: true };
+    run.mode = mode;
+    const p = run.pending;
+    if (p && this.autoAllowed(run, p.toolName)) {
+      run.pending = null;
+      this.push(projectId, 'system', `Liberado pelo modo da mesa: ${this.describeTool(p.toolName, p.input)}`);
+      this.hub.status(projectId, 'trabalhando', 'Continuando…', false);
+      p.resolve({ behavior: 'allow', updatedInput: p.input });
+      this.emitLive(projectId);
+    }
+    return { ok: true };
+  }
+
+  autoAllowed(run, toolName) {
+    if (toolName === 'AskUserQuestion') return false; // decisões são sempre do usuário
+    if (run.mode === 'bypassPermissions') return true;
+    return run.mode === 'acceptEdits' && ['Edit', 'MultiEdit', 'Write', 'NotebookEdit'].includes(toolName);
+  }
+
   ask(projectId, run, toolName, input, { signal, suggestions } = {}) {
+    if (this.autoAllowed(run, toolName)) return Promise.resolve({ behavior: 'allow', updatedInput: input });
     return new Promise((resolve) => {
       const id = crypto.randomBytes(4).toString('hex');
       run.pending = { id, toolName, input, suggestions: suggestions || [], resolve };
