@@ -1,0 +1,172 @@
+#!/usr/bin/env node
+// Conector do Techtie Hub: roda os agentes NESTE PC para um hub (local ou na nuvem).
+//
+// Ele abre uma conexão de saída com o hub (não precisa de porta aberta), recebe comandos
+// ("rode este pedido nesta pasta", "abra o seletor de pastas"...) e executa aqui, com o
+// login do Claude Code deste computador. Conversas, memória e sessões ficam no hub.
+//
+// Uso:  node conector.js --hub https://meu-hub.com --chave XXXX [--nome "PC do escritório"]
+//       (a configuração fica salva; das próximas vezes basta: node conector.js)
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const crypto = require('crypto');
+const git = require('./git');
+const ops = require('./local-ops');
+const { Runner } = require('./runner');
+const { RemoteSessionStore } = require('./remote-store');
+const { describeTool } = require('./describe');
+
+const HOME_DIR = path.join(os.homedir(), '.techtie-hub');
+const ENV_FILE = process.env.HUB_ENV_FILE || path.join(HOME_DIR, 'ambiente.json');
+const CONFIG_FILE = process.env.HUB_CONNECTOR_FILE || path.join(HOME_DIR, 'conector.json');
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const readJson = (file) => {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return null;
+  }
+};
+const writeJson = (file, data) => {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(data, null, 2));
+};
+
+// Identidade deste PC (id + nome). Fica fora de qualquer pasta de dados: é do computador.
+function loadEnv(file = ENV_FILE) {
+  let env = readJson(file);
+  if (!env?.id) {
+    env = { id: 'e' + crypto.randomBytes(4).toString('hex'), name: os.hostname() };
+    writeJson(file, env);
+  }
+  return env;
+}
+
+// hub: URL do hub; key: chave dos conectores (mostrada no hub em PC → Conectar outro PC)
+function start({ hub, key, envFile = ENV_FILE, log = console.log }) {
+  hub = hub.replace(/\/$/, '');
+  const env = loadEnv(envFile);
+  const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${key}`, 'X-Hub-Env': env.id };
+
+  async function post(route, body) {
+    const res = await fetch(hub + route, { method: 'POST', headers, body: JSON.stringify(body) });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(data?.error || `hub respondeu ${res.status}`);
+    return data;
+  }
+
+  // eventos vão em fila, na ordem em que aconteceram (a conversa não pode embaralhar)
+  let chain = Promise.resolve();
+  const emit = (type, payload) => {
+    chain = chain.then(() => post('/api/connector/event', { type, ...payload })).catch((e) => log('Evento perdido:', e.message));
+  };
+
+  const store = new RemoteSessionStore((op, body) => post('/api/connector/sessions/' + op, body));
+  const runner = new Runner({
+    env,
+    store,
+    describeTool,
+    hub: {
+      push: (projectId, role, text) => emit('chat-push', { projectId, role, text }),
+      update: (projectId, fields) => emit('chat-update', { projectId, fields }),
+      status: (projectId, status, message, logIt) => emit('status', { projectId, status, message, log: logIt }),
+      live: (projectId, live) => emit('live', { projectId, live }),
+    },
+  });
+
+  const handlers = {
+    run: ({ project, text, chat }) => {
+      if (!ops.isDir(project.folder)) throw new Error(`a pasta ${project.folder} não existe neste PC`);
+      return runner.send(project, text, chat);
+    },
+    answer: ({ projectId, ...body }) => runner.answer(projectId, body),
+    stop: ({ projectId }) => runner.stop(projectId),
+    memory: ({ project, chat }) => runner.refreshMemory(project, chat),
+    git: ({ folder, last }) => git.status(folder, last),
+    'folder-info': ({ folder }) => ops.folderInfo(folder),
+    'pick-folder': () => ops.pickFolder(),
+    open: ({ folder, app }) => ops.openFolder(folder, app),
+    rename: ({ name }) => {
+      env.name = name;
+      writeJson(envFile, env);
+      return env;
+    },
+  };
+
+  async function handle({ id, type, payload }) {
+    try {
+      if (!handlers[type]) throw new Error('comando desconhecido: ' + type);
+      const data = await handlers[type](payload || {});
+      await post('/api/connector/reply', { id, ok: true, data: data ?? null });
+    } catch (e) {
+      await post('/api/connector/reply', { id, ok: false, error: e.message }).catch(() => {});
+    }
+  }
+
+  let stopped = false;
+  (async function loop() {
+    let wait = 1000;
+    while (!stopped) {
+      try {
+        const res = await fetch(`${hub}/api/connector/stream?name=${encodeURIComponent(env.name)}`, { headers });
+        if (res.status === 401) throw new Error('chave do conector recusada pelo hub');
+        if (!res.ok) throw new Error(`hub respondeu ${res.status}`);
+        log(`Conectado ao hub ${hub} como "${env.name}"`);
+        wait = 1000;
+        runner.resendLive();
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          let cut;
+          while ((cut = buf.indexOf('\n\n')) >= 0) {
+            const block = buf.slice(0, cut);
+            buf = buf.slice(cut + 2);
+            let event = 'message', data = '';
+            for (const line of block.split('\n')) {
+              if (line.startsWith('event: ')) event = line.slice(7);
+              else if (line.startsWith('data: ')) data += line.slice(6);
+            }
+            if (event === 'cmd' && data) handle(JSON.parse(data));
+          }
+        }
+        log('Conexão com o hub encerrada.');
+      } catch (e) {
+        log(`Sem conexão com o hub (${e.message}). Tentando de novo em ${Math.round(wait / 1000)}s…`);
+      }
+      await sleep(wait);
+      wait = Math.min(wait * 2, 30000);
+    }
+  })();
+
+  return { env, runner, stop: () => (stopped = true) };
+}
+
+module.exports = { start, loadEnv, readJson, writeJson, ENV_FILE, CONFIG_FILE, HOME_DIR };
+
+// ---------- Linha de comando ----------
+if (require.main === module) {
+  const args = process.argv.slice(2);
+  const arg = (name) => {
+    const i = args.indexOf('--' + name);
+    return i >= 0 ? args[i + 1] : undefined;
+  };
+  const saved = readJson(CONFIG_FILE) || {};
+  const config = {
+    hub: arg('hub') || process.env.HUB_URL || saved.hub,
+    key: arg('chave') || process.env.HUB_KEY || saved.key,
+  };
+  if (!config.hub || !config.key) {
+    console.error('Uso: node conector.js --hub <URL do hub> --chave <chave> [--nome "Nome deste PC"]');
+    console.error('A chave aparece no hub em: PC → Conectar outro PC.');
+    process.exit(1);
+  }
+  writeJson(CONFIG_FILE, config); // usado também pelo hub-hook.js
+  if (arg('nome')) writeJson(ENV_FILE, { ...loadEnv(), name: arg('nome') });
+  start(config);
+}

@@ -4,34 +4,38 @@ Este documento explica como as peças do hub se conectam, para quem vai manter o
 
 ## Visão geral
 
+O sistema tem duas partes: o **hub**, que é o escritório central, e um **conector** em cada PC, onde os agentes de fato trabalham.
+
 ```
-                ┌─────────────────────────── navegador ───────────────────────────┐
-                │ public/app.js                                                    │
-                │  canvas (escritório) · balões (HTML) · janelas flutuantes        │
-                └──────▲───────────────────────────────┬──────────────────────────┘
-                       │ SSE /api/events               │ fetch /api/...
-                       │ (estado + mensagens de chat)  │ (ações do usuário)
-                ┌──────┴───────────────────────────────▼──────────────────────────┐
-                │ server.js  (http nativo do Node, 127.0.0.1:4321)                 │
-                │  estado em memória ⇄ data/state.json · API · SSE · estáticos     │
-                │                                                                  │
-                │  runner.js ── Claude Agent SDK ── processo do Claude Code        │
-                │   1 execução por mesa, cwd = pasta da mesa                       │
-                │   canUseTool fica pendente até o usuário responder no navegador  │
-                └──────▲──────────────────────────────────────────────────────────┘
-                       │ POST /api/hook
-                ┌──────┴───────────┐
-                │ hub-hook.js      │  ← chamado pelo Claude Code do VS Code / terminal
-                └──────────────────┘    (hooks configurados por instalar-hook.js)
+┌──────────── navegador (qualquer PC) ────────────┐
+│ public/app.js: escritório, balões, janelas      │
+└───────▲────────────────────────────┬────────────┘
+        │ SSE /api/events             │ fetch /api/...  (+ X-Hub-Env: PC escolhido)
+┌───────┴────────────────────────────▼────────────────────────────────────┐
+│ HUB  server.js                                                          │
+│  estado (data/state.json) · conversas (chats.js → data/chats/)          │
+│  sessões do Claude (session-store.js → data/sessions/) · API · SSE      │
+│  connectors.js: PCs conectados, comandos (RPC) e eventos                │
+└───────▲──────────────────────────────▲──────────────────────────────────┘
+        │ SSE /api/connector/stream    │ POST /api/connector/{reply,event,sessions/*}
+        │ (comandos hub → PC)          │ (respostas, andamento, sessões)
+┌───────┴──────────────────────────────┴──────────┐   ┌──────────────────┐
+│ CONECTOR  conector.js   (um por PC)             │   │ hub-hook.js      │
+│  runner.js ── Claude Agent SDK ── Claude Code   │   │ (Claude Code do  │
+│  local-ops.js: pastas, seletor, Explorer/VS Code│   │  VS Code) ──────►│ POST /api/hook
+│  git.js · remote-store.js (sessões no hub)      │   └──────────────────┘
+└─────────────────────────────────────────────────┘
 ```
 
 Os princípios:
 
-- **O servidor é a única fonte da verdade.** O navegador não guarda estado próprio, só recebe e desenha. Toda ação do usuário vira uma chamada de API. O servidor altera o estado, salva e transmite o resultado por SSE para todas as abas abertas.
-- **Sem frameworks.** O servidor usa só o `http` do Node e o front é JavaScript puro. A única dependência é o `@anthropic-ai/claude-agent-sdk`.
-- **Tudo local.** O estado fica em arquivos JSON em `data/`.
+- **O hub é a única fonte da verdade.** O navegador e os conectores não guardam estado próprio. Toda ação vira uma chamada de API: o hub altera o estado, salva e transmite o resultado por SSE.
+- **O hub nunca toca no PC de ninguém.** Pastas, git, seletor de pastas, VS Code e o próprio Claude rodam no conector. O hub só manda comandos. É isso que permite colocar o hub numa VPS.
+- **A conexão sai do PC.** O conector abre um stream SSE com o hub e responde por HTTP. O PC não precisa de porta aberta nem de IP público, e funciona atrás de proxy e HTTPS. Não há dependência de WebSocket.
+- **Modo local por padrão.** `npm start` sobe o hub com um **conector embutido** para o próprio PC (`HUB_SEM_CONECTOR=1` desliga). Para quem usa um computador só, nada muda.
+- **Sem frameworks.** Servidor com `http` do Node, front em JavaScript puro. A única dependência é o `@anthropic-ai/claude-agent-sdk`.
 
-## Modelo de dados
+## Modelo de dados (no hub)
 
 `data/state.json`:
 
@@ -48,7 +52,7 @@ Os princípios:
       "name": "TechTie Flow",
       "description": "CRM da TechTie",
       "color": "#4f8cff",
-      "folders": { "e1a2b3c4": "C:\\Users\\...\\techtie-flow" }, // pasta do projeto em cada PC (id do ambiente)
+      "folders": { "e1a2b3c4": "C:\\Users\\...\\techtie-flow" }, // pasta do projeto em cada PC (id do PC)
       "repo": "https://github.com/…/techtie-flow.git", // remote git, conferido ao vincular pasta em outro PC
       "agentId": "a5e6f7a8b"                  // agente sentado na mesa (ou null)
     }
@@ -64,18 +68,18 @@ Os princípios:
     }
   ],
   "log": [ { "t": 1729700000000, "agentId": "...", "projectId": "...", "text": "[concluido] ..." } ],
-  "environments": { "e1a2b3c4": { "name": "PC de casa", "lastSeen": 1729700000000 } } // PCs que já abriram este escritório
+  "environments": { "e1a2b3c4": { "name": "PC de casa", "lastSeen": 1729700000000 } } // PCs que já conectaram
 }
 ```
 
 Regras:
 
 - **Uma mesa tem no máximo um agente.** Ao atribuir um agente a uma mesa, ele sai da mesa anterior (função `assign` em `server.js`).
-- **Sempre existe pelo menos uma sala.** Dados antigos, sem salas, são migrados ao carregar (`load` em `server.js`): tudo vai para a sala "Escritório". Ao remover uma sala, as mesas dela vão para outra.
+- **Sempre existe pelo menos uma sala.** Dados antigos, sem salas, são migrados ao carregar (`load`): tudo vai para a sala "Escritório". Ao remover uma sala, as mesas dela vão para outra.
 - **O histórico (`log`) guarda as 300 entradas mais recentes**, com a mais nova primeiro.
-- **O id ganha o prefixo da coleção** (`p…` para mesas, `a…` para agentes) mais 8 caracteres hexadecimais.
+- **O id ganha o prefixo da coleção** (`p…` para mesas, `a…` para agentes, `r…` para salas) mais 8 caracteres hexadecimais.
 
-`data/chats/<projectId>.json` guarda a conversa de cada mesa:
+`data/chats/<projectId>.json` guarda a conversa de cada mesa (`chats.js`):
 
 ```jsonc
 {
@@ -90,12 +94,15 @@ Regras:
 }
 ```
 
-O estado transmitido ao navegador tem um campo a mais, **`live`**, que não é salvo em disco. Ele descreve o que está rodando agora:
+`data/sessions/<sessionId>.jsonl` guarda as sessões completas do Claude, espelhadas pelo SDK (`session-store.js`). `data/hub.json` guarda a **chave dos conectores**.
+
+O estado transmitido ao navegador tem dois campos que não são salvos:
 
 ```jsonc
-"live": {
+"live": {                         // pedidos em andamento
   "<projectId>": {
     "running": true,
+    "envId": "e1a2b3c4",          // PC onde está rodando
     "pending": {                  // null quando nada espera o usuário
       "id": "ff58bff7",
       "toolName": "Bash",         // ou "AskUserQuestion"
@@ -105,43 +112,59 @@ O estado transmitido ao navegador tem um campo a mais, **`live`**, que não é s
       "canRemember": true         // se dá para oferecer "Sempre permitir"
     }
   }
-}
+},
+"connectors": { "e1a2b3c4": { "name": "PC de casa", "since": 1729700000000 } } // PCs conectados agora
 ```
 
-## Servidor (`server.js`)
+## Hub (`server.js`)
 
-- **`save()`** grava `state.json` e transmite o estado completo, `snapshot()` = estado + `live`, para todos os clientes SSE. **Qualquer mudança de estado deve terminar em `save()`.**
+- **`save()`** grava `state.json` e transmite o estado completo, `snapshot()` = estado + `live` + `connectors`, para todos os navegadores. **Qualquer mudança de estado deve terminar em `save()`.**
 - **`broadcast(event, data)`** transmite eventos SSE. O evento sem nome carrega o estado completo, e o evento `chat` carrega uma nova linha de conversa.
-- **Rotas** são resolvidas na função `api()` a partir de `/api/<resource>/<id>/<action>`.
+- **Rotas** são resolvidas em `api()` a partir de `/api/<resource>/<id>/<action>`. As rotas dos conectores ficam em `connectorApi()`.
+- **PC de cada pedido.** O navegador manda o cabeçalho `X-Hub-Env` com o PC escolhido. `envFor()` usa esse PC se estiver conectado, ou o único conectado. `needEnv()` responde 409 com uma mensagem amigável quando não há PC. Comandos para um pedido em andamento (`answer`, `stop`) vão para o PC onde ele está rodando (`live[id].envId`), venha de onde vier a resposta.
+- **Comandos ao conector** (`connectors.rpc(envId, tipo, dados, timeout)`):
+
+  | Comando | Para quê |
+  |---|---|
+  | `run` | Começar um pedido. Leva a mesa com a pasta daquele PC e a conversa atual |
+  | `answer` · `stop` | Responder permissão/pergunta, interromper |
+  | `memory` | Resumir a conversa na memória (Claude do PC) |
+  | `git` | Situação do commit da pasta |
+  | `folder-info` | Conferir se a pasta existe e qual o remote |
+  | `pick-folder` · `open` | Seletor de pastas, abrir Explorer/VS Code |
+  | `rename` | Renomear o PC |
+
+- **Eventos do conector** (`POST /api/connector/event`, em ordem): `chat-push` (nova linha), `chat-update` (sessão, commit, memória…), `status` (agente da mesa) e `live` (andamento/pendências).
+- **PC caiu.** Quando o stream de um conector fecha, os comandos pendentes falham, os pedidos que rodavam nele são encerrados no `live` e a conversa ganha um aviso (`onDisconnect`).
 - **Proteções:**
-  - escuta só em `127.0.0.1`;
+  - escuta só em `127.0.0.1` até existir login (`HUB_HOST` muda);
   - recusa corpos que não sejam `application/json` (contra CSRF via `<form>`);
-  - valida que a pasta de uma mesa existe;
+  - conectores e hooks precisam da chave (`Authorization: Bearer`);
   - impede path traversal nos arquivos estáticos.
-- **`handleHook(ev)`** converte eventos do Claude Code em status. A mesa é encontrada pela pasta: `projectForPath(cwd)` escolhe a pasta mais específica que contém o `cwd`, sem diferenciar maiúsculas. Eventos de sessões criadas pelo próprio hub são ignorados (`runner.isHubSession`), porque essas sessões já são acompanhadas pelo runner.
-- **`describeTool(name, input)`** transforma uma chamada de ferramenta em texto curto ("Editando app.js"). É usado pelos hooks e pelo runner.
+- **`handleHook(ev)`** converte eventos do Claude Code em status. A mesa é encontrada pela pasta **naquele PC** (`projectForPath(cwd, env)`). Eventos de sessões do próprio hub são ignorados, porque já chegam pelo conector.
 
-## Ambientes: o mesmo escritório em vários PCs
+## Conector (`conector.js`)
 
-- **Identidade do PC.** Cada computador tem um id e um nome em `~/.techtie-hub/ambiente.json` (`HUB_ENV_FILE` muda o caminho, útil em testes). O arquivo fica fora de `data/` de propósito: `data/` viaja entre PCs, a identidade não.
-- **Pasta por PC.** A pasta de cada mesa fica em `project.folders[envId]`. O servidor só usa a deste PC (`folderOf`), e o estado enviado ao navegador já traz `folder` resolvido, mais `env` (este PC) e `environments`.
-- **Repositório.** Ao vincular uma pasta, `git.remote` lê o `origin`. A primeira pasta define `project.repo`; pastas de outro repositório são recusadas com `409 repo_mismatch`, a menos que o usuário confirme (`forceFolder`).
-- **Exportar/importar.** `GET /api/export` junta estado, conversas e sessões num JSON, e `POST /api/import` grava tudo de volta. As pastas já configuradas neste PC são mantidas.
+- **Identidade do PC** em `~/.techtie-hub/ambiente.json` (id + nome) e **configuração** em `~/.techtie-hub/conector.json` (endereço do hub + chave). `HUB_ENV_FILE` e `HUB_CONNECTOR_FILE` mudam esses caminhos, o que é útil para simular vários PCs numa máquina.
+- **Linha de comando:** `node conector.js --hub <URL> --chave <chave> [--nome "PC"]`. Grava a configuração; das próximas vezes basta `node conector.js`.
+- **Conexão:** abre `GET /api/connector/stream` e lê os comandos (`event: cmd`). Se cair, reconecta sozinho com espera crescente e reenvia o andamento dos pedidos em curso (`runner.resendLive`).
+- **Eventos em fila:** `emit()` manda os eventos um de cada vez, na ordem, para a conversa não embaralhar.
+- **No modo local**, o hub chama `conector.start()` no mesmo processo e grava `conector.json`, se não existir, para o `hub-hook.js` saber onde está o hub.
 
-## Runner (`runner.js`)
+## Runner (`runner.js`, dentro do conector)
 
-Executa o Claude por mesa usando `query()` do Claude Agent SDK. O SDK sobe o processo do Claude Code, que usa o login do usuário.
+Executa o Claude por mesa usando `query()` do Claude Agent SDK. O SDK sobe o processo do Claude Code, que usa o login do Claude **daquele PC**. O runner recebe uma cópia da conversa a cada pedido e manda as novidades ao hub pelos callbacks `hub.push / update / status / live`.
 
 O fluxo de um pedido:
 
-1. **O usuário manda um pedido.** `POST /api/projects/:id/chat` chama `runner.send(project, text)`.
-2. **O runner inicia o Claude.** Ele chama `query({ prompt, options: { cwd: project.folder, resume: sessionId, abortController, canUseTool } })`.
+1. **O usuário manda um pedido.** `POST /api/projects/:id/chat` → o hub reserva a mesa em `live` e manda o comando `run` ao PC escolhido → `runner.send(project, text, chat)`.
+2. **O runner inicia o Claude** com `query({ prompt, options: { cwd, resume, sessionStore, systemPrompt, abortController, canUseTool } })`.
 3. **As mensagens do SDK viram conversa e status** (`handle`):
    - `system/init` → guarda o `session_id`. A próxima mensagem continua a mesma conversa (`resume`).
    - `assistant` → texto vira linha de conversa; `tool_use` vira linha "🔧 …" e atualiza o balão.
    - `result` → status **concluído**, ou **bloqueado** em caso de erro.
-4. **Permissões e perguntas ficam pendentes.** O SDK chama `canUseTool` sempre que o Claude precisa de permissão ou chama a ferramenta `AskUserQuestion`. O runner devolve uma **Promise que fica pendente** e registra o pedido em `run.pending`. O agente fica **bloqueado** e o navegador mostra o cartão.
-5. **A resposta do usuário libera o Claude.** `POST /api/projects/:id/answer` resolve a Promise:
+4. **Permissões e perguntas ficam pendentes.** O SDK chama `canUseTool` sempre que o Claude precisa de permissão ou chama a ferramenta `AskUserQuestion`. O runner devolve uma **Promise que fica pendente** e avisa o hub (`live`). O agente fica **bloqueado** e o navegador mostra o cartão.
+5. **A resposta do usuário libera o Claude.** `POST /api/projects/:id/answer` → comando `answer` → a Promise é resolvida:
    - **permitir** → `{ behavior: "allow", updatedInput: input }`
    - **sempre permitir** → o mesmo, mais `updatedPermissions` com as sugestões do SDK (destino `localSettings`)
    - **negar** → `{ behavior: "deny", message }`
@@ -150,19 +173,18 @@ O fluxo de um pedido:
 
 ### Continuidade: sessão completa, memória e commit
 
-- **Sessão completa portátil.** Toda `query()` recebe `sessionStore` (`session-store.js`): o SDK grava cada linha da sessão também em `data/sessions/<sessionId>.jsonl` e, ao retomar (`resume`), carrega dali. Por isso a conversa continua em outro PC e outra pasta. A chave é só o `sessionId`, porque o `projectKey` do SDK depende do cwd. Sessões antigas, só no disco local do Claude Code, são importadas na primeira vez (`importSessionToStore`).
+- **Sessão completa no hub.** Toda `query()` recebe `sessionStore` (`remote-store.js`): o SDK manda cada linha da sessão ao hub, que guarda em `data/sessions/<sessionId>.jsonl` (`session-store.js`). Ao retomar (`resume`), o SDK carrega a sessão do hub. Por isso a conversa continua em qualquer PC conectado e em qualquer pasta. A chave é só o `sessionId`, porque o `projectKey` do SDK depende do cwd. Sessões antigas, só no disco local do Claude Code, são importadas na primeira vez (`importSessionToStore`). Esse recurso do SDK ainda é experimental (*alpha*), e a memória é o plano B.
 - **Prompt de sistema montado na hora.** `systemPrompt: { type: 'preset', preset: 'claude_code', append, snapshot: false }`. Com `snapshot: true` (o padrão), o prompt, que inclui a pasta de trabalho e o git, ficaria gravado na sessão com os dados do PC antigo.
 - **Aviso de mudança.** Se a sessão rodou por último em outro PC ou pasta (`lastEnv`/`lastFolder`), o pedido ganha uma nota no início: onde está agora, onde estava, e que caminhos antigos podem não valer mais.
 - **Memória.** `refreshMemory` junta a memória anterior com as entradas da conversa desde `memoryAt`, numa chamada curta ao Claude sem ferramentas, sem configurações do usuário e sem salvar sessão. Roda na **Nova conversa**, no botão *Atualizar com a conversa* e no plano B. Sessões novas recebem a memória pelo `append` do prompt de sistema.
 - **Plano B.** Se a retomada falhar antes de o Claude responder (`resume-failed`), o runner atualiza a memória e começa uma sessão nova com ela.
 - **Commit.** Ao fim de cada pedido bem-sucedido, grava `lastCommit` (HEAD da pasta). `git.status` compara esse commit com o da pasta atual: `missing` (falta pull), `diverged`, `ahead` ou `ok`.
 
-Os callbacks que o servidor passa ao runner são `onStatus` (atualiza o agente da mesa e o histórico), `onLive` (retransmite o estado) e `onChat` (transmite a nova linha).
-
 ## Hook (`hub-hook.js`)
 
-O Claude Code executa o hook a cada evento configurado (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `Notification`, `Stop`, `SessionEnd`), passando um JSON no stdin. O script faz duas coisas:
+O Claude Code executa o hook a cada evento configurado (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `Notification`, `Stop`, `SessionEnd`), passando um JSON no stdin. O script:
 
+- **Lê o hub e a chave** em `~/.techtie-hub/conector.json` e a **identidade do PC** em `ambiente.json`. Com vários PCs, a mesma pasta pode existir em computadores diferentes, por isso o PC vai junto.
 - **Resume o evento**, tirando conteúdo de arquivos e textos grandes, e envia para `POST /api/hook` com timeout de 1,5 s.
 - **Sempre termina com código 0**, mesmo com o hub desligado, para nunca atrapalhar o Claude Code.
 
@@ -174,41 +196,44 @@ O arquivo é dividido em seções comentadas:
 
 | Seção | O que faz |
 |---|---|
+| **PC ativo** | `resolveEnv()` escolhe o PC que executa os pedidos deste navegador: o escolhido na janela de PCs (`localStorage`), se estiver conectado, ou o único conectado. Define `state.env` e `p.folder` (pasta da mesa nesse PC). `api()` manda o cabeçalho `X-Hub-Env`. |
 | **Salas** | Só a sala exibida (`roomId`, lembrada no `localStorage`) é desenhada. `roomProjects()` lista as mesas dela, e `visibleAgents()` lista os agentes com mesa nela, mais os agentes sem mesa, que ficam no lounge da primeira sala. Trocar de sala (`switchRoom`) recria os personagens já sentados. |
-| **Layout do mundo** | Geometria em "pixels de mundo" (tile de 16 px), multiplicada por `SCALE` na tela. Fileiras de `room.cols` mesas (5×5 tiles cada), lounge à direita, parede com janelas no topo. A sala cresce conforme o número de mesas. |
-| **Áreas especiais** | A coluna à direita das mesas é uma pilha de blocos (`world.blocks`): copa, reunião e descanso, nessa ordem, conforme `room.areas`. A sala fica alta o bastante para as mesas e para os blocos. Cada bloco define lugares (`areaSpots`) com uma atividade (`act`: cafe, reuniao, sofa, puff, arcade) e uma direção. Os agentes ociosos sorteiam um lugar livre a cada 10–30 s, e `drawLabels` desenha a atividade (☕, balões de conversa alternados na reunião, Zzz…). Os lugares ficam em linhas sem móveis, porque o agente chega andando na horizontal a partir do corredor. |
+| **Layout do mundo** | Geometria em "pixels de mundo" (tile de 16 px), multiplicada por `SCALE` na tela. Fileiras de `room.cols` mesas (5×5 tiles cada), áreas especiais à direita, parede com janelas no topo. A sala cresce conforme o número de mesas. |
+| **Áreas especiais** | A coluna à direita das mesas é uma pilha de blocos (`world.blocks`): copa, reunião e descanso, conforme `room.areas`. Cada bloco define lugares (`areaSpots`) com uma atividade (`act`: cafe, reuniao, sofa, puff, arcade) e uma direção. Os agentes ociosos sorteiam um lugar livre a cada 10–30 s, e `drawLabels` desenha a atividade. Os lugares ficam em linhas sem móveis, porque o agente chega andando na horizontal a partir do corredor. |
 | **Zoom e arrasto** | `SCALE` automático (cabe na tela) ou fixo de 1 a 6 (`setZoom`, em passos inteiros para a pixel art ficar nítida), mantendo parado o ponto sob o mouse. Arrastar o canvas rola o escritório; o clique é ignorado depois de um arrasto. |
 | **Caminhos** | Os personagens andam pelo corredor horizontal de cada fileira e pelo corredor vertical à direita das mesas (`route`), para não atravessar mesas. |
-| **Simulação** (`update`) | Define o destino de cada agente: com mesa e status ≠ ocioso → cadeira da mesa; senão → um lugar livre das áreas especiais, trocado de tempos em tempos (`rt.atSpot` quando chega). Move a velocidade constante. |
-| **Desenho** (`draw…`) | Tudo é desenhado com retângulos no canvas, sem imagens: sala, mesas, monitores (conteúdo depende do status), personagens (frente/costas, passos, piscadas, mãos digitando). Textos são desenhados em coordenadas de tela para ficarem nítidos. |
-| **Balões** (`updateBubbles`) | Elementos HTML posicionados a cada quadro sobre o canvas. Mais nítidos que texto no canvas e clicáveis. O conteúdo vem de `bubbleFor(agent)` e só é reescrito quando muda. |
-| **Janelas flutuantes** (`openWindow`) | Gerenciador genérico: arrastar pela barra, redimensionar (CSS `resize`), minimizar, foco/z-index. Posição e tamanho ficam salvos no `localStorage`. |
-| **Janela da mesa** (`openProjectWindow` / `updateProjectWindow`) | Conversa, cartão pendente e caixa de texto. **É atualizada por partes**, nunca recriada, para não apagar o que o usuário está digitando ou já marcou. O cartão pendente só é redesenhado quando chega um pedido com id novo. |
-| **Diálogos** | `<dialog>` nativo para criar e editar mesas e agentes. |
+| **Simulação** (`update`) | Com mesa e status ≠ ocioso → cadeira da mesa; senão → um lugar livre das áreas especiais (`rt.atSpot` quando chega). Move a velocidade constante. |
+| **Desenho** (`draw…`) | Tudo é desenhado com retângulos no canvas, sem imagens. Textos são desenhados em coordenadas de tela para ficarem nítidos. |
+| **Balões** (`updateBubbles`) | Elementos HTML posicionados a cada quadro sobre o canvas. O conteúdo vem de `bubbleFor(agent)` e só é reescrito quando muda. |
+| **Janelas flutuantes** (`openWindow`) | Arrastar, redimensionar, minimizar, foco. Posição e tamanho ficam no `localStorage`. Janelas: mesa (conversa), memória, PCs, equipe, atividade. |
+| **Janela da mesa** | Conversa, avisos (`renderBanner`: sem PC, pasta só em outro PC, commit faltando, rodando em outro PC), cartão pendente e caixa de texto. **É atualizada por partes**, nunca recriada, para não apagar o que o usuário está digitando. |
+| **Diálogos** | `<dialog>` nativo para criar e editar mesas, agentes e salas. |
 
 O ciclo de atualização:
 
-1. **Chega um estado novo pelo SSE.** `applyState` recalcula a geometria, cria ou remove personagens e chama `refreshUI()`, que atualiza as estatísticas e todas as janelas abertas.
+1. **Chega um estado novo pelo SSE.** `applyState` resolve o PC ativo, recalcula a geometria, cria ou remove personagens e chama `refreshUI()`, que atualiza estatísticas, abas e janelas abertas.
 2. **Chega um evento `chat`.** `onChatEvent` acrescenta a mensagem na janela daquela mesa, se estiver aberta.
 3. **A cada quadro** (`requestAnimationFrame`), rodam `update` → `draw` → `updateBubbles`.
 
 ## Como estender
 
 - **Novo status de agente:** adicione em `STATUSES` (`server.js`), `STATUS` (`app.js`), na classe `.st-<status>` (`style.css`) e trate em `bubbleFor` e no desenho do monitor (`drawDesk`).
-- **Nova rota de API:** adicione um bloco em `api()`. Se mudar o estado, termine com `save()`.
-- **Novo móvel ou decoração:** desenhe em `drawRoom` ou `drawLounge` com `rect()`. As coordenadas são em pixels de mundo.
-- **Opções do agente** (modelo, modo de permissão, prompt de sistema): ficam em `runner.send`, nas `options` do `query()`. Veja a [referência do SDK](https://code.claude.com/docs/en/agent-sdk/typescript).
+- **Nova rota de API:** adicione um bloco em `api()`. Se mudar o estado, termine com `save()`. Se precisar do PC do usuário, crie um comando em `handlers` no `conector.js` e chame com `connectors.rpc(needEnv(req), …)`.
+- **Novo móvel ou decoração:** desenhe nas funções `drawCopa`, `drawMeeting`, `drawRest` ou `drawRoom` com `rect()`. As coordenadas são em pixels de mundo.
+- **Opções do agente** (modelo, modo de permissão, prompt de sistema): ficam em `runner.runQuery`, nas `options` do `query()`. Veja a [referência do SDK](https://code.claude.com/docs/en/agent-sdk/typescript).
 
 ## Testar
 
-Não há testes automatizados ainda. Para testar sem mexer nos seus dados, suba uma instância separada:
+Não há testes automatizados ainda. Para testar sem mexer nos seus dados, suba uma instância separada. Com outros arquivos de identidade, cada processo vira "outro PC":
 
 ```bash
-# PORT muda a porta; HUB_DATA aponta para outro arquivo de estado (as conversas ficam ao lado dele)
-PORT=4399 HUB_DATA=/tmp/hub-teste/state.json node server.js
+# hub + conector embutido ("PC A")
+PORT=4399 HUB_DATA=/tmp/t/data/state.json HUB_ENV_FILE=/tmp/t/a.json HUB_CONNECTOR_FILE=/tmp/t/a-con.json node server.js
+# segundo PC ("PC B"); a chave está em /tmp/t/data/hub.json
+HUB_ENV_FILE=/tmp/t/b.json HUB_CONNECTOR_FILE=/tmp/t/b-con.json node conector.js --hub http://localhost:4399 --chave <chave> --nome "PC B"
 ```
 
 Depois:
 
-- **Para verificar a API**, use `curl` com `-H "Content-Type: application/json"`.
-- **Para simular eventos do Claude Code**, envie um JSON para o hook: `echo '{"hook_event_name":"Stop","cwd":"..."}' | HUB_PORT=4399 node hub-hook.js`.
+- **Para verificar a API**, use `curl` com `-H "Content-Type: application/json"` e `-H "X-Hub-Env: <id do PC>"`.
+- **Para simular eventos do Claude Code**, envie um JSON para o hook com as mesmas variáveis do PC: `echo '{"hook_event_name":"Stop","cwd":"..."}' | HUB_ENV_FILE=... HUB_CONNECTOR_FILE=... node hub-hook.js`.

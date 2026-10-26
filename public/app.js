@@ -26,6 +26,7 @@ let world = null; // geometria da sala atual (cresce com o número de mesas)
 let SCALE = 3;
 let zoom = load('hub.zoom'); // null = ajusta à tela; número = escala fixa
 let roomId = load('hub.room'); // sala sendo exibida
+let preferredEnv = load('hub.env'); // PC escolhido neste navegador para executar os pedidos
 const runtime = new Map(); // agentId -> posição/animação
 let selected = null; // { kind: 'project', id } — mesa da janela em foco
 let hover = null;
@@ -132,6 +133,23 @@ function route(from, to) {
 }
 
 // ---------- Estado vindo do servidor ----------
+// PC que executa os pedidos deste navegador: o escolhido, se estiver conectado; senão,
+// o único conectado. state.env e p.folder (pasta da mesa nesse PC) saem daqui.
+function resolveEnv() {
+  const online = Object.keys(state.connectors || {});
+  const id = online.includes(preferredEnv) ? preferredEnv : online.length === 1 ? online[0] : null;
+  state.env = id ? { id, name: state.connectors[id].name } : null;
+  for (const p of state.projects) p.folder = id ? p.folders?.[id] || null : null;
+}
+
+function chooseEnv(id) {
+  preferredEnv = id;
+  store('hub.env', id);
+  resolveEnv();
+  refreshUI();
+  for (const w of wins.values()) if (w.projectId) refreshGit(w);
+}
+
 // Mesa do agente. `here` = está na sala exibida (só então há `cell` para desenhar).
 function deskOf(agentId) {
   const project = state.projects.find((p) => p.agentId === agentId);
@@ -164,6 +182,7 @@ function applyState(next) {
   const firstLoad = !world;
   state = next;
   if (!state.rooms.some((r) => r.id === roomId)) roomId = state.rooms[0]?.id;
+  resolveEnv();
   world = computeWorld();
   syncRuntime(firstLoad);
   if (selected && !state.projects.some((p) => p.id === selected.id)) selected = null;
@@ -771,7 +790,7 @@ canvas.addEventListener('click', (ev) => {
 async function api(method, url, body, { quiet } = {}) {
   const res = await fetch(url, {
     method,
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-Hub-Env': state.env?.id || '' },
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok && res.status !== 204) {
@@ -813,7 +832,9 @@ function logList(items) {
 }
 
 function renderStats() {
-  document.getElementById('btn-env').textContent = 'PC: ' + (state.env?.name || '?');
+  const envBtn = document.getElementById('btn-env');
+  envBtn.textContent = state.env ? 'PC: ' + state.env.name : 'PC: nenhum';
+  envBtn.classList.toggle('warn', !state.env);
   const count = (st) => state.agents.filter((a) => a.status === st).length;
   document.getElementById('stats').innerHTML =
     `<span><b>${state.projects.length}</b> mesas</span><span><b>${state.agents.length}</b> agentes</span>` +
@@ -1046,7 +1067,15 @@ function renderBanner(win, p) {
   const box = win.body.querySelector('.pw-banner');
   const envName = state.env?.name || 'este PC';
   const msgs = [];
-  if (!p.folder) {
+  const l = state.live?.[p.id];
+  if (l?.running && l.envId !== state.env?.id) {
+    msgs.push(`⚙️ Este pedido está rodando no PC <b>${esc(state.connectors?.[l.envId]?.name || state.environments?.[l.envId]?.name || 'outro PC')}</b>. Você pode acompanhar e responder daqui.`);
+  }
+  if (!state.env) {
+    msgs.push(Object.keys(state.connectors || {}).length
+      ? '🖥 Escolha em qual PC executar no botão <b>PC</b> (topo).'
+      : '🖥 Nenhum PC conectado ao hub. Abra o botão <b>PC</b> para conectar o seu computador.');
+  } else if (!p.folder) {
     const others = Object.entries(p.folders || {})
       .map(([envId, f]) => `<b>${esc(state.environments?.[envId]?.name || 'outro PC')}</b>: ${esc(f)}`);
     msgs.push(others.length
@@ -1119,33 +1148,57 @@ function openMemoryWindow(projectId) {
 
 // ---------- Janela "Este PC": nome, outros PCs, exportar/importar ----------
 function openEnvWindow() {
-  const win = openWindow('env', { w: 440, h: 520, cls: 'win-env' }, (win) => {
-    win.titleEl.textContent = '🖥 Este PC';
+  const win = openWindow('env', { w: 460, h: 580, cls: 'win-env' }, (win) => {
+    win.titleEl.textContent = '🖥 PCs';
     win.render = renderEnv;
   });
   renderEnv(win);
 }
 
+let connectorInfo = null; // chave e endereço do hub (buscados uma vez)
+
 function renderEnv(win) {
-  if (win.body.contains(document.activeElement)) return; // não atrapalha quem está digitando o nome
-  const envs = Object.entries(state.environments || {}).sort((a, b) => b[1].lastSeen - a[1].lastSeen);
+  if (win.body.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return; // não atrapalha quem digita
+  const online = state.connectors || {};
+  const envs = Object.entries(state.environments || {}).sort((a, b) => (b[0] in online) - (a[0] in online) || b[1].lastSeen - a[1].lastSeen);
   win.body.innerHTML = `
-    <label>Nome deste PC<div class="folder-row">
-      <input data-field="name" maxlength="40" value="${esc(state.env?.name || '')}" />
-      <button data-act="rename">Salvar</button></div></label>
-    <p class="muted">Cada PC guarda a sua própria pasta para cada mesa. Agentes, conversas e memória vão junto quando você leva o escritório para outro PC.</p>
-    <h3>PCs que já usaram este escritório</h3>
-    ${envs.map(([id, e]) => `<div class="log-item">${esc(e.name)} ${id === state.env?.id ? '<span class="badge st-concluido">este PC</span>' : ''}
-      <span class="muted"> · visto ${timeAgo(e.lastSeen)}</span></div>`).join('')}
-    <h3>Levar para outro PC</h3>
-    <p class="muted">Exporte aqui e importe no outro PC (ou copie a pasta <code>data/</code>). Lá, abra cada mesa e escolha onde a pasta do projeto está naquele computador.</p>
+    <p class="muted">Os agentes trabalham no PC escolhido aqui, com as pastas e o login do Claude daquele computador.
+      Conversas, memória e sessões ficam no hub, então qualquer PC conectado continua de onde parou.</p>
+    <h3>PCs</h3>
+    ${envs.map(([id, e]) => `<div class="env-row ${id === state.env?.id ? 'active' : ''}">
+      <i class="dot" style="background:${id in online ? 'var(--ok)' : 'var(--muted)'}"></i>
+      <span class="env-name">${esc(online[id]?.name || e.name)}</span>
+      <span class="muted">${id in online ? 'conectado' : 'visto ' + timeAgo(e.lastSeen)}</span>
+      ${id === state.env?.id ? '<span class="badge st-concluido">em uso</span>'
+        : id in online ? `<button data-use="${id}">Usar</button>` : ''}
+    </div>`).join('') || '<p class="muted">Nenhum PC conectou ainda.</p>'}
+    ${state.env ? `<label style="margin-top:12px">Nome do PC em uso<div class="folder-row">
+      <input data-field="name" maxlength="40" value="${esc(state.env.name)}" />
+      <button data-act="rename">Salvar</button></div></label>` : ''}
+    <h3>Conectar um PC</h3>
+    <p class="muted">No outro computador: instale o Node.js, faça login no Claude Code, clone este repositório, rode <code>npm install</code> e depois:</p>
+    <div class="code" data-field="cmd">carregando…</div>
+    <div class="row"><button data-act="copy">Copiar comando</button></div>
+    <p class="muted">Enquanto o hub roda só neste computador, apenas conectores daqui conseguem alcançá-lo. Com o hub na VPS, qualquer PC conecta.</p>
+    <h3>Backup</h3>
+    <p class="muted">Exporte tudo (mesas, agentes, conversas, memória e sessões) para um arquivo, ou restaure um backup.</p>
     <div class="row">
-      <a class="btn primary" href="/api/export" download>Exportar escritório</a>
+      <a class="btn primary" href="/api/export" download>Exportar</a>
       <button data-act="import">Importar…</button>
       <input type="file" accept=".json,application/json" hidden />
     </div>`;
-  win.body.querySelector('[data-act=rename]').onclick = () =>
-    api('PATCH', '/api/environment', { name: win.body.querySelector('[data-field=name]').value });
+  win.body.querySelectorAll('[data-use]').forEach((b) => (b.onclick = () => chooseEnv(b.dataset.use)));
+  const rename = win.body.querySelector('[data-act=rename]');
+  if (rename) rename.onclick = () => api('PATCH', '/api/environment', { name: win.body.querySelector('[data-field=name]').value });
+  connectorInfo ??= api('GET', '/api/connector-info');
+  connectorInfo.then(({ hub, key }) => {
+    const cmd = win.body.querySelector('[data-field=cmd]');
+    if (cmd) cmd.textContent = `node conector.js --hub ${hub} --chave ${key} --nome "Nome do PC"`;
+  });
+  win.body.querySelector('[data-act=copy]').onclick = (e) => {
+    navigator.clipboard?.writeText(win.body.querySelector('[data-field=cmd]').textContent);
+    e.target.textContent = 'Copiado!';
+  };
   const file = win.body.querySelector('input[type=file]');
   win.body.querySelector('[data-act=import]').onclick = () => file.click();
   file.onchange = async () => {
@@ -1379,7 +1432,7 @@ function openProjectDialog(p) {
     <h2>${p ? 'Editar mesa' : 'Nova mesa (projeto)'}</h2>
     <label>Nome do projeto<input name="name" required maxlength="40" value="${esc(p?.name || '')}" /></label>
     <label>Descrição<textarea name="description" rows="2">${esc(p?.description || '')}</textarea></label>
-    <label>Pasta do projeto neste PC (${esc(state.env?.name || '')})
+    <label>Pasta do projeto no PC ${esc(state.env?.name || '(nenhum PC conectado)')}
       <div class="folder-row">
         <input name="folder" placeholder="C:\\Users\\...\\meu-projeto" value="${esc(p?.folder || '')}" />
         <button type="button" id="pick-folder">Escolher…</button>

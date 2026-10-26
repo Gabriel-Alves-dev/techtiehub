@@ -6,14 +6,16 @@ Leia `docs/ARQUITETURA.md` antes de mudanças estruturais.
 
 ## Mapa rápido
 
-- `server.js`: servidor HTTP nativo (sem framework), API REST, SSE e hooks. O estado fica em memória e é salvo em `data/state.json`.
-- `runner.js`: uma execução do Claude por mesa. `canUseTool` fica pendente até o usuário responder. Também cuida da memória do agente.
-- `session-store.js`: espelha as sessões do Claude em `data/sessions/`, para continuar a conversa em outro PC.
+- **Duas partes:** o HUB (`server.js`) guarda tudo e serve a interface, mas nunca roda o Claude nem toca em pastas. O CONECTOR (`conector.js`), um por PC, executa tudo que depende do computador e recebe comandos do hub (`connectors.rpc`). `npm start` sobe o hub com um conector embutido.
+- `server.js`: hub. Servidor HTTP nativo (sem framework), API REST, SSE, canal dos conectores (`/api/connector/*`) e hooks. O estado fica em memória e é salvo em `data/state.json`.
+- `chats.js` / `session-store.js`: conversas e sessões do Claude, guardadas no hub.
+- `runner.js`: roda no conector. Uma execução do Claude por mesa; `canUseTool` fica pendente até o usuário responder. Também cuida da memória do agente.
+- `remote-store.js` / `local-ops.js`: no conector, as sessões lidas/gravadas no hub e as operações locais (pastas, seletor, VS Code).
 - `git.js`: HEAD, remote e comparação de commits das pastas dos projetos.
 - `public/app.js`: canvas do escritório, balões HTML, janelas flutuantes e diálogos. JS puro, sem build.
 - `hub-hook.js` / `instalar-hook.js`: integração com o Claude Code do VS Code via hooks.
 - `data/`: dados locais do usuário. **Nunca versionar** (está no `.gitignore`).
-- **Pasta por PC:** a pasta de uma mesa fica em `project.folders[envId]` e no servidor se lê com `folderOf(p)`. Nunca grave `project.folder`. A identidade do PC fica em `~/.techtie-hub/ambiente.json`.
+- **Pasta por PC:** a pasta de uma mesa fica em `project.folders[envId]`. Nunca grave `project.folder` no hub (no front, `p.folder` é só a pasta do PC em uso, calculada em `resolveEnv`). A identidade do PC fica em `~/.techtie-hub/ambiente.json`, e a configuração do conector em `~/.techtie-hub/conector.json`.
 
 ## Convenções
 
@@ -30,6 +32,6 @@ Leia `docs/ARQUITETURA.md` antes de mudanças estruturais.
 ## Rodar e testar
 
 - `npm start` sobe em <http://localhost:4321>, e `iniciar.bat` faz o mesmo no Windows.
-- **Instância de teste isolada:** `PORT=4399 HUB_DATA=/caminho/temp/state.json HUB_ENV_FILE=/caminho/temp/ambiente.json node server.js`. Com outro `HUB_ENV_FILE`, a instância se comporta como outro PC. Não use os dados reais do usuário em testes.
-- **Checagem de sintaxe:** `for f in server.js runner.js hub-hook.js public/app.js; do node --check "$f"; done`.
+- **Instância de teste isolada:** `PORT=4399 HUB_DATA=/tmp/t/data/state.json HUB_ENV_FILE=/tmp/t/a.json HUB_CONNECTOR_FILE=/tmp/t/a-con.json node server.js`. Sempre isole `HUB_ENV_FILE` e `HUB_CONNECTOR_FILE`, senão o teste grava em `~/.techtie-hub/` do usuário. Um segundo PC: `node conector.js` com outros arquivos (veja docs/ARQUITETURA.md → Testar). Não use os dados reais do usuário em testes.
+- **Checagem de sintaxe:** `for f in *.js public/app.js; do node --check "$f"; done`.
 - Não há testes automatizados. Valide pela API (`curl`) e abrindo o navegador.

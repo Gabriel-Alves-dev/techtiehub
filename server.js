@@ -1,18 +1,25 @@
-// Techtie Hub — servidor local.
-// Serve o escritório visual (public/), uma API para os agentes reportarem status
-// e roda o Claude na pasta de cada mesa (runner.js).
+// Techtie Hub — o escritório central.
+// Guarda o estado (salas, mesas, agentes), as conversas, a memória e as sessões dos
+// agentes, serve a interface (public/) e a API. NÃO roda o Claude nem mexe em pastas:
+// isso é trabalho dos conectores (conector.js), um em cada PC, que se ligam ao hub.
+// Por padrão o hub sobe com um conector embutido para este PC (modo local).
 const http = require('http');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
-const { spawn, execFile } = require('child_process');
-const { Runner } = require('./runner');
 const git = require('./git');
+const { ChatStore } = require('./chats');
+const { Connectors } = require('./connectors');
+const { FileSessionStore } = require('./session-store');
+const { describeTool } = require('./describe');
+const conector = require('./conector');
 
 const PORT = process.env.PORT || 4321;
+const HOST = process.env.HUB_HOST || '127.0.0.1'; // só esta máquina, até existir login (etapa 3)
+const EMBEDDED = process.env.HUB_SEM_CONECTOR !== '1'; // conector deste PC dentro do hub
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const DATA_FILE = process.env.HUB_DATA || path.join(__dirname, 'data', 'state.json');
+const DATA_DIR = path.dirname(DATA_FILE);
 const STATUSES = ['trabalhando', 'ocioso', 'bloqueado', 'concluido'];
 const MAX_LOG = 300;
 
@@ -34,26 +41,19 @@ const SEED = {
   log: [],
 };
 
-// ---------- Ambiente: este computador ----------
-// Fica FORA de data/ de propósito: data/ pode ser copiada para outro PC, mas cada PC
-// tem sua própria identidade e suas próprias pastas.
-const ENV_FILE = process.env.HUB_ENV_FILE || path.join(os.homedir(), '.techtie-hub', 'ambiente.json');
+// ---------- Chave dos conectores ----------
+// Todo conector se identifica com ela. Fica em data/hub.json (ou na variável HUB_KEY).
+const HUB_FILE = path.join(DATA_DIR, 'hub.json');
+const HUB_KEY = process.env.HUB_KEY || (() => {
+  const saved = conector.readJson(HUB_FILE);
+  if (saved?.key) return saved.key;
+  const key = crypto.randomBytes(24).toString('base64url');
+  conector.writeJson(HUB_FILE, { key });
+  return key;
+})();
 
-function loadEnv() {
-  try {
-    return JSON.parse(fs.readFileSync(ENV_FILE, 'utf8'));
-  } catch {
-    const env = { id: 'e' + crypto.randomBytes(4).toString('hex'), name: os.hostname() };
-    fs.mkdirSync(path.dirname(ENV_FILE), { recursive: true });
-    fs.writeFileSync(ENV_FILE, JSON.stringify(env, null, 2));
-    return env;
-  }
-}
-
-const ENV = loadEnv();
-
-// Pasta da mesa neste computador (cada PC tem a sua, em project.folders[envId]).
-const folderOf = (p) => p.folders?.[ENV.id] || null;
+// No modo local, este PC é conhecido desde já (para migrar dados antigos de pasta única).
+const LOCAL_ENV = EMBEDDED ? conector.loadEnv() : null;
 
 function load() {
   let s;
@@ -66,61 +66,63 @@ function load() {
   if (!s.rooms?.length) s.rooms = [{ id: 'r1', name: 'Escritório', cols: 4, floor: 'madeira' }];
   for (const r of s.rooms) r.areas ??= [...AREAS];
   for (const p of s.projects) if (!s.rooms.some((r) => r.id === p.roomId)) p.roomId = s.rooms[0].id;
-  // pasta única (versões antigas) vira a pasta deste PC
   for (const p of s.projects) {
     p.folders ??= {};
-    if (p.folder) p.folders[ENV.id] ??= p.folder;
+    // pasta única (versões antigas) vira a pasta deste PC
+    if (p.folder && LOCAL_ENV) p.folders[LOCAL_ENV.id] ??= p.folder;
     delete p.folder;
   }
   s.environments ??= {};
-  s.environments[ENV.id] = { name: ENV.name, lastSeen: Date.now() };
   return s;
 }
 
 let state = load();
-const clients = new Set();
+const browsers = new Set();
+const live = {}; // projectId -> { running, pending, envId } — pedidos em andamento (não salvo)
 
-// O navegador recebe o estado salvo + o que está rodando agora (não persistido).
-// `folder` = pasta da mesa neste PC; `env` = este PC.
-const snapshot = () => ({
-  ...state,
-  projects: state.projects.map((p) => ({ ...p, folder: folderOf(p) })),
-  env: ENV,
-  live: runner.live(),
-});
+// O navegador recebe o estado salvo + o que está rodando + os PCs conectados.
+const snapshot = () => ({ ...state, live, connectors: connectors.online() });
 
 function broadcast(event, data) {
   const payload = `${event ? `event: ${event}\n` : ''}data: ${JSON.stringify(data)}\n\n`;
-  for (const res of clients) res.write(payload);
+  for (const res of browsers) res.write(payload);
 }
 
 function save() {
-  fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
+  fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(DATA_FILE, JSON.stringify(state, null, 2));
   broadcast(null, snapshot());
 }
 
-const runner = new Runner({
-  dir: path.join(path.dirname(DATA_FILE), 'chats'),
-  sessionsDir: path.join(path.dirname(DATA_FILE), 'sessions'),
-  env: ENV,
-  describeTool,
-  onStatus(projectId, status, message, log) {
-    const project = state.projects.find((p) => p.id === projectId);
-    const agent = project && state.agents.find((a) => a.id === project.agentId);
-    if (!agent) return;
-    agent.status = status;
-    agent.message = String(message).replace(/\s+/g, ' ').slice(0, 200);
-    if (log) addLog(agent.id, projectId, `[${status}] ${agent.message}`);
-    save();
+const chats = new ChatStore(path.join(DATA_DIR, 'chats'), (projectId, entry) => broadcast('chat', { projectId, entry }));
+const sessions = new FileSessionStore(path.join(DATA_DIR, 'sessions'));
+const connectors = new Connectors({
+  onChange: () => broadcast(null, snapshot()),
+  onDisconnect(envId) {
+    // pedidos que estavam rodando nesse PC não têm mais como terminar
+    const name = state.environments[envId]?.name || 'PC';
+    for (const [projectId, l] of Object.entries(live)) {
+      if (l.envId !== envId) continue;
+      delete live[projectId];
+      chats.push(projectId, 'system', `O PC "${name}" desconectou do hub; a tarefa foi interrompida.`);
+      setStatus(projectId, 'ocioso', `${name} desconectou`, true);
+    }
   },
-  onLive: () => broadcast(null, snapshot()),
-  onChat: (projectId, entry) => broadcast('chat', { projectId, entry }),
 });
 
 function addLog(agentId, projectId, text) {
   state.log.unshift({ t: Date.now(), agentId, projectId, text });
   state.log.length = Math.min(state.log.length, MAX_LOG);
+}
+
+function setStatus(projectId, status, message, log) {
+  const project = state.projects.find((p) => p.id === projectId);
+  const agent = project && state.agents.find((a) => a.id === project.agentId);
+  if (!agent) return;
+  agent.status = status;
+  agent.message = String(message).replace(/\s+/g, ' ').slice(0, 200);
+  if (log) addLog(agent.id, projectId, `[${status}] ${agent.message}`);
+  save();
 }
 
 // Aceita id ou nome (sem diferenciar maiúsculas), para facilitar o uso por scripts.
@@ -149,7 +151,7 @@ function readBody(req) {
     let body = '';
     req.on('data', (c) => {
       body += c;
-      if (body.length > 200e6) req.destroy(); // importação pode trazer sessões grandes
+      if (body.length > 200e6) req.destroy(); // importação e sessões podem ser grandes
     });
     req.on('end', () => {
       try {
@@ -172,84 +174,55 @@ function assign(project, agentId) {
   project.agentId = agentId || null;
 }
 
-// ---------- Pastas dos projetos ----------
-function isDir(p) {
-  try {
-    return !!p && fs.statSync(p).isDirectory();
-  } catch {
-    return false;
+// ---------- PC de cada pedido ----------
+// O navegador diz em qual PC quer executar (cabeçalho X-Hub-Env, escolhido em "PC").
+// Sem escolha, e com um único PC conectado, usa esse.
+function envFor(req) {
+  const asked = req.headers['x-hub-env'];
+  if (asked && connectors.has(asked)) return asked;
+  const online = Object.keys(connectors.online());
+  return online.length === 1 ? online[0] : null;
+}
+
+const envName = (envId) => state.environments[envId]?.name || connectors.online()[envId]?.name || 'PC';
+
+class HttpError extends Error {
+  constructor(code, message, extra) {
+    super(message);
+    Object.assign(this, { code, extra });
   }
 }
 
+function needEnv(req) {
+  const envId = envFor(req);
+  if (envId) return envId;
+  const online = Object.keys(connectors.online()).length;
+  throw new HttpError(409, online
+    ? 'Escolha em qual PC executar (botão PC, no topo).'
+    : 'Nenhum PC conectado. Inicie o conector no seu computador (botão PC → Conectar um PC).');
+}
+
+// ---------- Eventos do Claude Code (hooks) ----------
 const normPath = (p) => path.resolve(p).replace(/[\\/]+$/, '').toLowerCase();
 
-// A mesa cuja pasta contém `cwd` (a mais específica, se houver pastas aninhadas).
-function projectForPath(cwd) {
-  if (!cwd) return null;
+// A mesa cuja pasta (naquele PC) contém `cwd` — a mais específica, se houver pastas aninhadas.
+function projectForPath(cwd, envId) {
+  if (!cwd || !envId) return null;
   const target = normPath(cwd);
-  let best = null;
+  let best = null, bestLen = 0;
   for (const p of state.projects) {
-    if (!folderOf(p)) continue;
-    const f = normPath(folderOf(p));
-    if ((target === f || target.startsWith(f + path.sep)) && (!best || f.length > normPath(folderOf(best)).length)) best = p;
+    const folder = p.folders?.[envId];
+    if (!folder) continue;
+    const f = normPath(folder);
+    if ((target === f || target.startsWith(f + path.sep)) && f.length > bestLen) [best, bestLen] = [p, f.length];
   }
   return best;
 }
 
-function openFolder(folder, app) {
-  const opts = { cwd: folder, detached: true, stdio: 'ignore', windowsHide: true };
-  if (app === 'vscode') spawn('cmd.exe', ['/c', 'code', '.'], opts).unref();
-  else spawn('explorer.exe', ['.'], { ...opts, windowsHide: false }).unref();
-}
-
-function pickFolder() {
-  const script = [
-    '[Console]::OutputEncoding = [Text.Encoding]::UTF8',
-    'Add-Type -AssemblyName System.Windows.Forms',
-    '$owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true }',
-    '$d = New-Object System.Windows.Forms.FolderBrowserDialog',
-    "$d.Description = 'Escolha a pasta do projeto'",
-    "if ($d.ShowDialog($owner) -eq 'OK') { $d.SelectedPath }",
-  ].join('; ');
-  return new Promise((resolve, reject) => {
-    execFile('powershell.exe', ['-NoProfile', '-STA', '-Command', script], { encoding: 'utf8', windowsHide: true }, (err, out) =>
-      err ? reject(err) : resolve(out.trim() || null));
-  });
-}
-
-// ---------- Eventos do Claude Code (hooks) ----------
-function describeTool(name, input = {}) {
-  const file = input.file_path ? path.basename(input.file_path) : '';
-  switch (name) {
-    case 'Edit':
-    case 'MultiEdit':
-    case 'NotebookEdit':
-      return `Editando ${file}`;
-    case 'Write':
-      return `Escrevendo ${file}`;
-    case 'Read':
-      return `Lendo ${file}`;
-    case 'Bash':
-    case 'PowerShell':
-      return `Rodando: ${input.description || input.command || ''}`;
-    case 'Grep':
-    case 'Glob':
-      return 'Procurando no código';
-    case 'WebFetch':
-    case 'WebSearch':
-      return 'Pesquisando na web';
-    case 'Agent':
-    case 'Task':
-      return `Delegando: ${input.description || 'subagente'}`;
-    default:
-      return `Usando ${name}`;
-  }
-}
-
 function handleHook(ev) {
-  // sessões iniciadas pelo próprio hub já atualizam o escritório pelo runner
-  if (runner.isHubSession(ev.session_id)) return { ignored: 'sessão do hub' };
-  const project = projectForPath(ev.cwd);
+  // sessões iniciadas pelo próprio hub já chegam pelo conector
+  if (chats.hasSession(ev.session_id)) return { ignored: 'sessão do hub' };
+  const project = projectForPath(ev.cwd, ev.env);
   if (!project) return { ignored: 'nenhuma mesa com essa pasta' };
   const agent = state.agents.find((a) => a.id === project.agentId);
   if (!agent) {
@@ -282,117 +255,205 @@ function handleHook(ev) {
     default:
       return { ignored: 'evento desconhecido' };
   }
-  agent.status = status;
-  agent.message = String(message).replace(/\s+/g, ' ').slice(0, 200);
-  if (log) addLog(agent.id, project.id, `[${status}] ${agent.message}`);
-  save();
+  setStatus(project.id, status, message, log);
   return { agent: agent.name, status };
 }
 
+// ---------- Rotas dos conectores ----------
+const authorized = (req) => req.headers.authorization === `Bearer ${HUB_KEY}`;
+
+async function connectorApi(req, res, url, op, sub) {
+  const envId = req.headers['x-hub-env'];
+  if (!authorized(req) || !envId) return send(res, 401, { error: 'chave do conector inválida' });
+
+  if (op === 'stream' && req.method === 'GET') {
+    const name = String(url.searchParams.get('name') || 'PC').slice(0, 40);
+    state.environments[envId] = { name, lastSeen: Date.now() };
+    connectors.attach(envId, name, req, res);
+    save();
+    backfillRepos(envId);
+    return;
+  }
+
+  const body = await readBody(req);
+  if (op === 'reply') {
+    connectors.reply(body);
+    return send(res, 200, { ok: true });
+  }
+
+  if (op === 'event') {
+    const { type, projectId } = body;
+    if (!state.projects.some((p) => p.id === projectId)) return send(res, 200, { ignored: true });
+    if (type === 'chat-push') chats.push(projectId, body.role, body.text);
+    else if (type === 'chat-update') chats.update(projectId, body.fields || {});
+    else if (type === 'status') setStatus(projectId, body.status, body.message, body.log);
+    else if (type === 'live') {
+      if (body.live) live[projectId] = { ...body.live, envId };
+      else delete live[projectId];
+      broadcast(null, snapshot());
+    }
+    return send(res, 200, { ok: true });
+  }
+
+  if (op === 'sessions') {
+    // sessões do Claude espelhadas no hub (ver remote-store.js / session-store.js)
+    if (sub === 'append') await sessions.append(body.key, body.entries || []);
+    else if (sub === 'load') return send(res, 200, await sessions.load(body.key));
+    else if (sub === 'subkeys') return send(res, 200, await sessions.listSubkeys(body.key));
+    else if (sub === 'delete') await sessions.delete(body.key);
+    else if (sub === 'has') return send(res, 200, sessions.has(body.sessionId));
+    else return send(res, 404, { error: 'operação desconhecida' });
+    return send(res, 200, null);
+  }
+
+  send(res, 404, { error: 'rota desconhecida' });
+}
+
+// Mesas vinculadas antes de o hub guardar o repositório: registra o remote quando o PC conecta.
+async function backfillRepos(envId) {
+  let changed = false;
+  for (const p of state.projects) {
+    if (p.repo || !p.folders?.[envId]) continue;
+    const info = await connectors.rpc(envId, 'folder-info', { folder: p.folders[envId] }).catch(() => null);
+    if (info?.remote) [p.repo, changed] = [info.remote, true];
+  }
+  if (changed) save();
+}
+
+// ---------- Rotas do navegador ----------
 async function api(req, res, url) {
   const [, , resource, id, action] = url.pathname.split('/');
   const method = req.method;
+
+  if (resource === 'connector') return connectorApi(req, res, url, id, action);
 
   if (resource === 'state' && method === 'GET') return send(res, 200, snapshot());
 
   if (resource === 'events' && method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
     res.write(`data: ${JSON.stringify(snapshot())}\n\n`);
-    clients.add(res);
-    req.on('close', () => clients.delete(res));
+    browsers.add(res);
+    req.on('close', () => browsers.delete(res));
     return;
   }
 
-  // Só aceita JSON: impede que um site qualquer dispare a API com um <form> (ela abre programas no PC).
+  if (resource === 'export' && method === 'GET') {
+    const bundle = { app: 'techtie-hub', version: 2, exportedAt: new Date().toISOString(), state, chats: chats.exportAll(), sessions: sessions.exportAll() };
+    res.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Disposition': `attachment; filename="techtie-hub-${new Date().toISOString().slice(0, 10)}.json"`,
+    });
+    return res.end(JSON.stringify(bundle));
+  }
+
+  // Só aceita JSON: impede que um site qualquer dispare a API com um <form>.
   if (method !== 'GET' && method !== 'DELETE' && !String(req.headers['content-type']).startsWith('application/json')) {
     return send(res, 415, { error: 'use Content-Type: application/json' });
   }
   const body = method === 'GET' || method === 'DELETE' ? {} : await readBody(req);
 
-  if (resource === 'hook' && method === 'POST') return send(res, 200, handleHook(body));
+  if (resource === 'hook' && method === 'POST') {
+    if (!authorized(req)) return send(res, 401, { error: 'chave inválida' });
+    return send(res, 200, handleHook(body));
+  }
+
+  if (resource === 'connector-info' && method === 'GET') {
+    // para a janela "Conectar outro PC" (sem login ainda: o hub só escuta nesta máquina)
+    return send(res, 200, { key: HUB_KEY, hub: `http://${req.headers.host}` });
+  }
 
   if (resource === 'pick-folder' && method === 'POST') {
-    try {
-      return send(res, 200, { folder: await pickFolder() });
-    } catch (e) {
-      return send(res, 500, { error: 'não consegui abrir o seletor de pastas: ' + e.message });
-    }
+    return send(res, 200, await connectors.rpc(needEnv(req), 'pick-folder', {}, 10 * 60 * 1000));
   }
 
-  // ---------- Conversa com o agente da mesa ----------
-  if (resource === 'projects' && ['chat', 'answer', 'stop', 'reset', 'memory', 'git'].includes(action)) {
-    const stored = state.projects.find((p) => p.id === id);
-    if (!stored) return send(res, 404, { error: 'não encontrado' });
-    const project = { ...stored, folder: folderOf(stored) };
-    if (action === 'chat' && method === 'GET') return send(res, 200, runner.chat(id));
-    if (action === 'git' && method === 'GET') return send(res, 200, await git.status(project.folder, runner.chat(id).lastCommit));
-    if (action === 'memory' && method === 'GET') {
-      const chat = runner.chat(id);
-      return send(res, 200, { memory: chat.memory || '', memoryAt: chat.memoryAt || null, lastCommit: chat.lastCommit || null });
-    }
-    if (action === 'memory' && method === 'PUT') {
-      runner.setMemory(id, body.memory);
-      return send(res, 200, { ok: true });
-    }
-    if (method !== 'POST') return send(res, 405, { error: 'método não permitido' });
-    try {
-      if (action === 'chat') {
-        if (!isDir(project.folder)) return send(res, 400, { error: `defina a pasta desta mesa neste PC (${ENV.name}) em ⚙ Mesa` });
-        const text = String(body.message || '').trim();
-        if (!text) return send(res, 400, { error: 'mensagem vazia' });
-        await runner.send(project, text);
-      } else if (action === 'answer') runner.answer(id, body);
-      else if (action === 'stop') runner.stop(id);
-      else if (action === 'memory') {
-        if (runner.isRunning(id)) return send(res, 409, { error: 'espere o agente terminar para atualizar a memória' });
-        return send(res, 200, { memory: await runner.refreshMemory(project) });
-      } else await runner.reset(project);
-    } catch (e) {
-      return send(res, 409, { error: e.message });
-    }
-    return send(res, 200, { ok: true });
-  }
-
-  // ---------- Este PC + levar o escritório para outro PC ----------
   if (resource === 'environment' && method === 'PATCH') {
+    const envId = needEnv(req);
     const name = String(body.name || '').trim().slice(0, 40);
     if (!name) return send(res, 400, { error: 'nome vazio' });
-    ENV.name = name;
-    fs.writeFileSync(ENV_FILE, JSON.stringify(ENV, null, 2));
-    state.environments[ENV.id] = { name, lastSeen: Date.now() };
+    await connectors.rpc(envId, 'rename', { name });
+    connectors.rename(envId, name);
+    state.environments[envId] = { name, lastSeen: Date.now() };
     save();
-    return send(res, 200, ENV);
-  }
-
-  if (resource === 'export' && method === 'GET') {
-    const bundle = { app: 'techtie-hub', version: 1, exportedAt: new Date().toISOString(), from: ENV.name, state, ...runner.exportAll() };
-    const stamp = new Date().toISOString().slice(0, 10);
-    res.writeHead(200, {
-      'Content-Type': 'application/json; charset=utf-8',
-      'Content-Disposition': `attachment; filename="techtie-hub-${stamp}.json"`,
-    });
-    return res.end(JSON.stringify(bundle));
+    return send(res, 200, { ok: true });
   }
 
   if (resource === 'import' && method === 'POST') {
     if (body.app !== 'techtie-hub' || !body.state?.projects) return send(res, 400, { error: 'arquivo não é uma exportação do Techtie Hub' });
-    if (state.projects.some((p) => runner.isRunning(p.id))) return send(res, 409, { error: 'pare os agentes antes de importar' });
-    runner.importAll(body);
-    // pastas deste PC que já estavam configuradas continuam valendo
-    const mine = Object.fromEntries(state.projects.map((p) => [p.id, folderOf(p)]));
+    if (Object.keys(live).length) return send(res, 409, { error: 'pare os agentes antes de importar' });
+    // pastas já configuradas aqui continuam valendo (a importação pode vir de outro hub)
+    const known = Object.fromEntries(state.projects.map((p) => [p.id, p.folders]));
+    const envs = state.environments;
+    chats.importAll(body.chats);
+    sessions.importAll(body.sessions);
     fs.writeFileSync(DATA_FILE, JSON.stringify(body.state));
     state = load();
-    for (const p of state.projects) if (mine[p.id] && !folderOf(p)) p.folders[ENV.id] = mine[p.id];
-    addLog(null, null, `Escritório importado de "${body.from || 'outro PC'}"`);
+    state.environments = { ...envs, ...state.environments };
+    for (const p of state.projects) p.folders = { ...known[p.id], ...p.folders };
+    addLog(null, null, 'Escritório importado de um backup');
     save();
     return send(res, 200, { ok: true });
   }
 
-  if (resource === 'projects' && action === 'open' && method === 'POST') {
+  // ---------- Mesa: conversa, memória, git, pasta ----------
+  if (resource === 'projects' && ['chat', 'answer', 'stop', 'reset', 'memory', 'git', 'open'].includes(action)) {
     const project = state.projects.find((p) => p.id === id);
     if (!project) return send(res, 404, { error: 'não encontrado' });
-    if (!isDir(folderOf(project))) return send(res, 400, { error: 'pasta não definida neste PC ou inexistente' });
-    openFolder(folderOf(project), body.app);
+    const chat = chats.get(id);
+    const brief = (folder) => ({ id, name: project.name, description: project.description, folder });
+
+    if (action === 'chat' && method === 'GET') return send(res, 200, chat);
+    if (action === 'memory' && method === 'GET') {
+      return send(res, 200, { memory: chat.memory || '', memoryAt: chat.memoryAt || null, lastCommit: chat.lastCommit || null });
+    }
+    if (action === 'memory' && method === 'PUT') {
+      chats.setMemory(id, body.memory);
+      return send(res, 200, { ok: true });
+    }
+    if (action === 'git' && method === 'GET') {
+      const envId = envFor(req);
+      if (!envId || !project.folders[envId]) return send(res, 200, { git: false });
+      return send(res, 200, await connectors.rpc(envId, 'git', { folder: project.folders[envId], last: chat.lastCommit }));
+    }
+    if (method !== 'POST') return send(res, 405, { error: 'método não permitido' });
+
+    // pedidos em andamento vão para o PC onde estão rodando, venha de onde vier a resposta
+    if (action === 'answer' || action === 'stop') {
+      if (!live[id]) return send(res, 409, { error: 'nada rodando nesta mesa' });
+      return send(res, 200, await connectors.rpc(live[id].envId, action, { projectId: id, ...body }));
+    }
+
+    const envId = needEnv(req);
+    if (action === 'open') return send(res, 200, await connectors.rpc(envId, 'open', { folder: project.folders[envId], app: body.app }));
+
+    if (action === 'chat') {
+      if (live[id]) return send(res, 409, { error: 'o agente ainda está trabalhando nesta mesa' });
+      const folder = project.folders[envId];
+      if (!folder) return send(res, 400, { error: `defina a pasta desta mesa no PC "${envName(envId)}" em ⚙ Mesa` });
+      const text = String(body.message || '').trim();
+      if (!text) return send(res, 400, { error: 'mensagem vazia' });
+      live[id] = { running: true, pending: null, envId }; // reserva a mesa até o conector confirmar
+      try {
+        await connectors.rpc(envId, 'run', { project: brief(folder), text, chat });
+      } catch (e) {
+        delete live[id];
+        broadcast(null, snapshot());
+        throw e;
+      }
+      return send(res, 200, { ok: true });
+    }
+
+    if (live[id]) return send(res, 409, { error: 'espere o agente terminar' });
+    // memória e nova conversa: o resumo é feito pelo Claude do PC escolhido
+    const refresh = async () => {
+      const m = await connectors.rpc(envId, 'memory', { project: brief(project.folders[envId]), chat }, 5 * 60 * 1000);
+      chats.update(id, m);
+      return m.memory;
+    };
+    if (action === 'memory') return send(res, 200, { memory: await refresh() });
+    // reset: guarda o que importa na memória e começa uma sessão limpa
+    await refresh().catch(() => {});
+    const oldSession = chats.reset(id);
+    if (oldSession) await sessions.delete({ sessionId: oldSession });
     return send(res, 200, { ok: true });
   }
 
@@ -418,28 +479,30 @@ async function api(req, res, url) {
   if (FIELDS[resource]) {
     const list = state[resource];
     const fields = FIELDS[resource];
-    if (typeof body.folder === 'string') {
-      body.folder = body.folder.trim().replace(/^"(.*)"$/, '$1') || null;
-      if (body.folder && !isDir(body.folder)) return send(res, 400, { error: `a pasta "${body.folder}" não existe` });
-      if (body.folder) body.folder = path.resolve(body.folder);
-    }
-    // a pasta vale só para este PC; se a mesa já tem repositório, confere se é o mesmo
-    let folderRemote = null;
-    if (resource === 'projects' && body.folder) {
-      folderRemote = await git.remote(body.folder);
-      const current = id && list.find((x) => x.id === id);
-      if (current?.repo && folderRemote && !git.sameRepo(current.repo, folderRemote) && !body.forceFolder) {
-        return send(res, 409, {
-          code: 'repo_mismatch',
-          error: `Essa pasta é de outro repositório (${folderRemote}). A mesa "${current.name}" trabalha em ${current.repo}.`,
-        });
-      }
+
+    // A pasta vale só para o PC escolhido: o conector confere se existe e qual o repositório.
+    let folderEnv = null, folderRemote = null;
+    if (resource === 'projects' && typeof body.folder === 'string') {
+      folderEnv = needEnv(req);
+      if (body.folder.trim()) {
+        const info = await connectors.rpc(folderEnv, 'folder-info', { folder: body.folder });
+        if (!info.exists) return send(res, 400, { error: `a pasta "${info.folder || body.folder}" não existe no PC "${envName(folderEnv)}"` });
+        body.folder = info.folder;
+        folderRemote = info.remote;
+        const current = id && list.find((x) => x.id === id);
+        if (current?.repo && folderRemote && !git.sameRepo(current.repo, folderRemote) && !body.forceFolder) {
+          return send(res, 409, {
+            code: 'repo_mismatch',
+            error: `Essa pasta é de outro repositório (${folderRemote}). A mesa "${current.name}" trabalha em ${current.repo}.`,
+          });
+        }
+      } else body.folder = null;
     }
     const applyFolder = (item) => {
-      if (resource !== 'projects' || body.folder === undefined) return;
+      if (!folderEnv) return;
       item.folders ??= {};
-      if (body.folder) item.folders[ENV.id] = body.folder;
-      else delete item.folders[ENV.id];
+      if (body.folder) item.folders[folderEnv] = body.folder;
+      else delete item.folders[folderEnv];
       if (folderRemote && (!item.repo || body.forceFolder)) item.repo = folderRemote;
     };
     if (body.roomId !== undefined && !state.rooms.some((r) => r.id === body.roomId)) {
@@ -465,6 +528,7 @@ async function api(req, res, url) {
       if (resource === 'projects') {
         item.roomId ??= state.rooms[0].id;
         item.agentId = null;
+        item.folders = {};
         applyFolder(item);
         list.push(item);
         assign(item, body.agentId);
@@ -500,8 +564,8 @@ async function api(req, res, url) {
         const target = state.rooms.find((r) => r !== item);
         for (const p of state.projects) if (p.roomId === item.id) p.roomId = target.id;
       }
+      if (resource === 'projects' && live[item.id]) connectors.rpc(live[item.id].envId, 'stop', { projectId: item.id }).catch(() => {});
       state[resource] = list.filter((x) => x !== item);
-      if (resource === 'projects') runner.stop(item.id);
       if (resource === 'agents') for (const p of state.projects) if (p.agentId === item.id) p.agentId = null;
       save();
       return send(res, 204, {});
@@ -531,20 +595,14 @@ http
       if (url.pathname.startsWith('/api/')) await api(req, res, url);
       else serveStatic(res, url);
     } catch (e) {
-      send(res, 400, { error: e.message });
+      if (!res.headersSent) send(res, e instanceof HttpError ? e.code : 400, { error: e.message, ...e.extra });
     }
   })
-  // só nesta máquina: a API abre pastas e programas, não deve ficar exposta na rede
-  .listen(PORT, '127.0.0.1', () => console.log(`Techtie Hub rodando em http://localhost:${PORT}`));
-
-// Mesas vinculadas antes de o hub guardar o repositório: registra o remote agora,
-// para a conferência de "pasta de outro repositório" funcionar em outros PCs.
-(async () => {
-  let changed = false;
-  for (const p of state.projects) {
-    if (p.repo || !folderOf(p)) continue;
-    const remote = await git.remote(folderOf(p));
-    if (remote) [p.repo, changed] = [remote, true];
-  }
-  if (changed) save();
-})();
+  .listen(PORT, HOST, () => {
+    console.log(`Techtie Hub rodando em http://localhost:${PORT}`);
+    if (!EMBEDDED) return;
+    // modo local: este PC já fica conectado; o hub-hook.js usa a mesma configuração
+    const hub = `http://127.0.0.1:${PORT}`;
+    if (!conector.readJson(conector.CONFIG_FILE)) conector.writeJson(conector.CONFIG_FILE, { hub, key: HUB_KEY });
+    conector.start({ hub, key: HUB_KEY, log: (...a) => console.log('[conector]', ...a) });
+  });

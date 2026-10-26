@@ -7,6 +7,7 @@
   "type": "commonjs",
   "scripts": {
     "start": "node server.js",
+    "conector": "node conector.js",
     "instalar-hook": "node instalar-hook.js",
     "remover-hook": "node instalar-hook.js --remover"
   },
