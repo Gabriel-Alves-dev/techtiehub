@@ -841,7 +841,9 @@ function showLogin(setup = false, needCode = false) {
     box.querySelector('.login-card').innerHTML = `
       <h1>TECHTIE HUB</h1>
       <h2>${mode === 'setup' ? 'Criar sua conta' : signup ? 'Criar conta com convite' : 'Entrar'}</h2>
-      ${mode === 'setup' ? '<p class="muted">Primeira conta deste hub. O escritório que já existe aqui passa a ser seu.</p>' : ''}
+      ${mode === 'setup' ? `<p class="muted">Primeira conta deste hub. ${needCode
+        ? 'Depois você pode trazer o seu escritório em PC → Backup → Importar.'
+        : 'O escritório que já existe aqui passa a ser seu.'}</p>` : ''}
       <form>
         ${signup ? '<label>Nome<input name="name" maxlength="40" autocomplete="name" /></label>' : ''}
         <label>E-mail<input name="email" type="email" required autocomplete="email" /></label>
