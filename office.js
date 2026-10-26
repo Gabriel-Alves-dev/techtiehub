@@ -73,7 +73,8 @@ class Office {
 
   // O navegador recebe o estado salvo + o que está rodando + os PCs conectados.
   snapshot() {
-    return { ...this.state, live: this.live, connectors: this.connectors.online() };
+    // now: relógio do hub, para o navegador acertar os cronômetros com o dele
+    return { ...this.state, live: this.live, connectors: this.connectors.online(), now: Date.now() };
   }
 
   broadcast(event, data) {

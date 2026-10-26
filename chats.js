@@ -6,7 +6,7 @@ const path = require('path');
 
 const MAX_ENTRIES = 500;
 // campos que o conector pode atualizar
-const FIELDS = ['sessionId', 'sessionAppend', 'lastCommit', 'lastEnv', 'lastEnvName', 'lastFolder', 'memory', 'memoryAt'];
+const FIELDS = ['sessionId', 'sessionAppend', 'lastCommit', 'lastEnv', 'lastEnvName', 'lastFolder', 'lastModel', 'memory', 'memoryAt'];
 
 class ChatStore {
   // onChat(projectId, entry) — nova linha (o hub repassa por SSE)

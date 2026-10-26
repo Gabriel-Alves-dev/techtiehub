@@ -178,9 +178,12 @@ function syncRuntime(atSeats) {
   for (const id of runtime.keys()) if (!visible.some((a) => a.id === id)) runtime.delete(id);
 }
 
+let clockOffset = 0; // relógio do navegador − relógio do hub
+
 function applyState(next) {
   const firstLoad = !world;
   state = next;
+  if (state.now) clockOffset = Date.now() - state.now;
   if (!state.rooms.some((r) => r.id === roomId)) roomId = state.rooms[0]?.id;
   resolveEnv();
   world = computeWorld();
@@ -1086,6 +1089,7 @@ function openProjectWindow(projectId) {
       <div class="pw-banner" hidden></div>
       <div class="chat-log"><p class="muted chat-empty">Carregando…</p></div>
       <div class="pending-box"></div>
+      <div class="pw-activity" hidden></div>
       <div class="chat-input">
         <textarea rows="2"></textarea>
         <div class="row">
@@ -1146,8 +1150,9 @@ function updateProjectWindow(win) {
         ${state.agents.map((x) => `<option value="${x.id}" ${x.id === p.agentId ? 'selected' : ''}>👤 ${esc(x.name)}</option>`).join('')}
       </select>
       ${a ? '<button data-act="edit-agent" title="Editar agente">✎</button>' : ''}
+      ${a ? `<button class="model-chip" data-act="edit-agent" title="Modelo e esforço do agente (clique para mudar)">🤖 <span data-field="model"></span></button>` : ''}
 `;
-    const on = (act, fn) => { const b = tb.querySelector(`[data-act=${act}]`); if (b) b.onclick = fn; };
+    const on = (act, fn) => tb.querySelectorAll(`[data-act=${act}]`).forEach((b) => (b.onclick = fn));
     on('folder', () => api('POST', `/api/projects/${p.id}/open`, { app: 'explorer' }));
     on('vscode', () => api('POST', `/api/projects/${p.id}/open`, { app: 'vscode' }));
     on('edit-desk', () => openProjectDialog(p));
@@ -1166,6 +1171,8 @@ function updateProjectWindow(win) {
   win.body.querySelector('[data-act=stop]').hidden = !live?.running;
   win.body.querySelector('[data-act=reset]').disabled = !!live?.running;
   renderPending(win, p, live?.pending);
+  renderModel(win, a, live);
+  renderActivity(win);
   // terminou uma rodada: o commit pode ter mudado
   if (win.wasRunning && !live?.running) refreshGit(win);
   win.wasRunning = !!live?.running;
@@ -1203,6 +1210,46 @@ function renderBanner(win, p) {
   if (box.innerHTML !== html) box.innerHTML = html;
   box.hidden = !msgs.length;
 }
+
+// Etiqueta do modelo: o que está rodando agora (ou rodou por último) + a escolha do agente.
+function renderModel(win, a, live) {
+  const el = win.body.querySelector('[data-field=model]');
+  if (!el || !a) return;
+  const running = prettyModel(live?.model || win.lastModel);
+  const chosen = a.model ? MODEL_NAMES[a.model] : 'padrão do PC';
+  const effort = a.effort ? ' · ' + EFFORT_NAMES[a.effort].toLowerCase() : '';
+  el.textContent = (running && (!a.model || running.toLowerCase().startsWith(a.model)) ? running : chosen) + effort;
+}
+
+// Linha de atividade com cronômetro: mostra se o agente está pensando ou esperando uma
+// ferramenta (ex.: um MCP lento). Atualizada a cada segundo enquanto há janelas abertas.
+const fmtElapsed = (ms) => {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`;
+};
+
+function renderActivity(win) {
+  const box = win.body.querySelector('.pw-activity');
+  const l = state.live?.[win.projectId];
+  if (!box) return;
+  if (!l?.running) { box.hidden = true; return; }
+  let text;
+  if (l.pending) text = '✋ Esperando você responder acima';
+  else if (!l.phase) text = '⏳ Começando…';
+  else {
+    const elapsed = Date.now() - clockOffset - l.phase.since;
+    text = l.phase.kind === 'tool' ? `🔧 Esperando ${l.phase.name} · ${fmtElapsed(elapsed)}` : `💭 Pensando · ${fmtElapsed(elapsed)}`;
+    if (elapsed > 3 * 60000) text += l.phase.kind === 'tool'
+      ? ' — a ferramenta está demorando; se parecer travado, use Parar'
+      : ' — tarefa grande; se parecer travado, use Parar';
+  }
+  box.textContent = text;
+  box.hidden = false;
+}
+
+setInterval(() => {
+  for (const w of wins.values()) if (w.projectId) renderActivity(w);
+}, 1000);
 
 async function refreshGit(win) {
   try {
@@ -1348,7 +1395,9 @@ function renderEnv(win) {
 async function loadChat(projectId) {
   const data = await api('GET', `/api/projects/${projectId}/chat`);
   chats.set(projectId, data.entries);
-  const box = wins.get('p:' + projectId)?.body.querySelector('.chat-log');
+  const win = wins.get('p:' + projectId);
+  if (win) win.lastModel = data.lastModel; // modelo da última rodada, para a etiqueta
+  const box = win?.body.querySelector('.chat-log');
   if (!box) return;
   box.innerHTML = data.entries.length ? '' : '<p class="muted chat-empty">Nenhuma conversa ainda. Escreva um pedido abaixo 👇</p>';
   data.entries.forEach((e) => box.appendChild(chatEntry(e)));
@@ -1607,6 +1656,15 @@ function openProjectDialog(p) {
   };
 }
 
+const MODEL_NAMES = { '': 'Padrão do PC', opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku' };
+const EFFORT_NAMES = { '': 'Padrão do PC', low: 'Baixo', medium: 'Médio', high: 'Alto', xhigh: 'Muito alto', max: 'Máximo' };
+
+// claude-opus-5-5 → "Opus 5.5" (ignora sufixos de data)
+function prettyModel(id) {
+  const m = /claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?!\d)/.exec(id || '');
+  return m ? `${m[1][0].toUpperCase()}${m[1].slice(1)} ${m[2]}${m[3] ? '.' + m[3] : ''}` : id || '';
+}
+
 function openAgentDialog(a) {
   const shirt = a?.shirt || PALETTE[state.agents.length % PALETTE.length];
   openDialog(`
@@ -1618,6 +1676,14 @@ function openAgentDialog(a) {
       <label>Cabelo<input type="color" name="hair" value="${esc(a?.hair || '#3b2416')}" /></label>
       <label>Pele<input type="color" name="skin" value="${esc(a?.skin || '#f1c7a0')}" /></label>
     </div>
+    <div class="colors">
+      <label>Modelo<select name="model">${Object.entries(MODEL_NAMES).map(([k, v]) =>
+        `<option value="${k}" ${k === (a?.model || '') ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+      <label>Esforço<select name="effort">${Object.entries(EFFORT_NAMES).map(([k, v]) =>
+        `<option value="${k}" ${k === (a?.effort || '') ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+    </div>
+    <p class="muted dialog-hint">“Padrão do PC” usa o que estiver configurado no Claude Code do computador que executa.
+      Mais esforço pensa mais (melhor em tarefas difíceis), mas demora e gasta mais do seu plano.</p>
   `, async (d) => {
     if (a) await api('PATCH', `/api/agents/${a.id}`, d);
     else await api('POST', '/api/agents', d);

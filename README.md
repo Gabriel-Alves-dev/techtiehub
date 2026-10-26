@@ -55,7 +55,7 @@ No Windows, você também pode dar dois cliques em **`iniciar.bat`**. Ele instal
 ### Primeiros passos
 
 1. **Entre na sua conta.** O login fica salvo por 30 dias.
-1. **Contrate agentes** no botão **+ Contratar**: escolha nome, cargo e as cores do personagem.
+1. **Contrate agentes** no botão **+ Contratar**: escolha nome, cargo, as cores do personagem e, se quiser, o **modelo** (Opus, Sonnet, Haiku) e o **esforço**. "Padrão do PC" usa a configuração do Claude Code do computador que executa.
 2. **Crie salas, se quiser,** pela aba **+ Sala**. Clique na aba da sala atual (⚙) para mudar o nome, as mesas por fileira, as áreas especiais e o piso.
 3. **Crie uma mesa** no botão **+ Mesa** ou clicando na mesa tracejada. Dê um nome, escolha a **pasta do projeto** com o botão "Escolher…" e o agente que vai sentar nela.
 4. **Clique na mesa ou no personagem** para abrir a janela de conversa e peça algo, por exemplo: *"Analisa a estrutura do projeto e me diz o que falta para o MVP"*.
@@ -80,6 +80,8 @@ Na janela de uma mesa:
   - **Sempre permitir** grava a regra em `.claude/settings.local.json` dentro da pasta do projeto.
   - **Negar** avisa o agente, que tenta outro caminho.
 - **Pergunta do agente.** Marque uma opção ou escreva uma resposta própria em "Outra resposta".
+- **Linha de atividade:** enquanto o agente trabalha, mostra se ele está pensando ou esperando uma ferramenta (ex.: um MCP), com cronômetro.
+- **Etiqueta 🤖** na janela: o modelo que está rodando (ou rodou por último).
 - **Parar** interrompe o agente no meio da tarefa.
 - **Nova conversa** começa do zero. O agente esquece o contexto da conversa anterior.
 

@@ -228,7 +228,9 @@ async function connectorApi(req, res, url, op, sub) {
     else if (type === 'chat-update') o.chats.update(projectId, body.fields || {});
     else if (type === 'status') o.setStatus(projectId, body.status, body.message, body.log);
     else if (type === 'live') {
-      if (body.live) o.live[projectId] = { ...body.live, envId };
+      // `age` vira um horário no relógio do hub (cada PC tem o seu relógio)
+      const phase = body.live?.phase && { kind: body.live.phase.kind, name: body.live.phase.name, since: Date.now() - (body.live.phase.age || 0) };
+      if (body.live) o.live[projectId] = { ...body.live, phase, envId };
       else delete o.live[projectId];
       o.broadcast(null, o.snapshot());
     }
@@ -260,7 +262,7 @@ function pick(obj, fields) {
 
 const FIELDS = {
   projects: ['name', 'description', 'color', 'agentId', 'roomId'], // pasta: tratada à parte (uma por PC)
-  agents: ['name', 'role', 'shirt', 'hair', 'skin', 'status', 'message'],
+  agents: ['name', 'role', 'shirt', 'hair', 'skin', 'status', 'message', 'model', 'effort'],
   rooms: ['name', 'cols', 'floor', 'areas'],
 };
 
@@ -369,7 +371,9 @@ async function officeApi(req, res, url, o, user) {
     const project = state.projects.find((p) => p.id === id);
     if (!project) return send(res, 404, { error: 'não encontrado' });
     const chat = chats.get(id);
-    const brief = (folder) => ({ id, name: project.name, description: project.description, folder });
+    const agent = state.agents.find((a) => a.id === project.agentId);
+    // modelo e esforço do agente da mesa (vazio = padrão do Claude Code do PC)
+    const brief = (folder) => ({ id, name: project.name, description: project.description, folder, model: agent?.model || '', effort: agent?.effort || '' });
 
     if (action === 'chat' && method === 'GET') return send(res, 200, chat);
     if (action === 'memory' && method === 'GET') {
@@ -461,6 +465,9 @@ async function officeApi(req, res, url, o, user) {
     }
     if (body.cols !== undefined) body.cols = Math.max(2, Math.min(8, parseInt(body.cols, 10) || 4));
     if (body.floor !== undefined && !FLOORS.includes(body.floor)) body.floor = 'madeira';
+    // modelo/esforço do agente: '' = padrão do Claude Code do PC
+    if (body.model !== undefined && !['', 'opus', 'sonnet', 'haiku'].includes(body.model)) body.model = '';
+    if (body.effort !== undefined && !['', 'low', 'medium', 'high', 'xhigh', 'max'].includes(body.effort)) body.effort = '';
     if (body.areas !== undefined) {
       // sempre sobra ao menos uma área, para os agentes ociosos terem para onde ir
       body.areas = AREAS.filter((a) => [].concat(body.areas).includes(a));

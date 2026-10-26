@@ -51,6 +51,9 @@ class Runner {
     const p = run.pending;
     return {
       running: true,
+      model: run.model || null,
+      // o que está acontecendo agora (age: há quanto tempo, em ms — o relógio de cada PC é diferente)
+      phase: run.phase && { kind: run.phase.kind, name: run.phase.name, age: Date.now() - run.phase.since },
       pending: p && {
         id: p.id,
         toolName: p.toolName,
@@ -87,7 +90,7 @@ class Runner {
     if (this.isRunning(project.id)) throw new Error('o agente ainda está trabalhando nesta mesa');
     chat = { entries: [], ...chat };
     this.chats.set(project.id, chat);
-    const run = { running: true, pending: null, abort: new AbortController() };
+    const run = { running: true, pending: null, abort: new AbortController(), phase: { kind: 'thinking', since: Date.now() } };
     this.runs.set(project.id, run);
     this.push(project.id, 'user', text);
     this.hub.status(project.id, 'trabalhando', text, true);
@@ -159,6 +162,9 @@ class Runner {
           // snapshot:false = o prompt de sistema é montado a cada pedido, com a pasta e o
           // git do PC atual (gravado na sessão, ele carregaria a pasta do PC antigo)
           systemPrompt: { type: 'preset', preset: 'claude_code', append: chat.sessionAppend || undefined, snapshot: false },
+          // modelo e esforço escolhidos para o agente; vazio = o padrão do Claude Code deste PC
+          model: project.model || undefined,
+          effort: project.effort || undefined,
           abortController: run.abort,
           canUseTool: (name, input, opts) => this.ask(project.id, run, name, input, opts),
         },
@@ -175,18 +181,34 @@ class Runner {
     return success;
   }
 
+  // fase atual (pensando / esperando uma ferramenta), mostrada com cronômetro na mesa
+  setPhase(projectId, kind, name) {
+    const run = this.runs.get(projectId);
+    if (!run?.running) return;
+    run.phase = { kind, name, since: Date.now() };
+    this.emitLive(projectId);
+  }
+
   handle(projectId, m) {
     if (m.type === 'system' && m.subtype === 'init') {
-      this.update(projectId, { sessionId: m.session_id });
+      this.update(projectId, { sessionId: m.session_id, lastModel: m.model });
+      const run = this.runs.get(projectId);
+      if (run) run.model = m.model;
+      this.emitLive(projectId);
     } else if (m.type === 'assistant') {
+      let tool = null;
       for (const c of m.message.content) {
         if (c.type === 'text' && c.text.trim()) this.push(projectId, 'assistant', c.text);
         if (c.type === 'tool_use' && c.name !== 'AskUserQuestion') {
           const what = this.describeTool(c.name, c.input);
           this.push(projectId, 'tool', what);
           this.hub.status(projectId, 'trabalhando', what, false);
+          tool = c.name.replace(/^mcp__/, '').replace(/__/g, ' › '); // mcp__bitrix__get_task → bitrix › get_task
         }
       }
+      this.setPhase(projectId, tool ? 'tool' : 'thinking', tool);
+    } else if (m.type === 'user') {
+      this.setPhase(projectId, 'thinking'); // a ferramenta respondeu: o Claude volta a pensar
     } else if (m.type === 'result') {
       if (m.subtype === 'success') this.hub.status(projectId, 'concluido', 'Terminou — aguardando você', true);
       else {
