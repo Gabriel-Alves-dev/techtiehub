@@ -1226,6 +1226,12 @@ function renderBanner(win, p) {
   if (l?.running && l.envId !== state.env?.id) {
     msgs.push(`⚙️ Este pedido está rodando no PC <b>${esc(state.connectors?.[l.envId]?.name || state.environments?.[l.envId]?.name || 'outro PC')}</b>. Você pode acompanhar e responder daqui.`);
   }
+  if (state.env && outdated(state.env.id)) {
+    msgs.push(state.connectors[state.env.id].version
+      ? `🔄 O conector do PC <b>${esc(state.env.name)}</b> está se atualizando (espera as tarefas em andamento terminarem).`
+      : `⚠️ O conector do PC <b>${esc(state.env.name)}</b> é de uma versão antiga: imagens, modelo e permissões não funcionam nele. ` +
+        'Baixe o conector de novo nesse PC (<b>PC → Conectar um PC → Baixar conector</b>) e extraia por cima. Depois disso ele passa a se atualizar sozinho.');
+  }
   if (!state.env) {
     msgs.push(Object.keys(state.connectors || {}).length
       ? '🖥 Escolha em qual PC executar no botão <b>PC</b> (topo).'
@@ -1289,6 +1295,12 @@ function renderActivity(win) {
 setInterval(() => {
   for (const w of wins.values()) if (w.projectId) renderActivity(w);
 }, 1000);
+
+// conector do PC com versão diferente da que o hub entrega (sem versão = muito antigo)
+function outdated(envId) {
+  const c = state.connectors?.[envId];
+  return !!c && !!state.connectorVersion && c.version !== state.connectorVersion;
+}
 
 async function refreshGit(win) {
   try {
@@ -1374,6 +1386,9 @@ function renderEnv(win) {
       <i class="dot" style="background:${id in online ? 'var(--ok)' : 'var(--muted)'}"></i>
       <span class="env-name">${esc(online[id]?.name || e.name)}</span>
       <span class="muted">${id in online ? 'conectado' : 'visto ' + timeAgo(e.lastSeen)}</span>
+      ${id in online && outdated(id) ? `<span class="badge st-bloqueado" title="${online[id].version
+        ? 'Ele se atualiza sozinho assim que terminar as tarefas em andamento.'
+        : 'Versão antiga, que não se atualiza sozinha: baixe o conector de novo neste PC.'}">desatualizado</span>` : ''}
       ${id === state.env?.id ? '<span class="badge st-concluido">em uso</span>'
         : id in online ? `<button data-use="${id}">Usar</button>` : ''}
       ${paired[id] ? `<button class="danger" data-revoke="${paired[id].id}" title="Desconecta e exige parear de novo">Remover</button>` : ''}

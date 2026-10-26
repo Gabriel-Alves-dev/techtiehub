@@ -85,7 +85,7 @@ Das próximas vezes, basta dar dois cliques em **`conectar.bat`** (ou `npm run c
 ## 6. Atualizar
 
 - **Hub:** dê `git push` no repositório e clique em **Redeploy** no Coolify. Também dá para ativar *Auto Deploy* com o webhook do GitHub. Os dados ficam no volume e não se perdem.
-- **Conectores:** quem usa o pacote baixa de novo no hub e extrai por cima da pasta antiga (o PC continua o mesmo). Quem usa o repositório: `git pull` e abra o `conectar.bat` de novo.
+- **Conectores:** os do pacote baixável **se atualizam sozinhos** depois do Redeploy (esperam terminar as tarefas em andamento e reiniciam). A janela **PC** mostra quem está desatualizado. Quem usa o repositório: `git pull` e abra o `conectar.bat` de novo.
 
 ## 7. Backup
 

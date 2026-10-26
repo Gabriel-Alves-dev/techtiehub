@@ -38,8 +38,9 @@ class HttpError extends Error {
 
 class Office {
   // legacyEnvId: PC do modo local, para migrar dados antigos de pasta única
-  constructor(id, dir, { legacyEnvId } = {}) {
-    Object.assign(this, { id, dir, legacyEnvId });
+  // connectorVersion: versão atual do conector (para a interface apontar PCs desatualizados)
+  constructor(id, dir, { legacyEnvId, connectorVersion } = {}) {
+    Object.assign(this, { id, dir, legacyEnvId, connectorVersion });
     this.file = path.join(dir, 'state.json');
     this.state = this.load();
     this.browsers = new Set();
@@ -76,7 +77,7 @@ class Office {
   // O navegador recebe o estado salvo + o que está rodando + os PCs conectados.
   snapshot() {
     // now: relógio do hub, para o navegador acertar os cronômetros com o dele
-    return { ...this.state, live: this.live, connectors: this.connectors.online(), now: Date.now() };
+    return { ...this.state, live: this.live, connectors: this.connectors.online(), connectorVersion: this.connectorVersion, now: Date.now() };
   }
 
   broadcast(event, data) {

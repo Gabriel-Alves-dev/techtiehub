@@ -180,6 +180,22 @@ O estado transmitido ao navegador tem dois campos que não são salvos:
 - **Sincronização ao reconectar:** a cada conexão, o conector manda `live-sync` com tudo o que roda naquele PC. O hub apaga as mesas que achava rodando ali e não estão na lista (`syncLive`), e restaura as que estão, inclusive pedidos de permissão pendentes.
 - **No modo local**, o hub chama `conector.start()` no mesmo processo, com o token do PC local (ver Contas e credenciais).
 
+### Atualização automática
+
+A versão do conector é uma impressão digital do conteúdo dos arquivos listados em `connector-files.js` (`versionOf`, ignorando CRLF/LF). O hub calcula a dele ao subir (`CONNECTOR_VERSION`), e o conector manda a sua no stream (`?v=`).
+
+Quando as versões são diferentes:
+
+1. O hub escreve `event: update` no stream.
+2. O conector (`selfUpdate`) espera não haver tarefas rodando e baixa `GET /api/connector/update` (arquivos + `package.json`).
+3. Ele grava por cima (só nomes `*.js` sem caminho) e sai com o código 75.
+4. O `Iniciar Techtie.bat` roda `npm install` e reabre o conector.
+
+Proteções:
+- Não se atualiza dentro de um repositório git (`.git` na pasta), nem no conector embutido.
+- Não tenta duas vezes a mesma versão (`.atualizado-para`).
+- A interface marca PCs com `connectors[env].version !== connectorVersion` (`outdated`). Sem versão = conector muito antigo, que precisa ser baixado de novo.
+
 ### Pacote baixável (Windows)
 
 `GET /api/connector-download` (logado) monta na hora um `.zip` (`zip.js`, formato ZIP com deflate do `zlib`, sem dependências) com os arquivos do conector, os extras de `pacote/` (com quebras de linha CRLF), um `package.json` mínimo (só o SDK do Claude) e `conector-config.json` com o endereço do hub e um **código de pareamento de 24 h**. Os códigos ficam guardados (só o hash) em `auth.json`, para sobreviver a um redeploy.

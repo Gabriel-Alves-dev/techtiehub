@@ -31,7 +31,14 @@ if errorlevel 1 goto erro
 echo.
 echo Conector ligado. Deixe esta janela aberta (pode minimizar) enquanto usa o hub.
 echo.
+:rodar
 node conector.js
+rem codigo 75 = o conector se atualizou sozinho: instala o que mudou e abre de novo
+if errorlevel 75 if not errorlevel 76 (
+  echo Instalando a versao nova...
+  call npm install --omit=dev --no-audit --no-fund
+  goto rodar
+)
 goto fim
 
 :erro

@@ -137,6 +137,8 @@ Como a continuidade funciona:
 
 Depois é só deixar a janela aberta (pode minimizar). O pacote liga o PC à **sua** conta: não envie para outras pessoas; cada uma baixa o dela.
 
+**Atualização automática:** quando o hub ganha uma versão nova, o conector percebe ao reconectar, espera as tarefas em andamento terminarem, baixa os arquivos novos do hub e reinicia sozinho. A janela **PC** marca conectores **desatualizados**. Conectores de antes desse recurso precisam ser baixados de novo uma vez. Conectores rodando de dentro de um repositório git (pasta de desenvolvimento) não se sobrescrevem: só avisam para dar `git pull`.
+
 **Pela linha de comando** (quem já tem o repositório clonado e `npm install` feito): no hub, **PC → Conectar um PC → Já tenho o repositório clonado → Gerar código** (vale 10 minutos) e rode o comando mostrado:
 
 ```bash

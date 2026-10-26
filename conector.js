@@ -17,6 +17,12 @@ const ops = require('./local-ops');
 const { Runner } = require('./runner');
 const { RemoteSessionStore } = require('./remote-store');
 const { describeTool } = require('./describe');
+const { FILES, versionOf } = require('./connector-files');
+
+const VERSION = versionOf(__dirname);
+const RESTART_CODE = 75; // o "Iniciar Techtie.bat" reabre o conector quando ele sai com este código
+// pasta de desenvolvimento (repositório git): nunca se sobrescreve com a versão do hub
+const IS_REPO = fs.existsSync(path.join(__dirname, '.git'));
 
 const HOME_DIR = path.join(os.homedir(), '.techtie-hub');
 const ENV_FILE = process.env.HUB_ENV_FILE || path.join(HOME_DIR, 'ambiente.json');
@@ -59,7 +65,8 @@ async function pair(hub, code, envFile = ENV_FILE) {
 }
 
 // hub: URL do hub; token: credencial deste PC (obtida com pair)
-function start({ hub, token, envFile = ENV_FILE, log = console.log }) {
+// embedded: conector dentro do próprio hub (modo local) — tem sempre a mesma versão do hub
+function start({ hub, token, envFile = ENV_FILE, log = console.log, embedded = false }) {
   hub = hub.replace(/\/$/, '');
   const env = loadEnv(envFile);
   const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, 'X-Hub-Env': env.id };
@@ -145,19 +152,55 @@ function start({ hub, token, envFile = ENV_FILE, log = console.log }) {
     }
   }
 
+  // ---------- Atualização automática ----------
+  // O hub avisou que tem versão nova: espera as tarefas em andamento terminarem, baixa os
+  // arquivos, grava por cima e sai com RESTART_CODE (o .bat roda npm install e reabre).
+  let updating = false;
+  async function selfUpdate(target) {
+    if (updating) return;
+    updating = true;
+    const marker = path.join(__dirname, '.atualizado-para');
+    if (IS_REPO) {
+      log(`Conector desatualizado em relação ao hub (${VERSION} → ${target}). Nesta pasta de repositório, atualize com: git pull`);
+      return;
+    }
+    if (fs.existsSync(marker) && fs.readFileSync(marker, 'utf8').trim() === target) {
+      log('Já tentei atualizar para esta versão e continuo diferente; seguindo com a versão atual.');
+      return;
+    }
+    while (Object.keys(runner.allLive()).length) await sleep(5000); // não interrompe ninguém
+    try {
+      log('Versão nova do conector no hub. Atualizando…');
+      const res = await fetch(hub + '/api/connector/update', { headers });
+      if (!res.ok) throw new Error(`hub respondeu ${res.status}`);
+      const data = await res.json();
+      for (const [name, content] of Object.entries(data.files || {})) {
+        if (!/^[\w.-]+\.js$/.test(name)) continue; // só arquivos desta pasta, nada de caminhos
+        fs.writeFileSync(path.join(__dirname, name), content);
+      }
+      if (data.packageJson) fs.writeFileSync(path.join(__dirname, 'package.json'), data.packageJson);
+      fs.writeFileSync(marker, data.version || target);
+      log('Conector atualizado. Reiniciando…');
+      process.exit(RESTART_CODE);
+    } catch (e) {
+      log('Não consegui atualizar o conector agora:', e.message);
+      updating = false;
+    }
+  }
+
   let stopped = false;
   (async function loop() {
     let wait = 1000;
     while (!stopped) {
       try {
-        const res = await fetch(`${hub}/api/connector/stream?name=${encodeURIComponent(env.name)}`, { headers });
+        const res = await fetch(`${hub}/api/connector/stream?name=${encodeURIComponent(env.name)}&v=${VERSION}`, { headers });
         if (res.status === 401) {
           // removido no hub (ou pareado com outro hub): não adianta insistir rápido
           wait = 60000;
           throw new Error('este PC não está pareado com o hub; gere um código em PC → Conectar um PC e rode: node conector.js --codigo XXXX-XXXX');
         }
         if (!res.ok) throw new Error(`hub respondeu ${res.status}`);
-        log(`Conectado ao hub ${hub} como "${env.name}"`);
+        log(`Conectado ao hub ${hub} como "${env.name}" (conector ${VERSION})`);
         wait = 1000;
         // conta ao hub exatamente o que está rodando aqui (ele apaga o que ficou "fantasma")
         emit('live-sync', { lives: runner.allLive() });
@@ -178,6 +221,7 @@ function start({ hub, token, envFile = ENV_FILE, log = console.log }) {
               else if (line.startsWith('data: ')) data += line.slice(6);
             }
             if (event === 'cmd' && data) handle(JSON.parse(data));
+            if (event === 'update' && data && !embedded) selfUpdate(JSON.parse(data).version);
           }
         }
         log('Conexão com o hub encerrada.');
@@ -192,7 +236,7 @@ function start({ hub, token, envFile = ENV_FILE, log = console.log }) {
   return { env, runner, stop: () => (stopped = true) };
 }
 
-module.exports = { start, pair, loadEnv, readJson, writeJson, ENV_FILE, CONFIG_FILE, HOME_DIR };
+module.exports = { VERSION, start, pair, loadEnv, readJson, writeJson, ENV_FILE, CONFIG_FILE, HOME_DIR };
 
 // ---------- Linha de comando ----------
 if (require.main === module) {

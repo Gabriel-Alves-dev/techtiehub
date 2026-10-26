@@ -11,11 +11,11 @@ class Connectors {
     this.pending = new Map(); // id do comando -> { resolve, reject, timer, envId }
   }
 
-  attach(envId, name, req, res) {
+  attach(envId, name, req, res, version = null) {
     this.byEnv.get(envId)?.res.end(); // a mesma identidade conectou de novo: fica a conexão nova
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     res.write(': conectado\n\n');
-    const entry = { name, res, since: Date.now() };
+    const entry = { name, res, since: Date.now(), version };
     this.byEnv.set(envId, entry);
     const ping = setInterval(() => res.write(': ping\n\n'), 25000); // proxies derrubam conexões paradas
     req.on('close', () => {
@@ -40,7 +40,7 @@ class Connectors {
 
   online() {
     const out = {};
-    for (const [id, c] of this.byEnv) out[id] = { name: c.name, since: c.since };
+    for (const [id, c] of this.byEnv) out[id] = { name: c.name, since: c.since, version: c.version };
     return out;
   }
 

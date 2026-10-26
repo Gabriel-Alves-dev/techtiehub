@@ -16,18 +16,24 @@ const { createZip } = require('./zip');
 // ---------- Pacote do conector (baixado pelo navegador) ----------
 // Os arquivos que rodam no PC + o atalho de Windows (pacote/) + a configuração com o
 // endereço do hub e um código de pareamento. Arquivos de Windows vão com CRLF.
-const PACKAGE_FILES = ['conector.js', 'runner.js', 'git.js', 'local-ops.js', 'remote-store.js', 'describe.js',
-  'preparar.js', 'hub-hook.js', 'instalar-hook.js', 'report.js'];
+const { FILES: PACKAGE_FILES, versionOf } = require('./connector-files');
+// versão do conector que este hub entrega; conectores diferentes se atualizam sozinhos
+const CONNECTOR_VERSION = versionOf(__dirname);
 const PACKAGE_EXTRAS = ['Iniciar Techtie.bat', 'baixar-node.ps1', 'LEIA-ME.txt'];
+
+// package.json do conector: só o SDK do Claude
+function packageJsonFor() {
+  const sdk = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')).dependencies['@anthropic-ai/claude-agent-sdk'];
+  return JSON.stringify({ name: 'techtie-conector', private: true, dependencies: { '@anthropic-ai/claude-agent-sdk': sdk } }, null, 2);
+}
 
 function connectorPackage(hub, code) {
   const root = 'Techtie Conector/';
-  const sdk = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')).dependencies['@anthropic-ai/claude-agent-sdk'];
   const crlf = (s) => s.replace(/\r?\n/g, '\r\n');
   return createZip([
     ...PACKAGE_FILES.map((f) => ({ name: root + f, data: fs.readFileSync(path.join(__dirname, f)) })),
     ...PACKAGE_EXTRAS.map((f) => ({ name: root + f, data: crlf(fs.readFileSync(path.join(__dirname, 'pacote', f), 'utf8')) })),
-    { name: root + 'package.json', data: JSON.stringify({ name: 'techtie-conector', private: true, dependencies: { '@anthropic-ai/claude-agent-sdk': sdk } }, null, 2) },
+    { name: root + 'package.json', data: packageJsonFor() },
     { name: root + 'conector-config.json', data: JSON.stringify({ hub, code }, null, 2) },
   ]);
 }
@@ -51,7 +57,7 @@ const LOCAL_ENV = EMBEDDED ? conector.loadEnv() : null;
 // ---------- Escritórios ----------
 const offices = new Map();
 function getOffice(id) {
-  if (!offices.has(id)) offices.set(id, new Office(id, path.join(DATA_DIR, 'offices', id), { legacyEnvId: LOCAL_ENV?.id }));
+  if (!offices.has(id)) offices.set(id, new Office(id, path.join(DATA_DIR, 'offices', id), { legacyEnvId: LOCAL_ENV?.id, connectorVersion: CONNECTOR_VERSION }));
   return offices.get(id);
 }
 
@@ -130,7 +136,7 @@ function startEmbedded(officeId) {
   if (!cfg || /^http:\/\/(127\.0\.0\.1|localhost):/.test(cfg.hub || '')) {
     conector.writeJson(conector.CONFIG_FILE, { hub, token: saved.embeddedToken });
   }
-  conector.start({ hub, token: saved.embeddedToken, log: (...a) => console.log('[conector]', ...a) });
+  conector.start({ hub, token: saved.embeddedToken, embedded: true, log: (...a) => console.log('[conector]', ...a) });
 }
 
 // ---------- Contas ----------
@@ -207,13 +213,22 @@ async function connectorApi(req, res, url, op, sub) {
 
   if (op === 'stream' && req.method === 'GET') {
     const name = String(url.searchParams.get('name') || 'PC').slice(0, 40);
+    const version = String(url.searchParams.get('v') || '').slice(0, 20) || null; // conectores antigos não mandam
     auth.touchConnector(bearer(req));
     o.state.environments[envId] = { name, lastSeen: Date.now() };
-    o.connectors.attach(envId, name, req, res);
+    o.connectors.attach(envId, name, req, res, version);
+    // desatualizado: avisa para ele se atualizar (conectores antigos ignoram — precisam baixar de novo)
+    if (version !== CONNECTOR_VERSION) res.write(`event: update\ndata: ${JSON.stringify({ version: CONNECTOR_VERSION })}\n\n`);
     o.onReconnect(envId);
     o.save();
     o.backfillRepos(envId);
     return;
+  }
+
+  // arquivos novos para o conector se atualizar
+  if (op === 'update' && req.method === 'GET') {
+    const files = Object.fromEntries(PACKAGE_FILES.map((f) => [f, fs.readFileSync(path.join(__dirname, f), 'utf8')]));
+    return send(res, 200, { version: CONNECTOR_VERSION, files, packageJson: packageJsonFor() });
   }
 
   const body = await readBody(req);
