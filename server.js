@@ -25,7 +25,8 @@ const PACKAGE_EXTRAS = ['Iniciar Techtie.bat', 'baixar-node.ps1', 'LEIA-ME.txt']
 // package.json do conector: só o SDK do Claude
 function packageJsonFor() {
   const sdk = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')).dependencies['@anthropic-ai/claude-agent-sdk'];
-  return JSON.stringify({ name: 'techtie-conector', private: true, dependencies: { '@anthropic-ai/claude-agent-sdk': sdk } }, null, 2);
+  const zod = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')).dependencies.zod;
+  return JSON.stringify({ name: 'techtie-conector', private: true, dependencies: { '@anthropic-ai/claude-agent-sdk': sdk, ...(zod && { zod }) } }, null, 2);
 }
 
 function connectorPackage(hub, code) {
@@ -59,7 +60,11 @@ const LOCAL_ENV = EMBEDDED ? conector.loadEnv() : null;
 // ---------- Escritórios ----------
 const offices = new Map();
 function getOffice(id) {
-  if (!offices.has(id)) offices.set(id, new Office(id, path.join(DATA_DIR, 'offices', id), { legacyEnvId: LOCAL_ENV?.id, connectorVersion: CONNECTOR_VERSION, secrets }));
+  if (!offices.has(id)) {
+    const o = new Office(id, path.join(DATA_DIR, 'offices', id), { legacyEnvId: LOCAL_ENV?.id, connectorVersion: CONNECTOR_VERSION, secrets });
+    o.onIdle = (projectId) => processQueue(o, projectId); // mesa livre: próxima demanda da fila
+    offices.set(id, o);
+  }
   return offices.get(id);
 }
 
@@ -219,12 +224,52 @@ async function connectorApi(req, res, url, op, sub) {
     auth.touchConnector(bearer(req));
     o.state.environments[envId] = { name, lastSeen: Date.now() };
     o.connectors.attach(envId, name, req, res, version);
+    // demandas que esperavam um PC com a pasta (depois do live-sync, para não atropelar)
+    setTimeout(() => Object.keys(o.state.queue).forEach((pid) => processQueue(o, pid)), 3000);
     // desatualizado: avisa para ele se atualizar (conectores antigos ignoram — precisam baixar de novo)
     if (version !== CONNECTOR_VERSION) res.write(`event: update\ndata: ${JSON.stringify({ version: CONNECTOR_VERSION })}\n\n`);
     o.onReconnect(envId);
     o.save();
     o.backfillRepos(envId);
     return;
+  }
+
+  // ferramentas da secretária: só para uma mesa marcada como secretária neste escritório
+  if (op === 'office') {
+    const body = req.method === 'GET' ? Object.fromEntries(url.searchParams) : await readBody(req);
+    const sec = o.state.projects.find((p) => p.id === body.secretaria && p.role === 'secretaria');
+    if (!sec) return send(res, 403, { error: 'só a mesa da secretária usa estas ferramentas' });
+    if (sub === 'desks') return send(res, 200, o.roster().filter((d) => !d.secretaria));
+    if (sub === 'desk') {
+      const found = o.findDesk(body.q);
+      if (found.error) return send(res, 404, { error: found.error });
+      const p = found.project;
+      const chat = o.chats.get(p.id);
+      return send(res, 200, {
+        ...o.roster().find((d) => d.id === p.id),
+        memoria: chat.memory || '(vazia)',
+        memoriaNoEscritorio: o.state.officeMemory.projects[p.id]?.text || null,
+        ultimasMensagens: chat.entries.slice(-12).map((e) => `${e.role}: ${String(e.text).slice(0, 400)}`),
+      });
+    }
+    if (sub === 'delegate' && req.method === 'POST') {
+      const found = o.findDesk(body.mesa);
+      if (found.error) return send(res, 404, { error: found.error });
+      const pedido = String(body.pedido || '').trim();
+      if (!pedido) return send(res, 400, { error: 'o pedido está vazio' });
+      const r = await delegate(o, found.project, pedido, { from: 'secretária', preferredEnv: envId });
+      return send(res, 200, { mesa: found.project.name, agente: o.agentOf(found.project.id)?.name || null, ...r });
+    }
+    if (sub === 'reports') return send(res, 200, o.state.reports[body.dia || o.day()] || {});
+    if (sub === 'note' && req.method === 'POST') {
+      const nota = String(body.nota || '').trim();
+      if (!nota) return send(res, 400, { error: 'nota vazia' });
+      const mem = o.state.officeMemory;
+      mem.general = `${(mem.general || '').trim()}\n- (${o.day()}) ${nota}`.trim();
+      o.save();
+      return send(res, 200, { ok: true });
+    }
+    return send(res, 404, { error: 'ferramenta desconhecida' });
   }
 
   // arquivos novos para o conector se atualizar
@@ -286,7 +331,7 @@ function pick(obj, fields) {
 }
 
 const FIELDS = {
-  projects: ['name', 'description', 'color', 'agentId', 'roomId', 'permissionMode'], // pasta: tratada à parte (uma por PC)
+  projects: ['name', 'description', 'color', 'agentId', 'roomId', 'permissionMode', 'role'], // pasta: tratada à parte (uma por PC)
   agents: ['name', 'role', 'shirt', 'hair', 'skin', 'status', 'message', 'model', 'effort'],
   rooms: ['name', 'cols', 'floor', 'areas'],
 };
@@ -319,6 +364,80 @@ function report(o, body, res) {
   o.addLog(agent.id, desk?.id ?? null, `[${agent.status}] ${agent.message || ''}`.trim());
   o.save();
   return send(res, 200, agent);
+}
+
+// ---------- Começar um pedido numa mesa (chat, delegação da secretária, fila) ----------
+const SECRETARY_FOLDER = '@secretaria'; // a secretária não precisa de pasta: o conector usa uma dele
+
+const folderFor = (project, envId) => project.folders?.[envId] || (project.role === 'secretaria' ? SECRETARY_FOLDER : null);
+
+// O que o conector precisa saber da mesa para rodar o pedido.
+function briefFor(o, project, folder) {
+  const agent = o.agentOf(project.id);
+  return {
+    id: project.id, name: project.name, description: project.description, folder,
+    model: agent?.model || '', effort: agent?.effort || '', permissionMode: project.permissionMode || '',
+    mcpServers: o.mcpFor(project.id), // servidores MCP do hub para esta mesa (segredos abertos, só para o conector)
+    // a secretária recebe, a cada pedido, a visão atualizada do escritório
+    secretary: project.role === 'secretaria' ? { context: o.secretaryContext() } : undefined,
+  };
+}
+
+async function startRun(o, project, envId, text, { images = [], imageRefs = [] } = {}) {
+  const folder = folderFor(project, envId);
+  if (!folder) throw new HttpError(400, `defina a pasta desta mesa no PC "${o.envName(envId)}" em ⚙ Mesa`);
+  o.live[project.id] = { running: true, pending: null, envId }; // reserva a mesa até o conector confirmar
+  try {
+    await o.connectors.rpc(envId, 'run', { project: briefFor(o, project, folder), text, chat: o.chats.get(project.id), images, imageRefs }, 60000);
+  } catch (e) {
+    delete o.live[project.id];
+    o.broadcast(null, o.snapshot());
+    throw e;
+  }
+}
+
+// PC para uma demanda delegada: o da secretária, se a mesa tiver pasta lá; senão outro PC conectado com a pasta.
+function envForDesk(o, project, preferred) {
+  const online = Object.keys(o.connectors.online());
+  if (preferred && online.includes(preferred) && folderFor(project, preferred)) return preferred;
+  return online.find((e) => folderFor(project, e)) || null;
+}
+
+// Passa uma demanda para a mesa: começa agora ou entra na fila (e começa sozinha depois).
+async function delegate(o, project, text, { from = 'secretária', preferredEnv } = {}) {
+  const msg = `📨 Demanda da ${from}:\n\n${text}`;
+  const envId = !o.live[project.id] && envForDesk(o, project, preferredEnv);
+  if (envId) {
+    try {
+      await startRun(o, project, envId, msg);
+      o.addLog(null, project.id, `Demanda da ${from} passada para ${project.name}`);
+      o.save();
+      return { iniciada: true, pc: o.envName(envId) };
+    } catch {} // não conseguiu começar: vai para a fila
+  }
+  (o.state.queue[project.id] ??= []).push({ text: msg, from, at: Date.now(), preferredEnv });
+  const busy = !!o.live[project.id];
+  o.chats.push(project.id, 'system', `📨 Demanda da ${from} na fila: começa sozinha quando ${busy ? 'a tarefa atual terminar' : 'um PC com a pasta desta mesa conectar'}.`);
+  o.addLog(null, project.id, `Demanda da ${from} na fila de ${project.name}`);
+  o.save();
+  return { naFila: true, posicao: o.state.queue[project.id].length, motivo: busy ? 'a mesa está trabalhando' : 'nenhum PC conectado tem a pasta desta mesa' };
+}
+
+async function processQueue(o, projectId) {
+  const q = o.state.queue[projectId];
+  const project = o.state.projects.find((p) => p.id === projectId);
+  if (!q?.length || !project || o.live[projectId]) return;
+  const next = q[0];
+  const envId = envForDesk(o, project, next.preferredEnv);
+  if (!envId) return;
+  q.shift();
+  if (!q.length) delete o.state.queue[projectId];
+  try {
+    await startRun(o, project, envId, next.text);
+  } catch {
+    (o.state.queue[projectId] ??= []).unshift(next);
+  }
+  o.save();
 }
 
 // ---------- Servidores MCP ----------
@@ -495,17 +614,13 @@ async function officeApi(req, res, url, o, user) {
   }
 
   // ---------- Mesa: conversa, memória, git, pasta ----------
-  if (resource === 'projects' && ['chat', 'answer', 'stop', 'reset', 'memory', 'git', 'open'].includes(action)) {
+  if (resource === 'projects' && ['chat', 'answer', 'stop', 'reset', 'memory', 'git', 'open', 'share', 'report'].includes(action)) {
     const project = state.projects.find((p) => p.id === id);
     if (!project) return send(res, 404, { error: 'não encontrado' });
     const chat = chats.get(id);
     const agent = state.agents.find((a) => a.id === project.agentId);
     // modelo e esforço do agente da mesa (vazio = padrão do Claude Code do PC)
-    const brief = (folder) => ({
-      id, name: project.name, description: project.description, folder,
-      model: agent?.model || '', effort: agent?.effort || '', permissionMode: project.permissionMode || '',
-      mcpServers: o.mcpFor(id), // servidores MCP do hub para esta mesa (segredos abertos, só para o conector)
-    });
+    const brief = (envId) => briefFor(o, project, folderFor(project, envId));
 
     if (action === 'chat' && method === 'GET') return send(res, 200, chat);
     if (action === 'memory' && method === 'GET') {
@@ -545,10 +660,18 @@ async function officeApi(req, res, url, o, user) {
     const envId = o.needEnv(req);
     if (action === 'open') return send(res, 200, await connectors.rpc(envId, 'open', { folder: project.folders[envId], app: body.app }));
 
+    // 🏢 manda a memória desta mesa para a memória do escritório
+    if (action === 'share') {
+      if (!chat.memory?.trim()) return send(res, 400, { error: 'a memória desta mesa está vazia: atualize-a primeiro (🧠 Memória → Atualizar com a conversa)' });
+      state.officeMemory.projects[id] = { text: chat.memory, at: Date.now(), agent: agent?.name || null };
+      o.addLog(agent?.id || null, id, 'Memória enviada para o escritório');
+      o.save();
+      return send(res, 200, { ok: true });
+    }
+
     if (action === 'chat') {
       if (live[id]) return send(res, 409, { error: 'o agente ainda está trabalhando nesta mesa' });
-      const folder = project.folders[envId];
-      if (!folder) return send(res, 400, { error: `defina a pasta desta mesa no PC "${o.envName(envId)}" em ⚙ Mesa` });
+      if (!folderFor(project, envId)) return send(res, 400, { error: `defina a pasta desta mesa no PC "${o.envName(envId)}" em ⚙ Mesa` });
       // imagens coladas/anexadas: [{ mediaType, data (base64) }] — limites da API do Claude
       const images = [].concat(body.images || []);
       if (images.length > MAX_IMAGES) return send(res, 400, { error: `no máximo ${MAX_IMAGES} imagens por pedido` });
@@ -560,21 +683,27 @@ async function officeApi(req, res, url, o, user) {
       if (!text) return send(res, 400, { error: 'mensagem vazia' });
       // guardadas no escritório para aparecerem no histórico da conversa
       const imageRefs = images.map((img) => o.saveUpload(Buffer.from(img.data, 'base64'), IMAGE_TYPES[img.mediaType]));
-      live[id] = { running: true, pending: null, envId }; // reserva a mesa até o conector confirmar
-      try {
-        await connectors.rpc(envId, 'run', { project: brief(folder), text, chat, images, imageRefs }, 60000);
-      } catch (e) {
-        delete live[id];
-        o.broadcast(null, o.snapshot());
-        throw e;
-      }
+      await startRun(o, project, envId, text, { images, imageRefs });
       return send(res, 200, { ok: true });
+    }
+
+    // 📋 relatório do dia: o agente resume o que aconteceu hoje nesta mesa para a secretária
+    if (action === 'report') {
+      const today = o.day();
+      const entries = chat.entries.filter((e) => o.day(e.t) === today);
+      if (!entries.length) return send(res, 400, { error: 'nada registrado hoje nesta mesa' });
+      const { text } = await connectors.rpc(envId, 'report', { project: brief(envId), entries }, 5 * 60 * 1000);
+      (state.reports[today] ??= {})[id] = { text, at: Date.now(), agent: agent?.name || null };
+      chats.push(id, 'system', '📋 Relatório do dia enviado para a secretária.');
+      o.addLog(agent?.id || null, id, 'Relatório do dia enviado');
+      o.save();
+      return send(res, 200, { text });
     }
 
     if (live[id]) return send(res, 409, { error: 'espere o agente terminar' });
     // memória e nova conversa: o resumo é feito pelo Claude do PC escolhido
     const refresh = async () => {
-      const m = await connectors.rpc(envId, 'memory', { project: brief(project.folders[envId]), chat }, 5 * 60 * 1000);
+      const m = await connectors.rpc(envId, 'memory', { project: brief(envId), chat }, 5 * 60 * 1000);
       chats.update(id, m);
       return m.memory;
     };
@@ -583,6 +712,19 @@ async function officeApi(req, res, url, o, user) {
     await refresh().catch(() => {});
     const oldSession = chats.reset(id);
     if (oldSession) await sessions.delete({ sessionId: oldSession });
+    return send(res, 200, { ok: true });
+  }
+
+  // ---------- Memória do escritório ----------
+  if (resource === 'office-memory') {
+    const mem = state.officeMemory;
+    if (!id && method === 'PUT') mem.general = String(body.general || '').slice(0, 50000);
+    else if (id && method === 'PUT') {
+      if (!state.projects.some((p) => p.id === id)) return send(res, 404, { error: 'mesa não encontrada' });
+      mem.projects[id] = { ...mem.projects[id], text: String(body.text || '').slice(0, 20000), at: Date.now() };
+    } else if (id && method === 'DELETE') delete mem.projects[id];
+    else return send(res, 405, { error: 'método não permitido' });
+    o.save();
     return send(res, 200, { ok: true });
   }
 
@@ -662,6 +804,8 @@ async function officeApi(req, res, url, o, user) {
     if (body.model !== undefined && !['', 'opus', 'sonnet', 'haiku'].includes(body.model)) body.model = '';
     // modo de permissão da mesa: '' = perguntar sempre
     if (body.permissionMode !== undefined && !PERMISSION_MODES.includes(body.permissionMode)) body.permissionMode = '';
+    // papel da mesa: '' = projeto; 'secretaria' = recebe a memória do escritório e delega para as outras
+    if (body.role !== undefined && !['', 'secretaria'].includes(body.role)) body.role = '';
     if (body.effort !== undefined && !['', 'low', 'medium', 'high', 'xhigh', 'max'].includes(body.effort)) body.effort = '';
     if (body.areas !== undefined) {
       // sempre sobra ao menos uma área, para os agentes ociosos terem para onde ir
@@ -723,6 +867,10 @@ async function officeApi(req, res, url, o, user) {
       }
       if (resource === 'projects' && live[item.id]) connectors.rpc(live[item.id].envId, 'stop', { projectId: item.id }).catch(() => {});
       state[resource] = list.filter((x) => x !== item);
+      if (resource === 'projects') {
+        delete state.queue[item.id];
+        delete state.officeMemory.projects[item.id];
+      }
       if (resource === 'agents') for (const p of state.projects) if (p.agentId === item.id) p.agentId = null;
       o.save();
       return send(res, 204, {});

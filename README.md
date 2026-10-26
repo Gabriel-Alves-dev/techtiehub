@@ -22,6 +22,9 @@ Você vê de relance quem está trabalhando, quem terminou e quem precisa de voc
 - **Janelas flutuantes de conversa.** Clique no balão, no personagem ou na mesa para abrir. As janelas podem ser arrastadas, redimensionadas e minimizadas, e dá para abrir várias ao mesmo tempo.
 - **Agentes de verdade.** O hub roda o Claude (via [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk)) na pasta de cada projeto, usando o seu login do Claude Code. As conversas continuam de onde pararam.
 - **Permissões e perguntas no hub.** Quando o agente quer rodar um comando ou editar um arquivo, aparece um cartão com **Permitir / Sempre permitir / Negar**. Quando ele faz uma pergunta de múltipla escolha, as opções aparecem para você clicar.
+- **Secretária.** Marque uma mesa como **secretária** (⚙ Mesa) e ela passa a receber a memória do escritório, a lista de mesas e os relatórios do dia. Ela pode **passar demandas** para as outras mesas: *"chegou uma mensagem no Bitrix sobre o BI, passe para o Leo"*. Ela acha a mesa certa pelo nome do projeto ou do agente e escreve o pedido completo. O agente da mesa começa a trabalhar, ou a demanda entra na **fila** se a mesa estiver ocupada, e você acompanha e responde no chat daquela mesa.
+- **Memória do escritório.** Notas gerais e um bloco por projeto (**🧠 Memória → 🏢 Enviar para o escritório**), num lugar só (botão **Memória**).
+- **Relatório do dia.** **📋 Relatório** na mesa: o agente resume o que foi feito hoje e envia para a secretária.
 - **Servidores MCP no hub.** Cadastre MCPs (Bitrix, bancos, APIs…) uma vez no botão **MCP**, ou importe os que o Claude Code do PC já conhece, e eles funcionam para os agentes em **qualquer PC conectado**. Escolha em quais mesas cada um vale, e teste a conexão sem gastar uso do plano. URLs, tokens e variáveis ficam criptografados.
 - **Contas.** Login com e-mail e senha; cada conta tem o seu próprio escritório, isolado dos outros. Novas contas só entram com convite.
 - **Hub e conectores.** O hub guarda tudo; um conector em cada PC roda os agentes com as pastas e o login do Claude daquele computador. Cada PC tem a sua pasta para cada mesa, e o agente **continua a mesma conversa** em qualquer PC conectado. Se a sessão completa não estiver disponível, ele recebe a **memória** do projeto. O hub também avisa quando falta `git pull`.
@@ -211,6 +214,8 @@ O hub escuta só em `127.0.0.1:4321` (variáveis `PORT` e `HUB_HOST`). As rotas 
 | `POST /api/projects/:id/chat` | Envia um pedido ao agente da mesa: `{ message, images?: [{ mediaType, data (base64) }] }` |
 | `GET /api/mcp` · `POST /api/mcp` · `PATCH`/`DELETE /api/mcp/:id` · `POST /api/mcp/:id/test` | Servidores MCP do escritório (segredos mascarados na resposta); testar no PC em uso |
 | `POST /api/mcp-scan` · `POST /api/mcp-import` | Procurar os MCPs do Claude Code do PC em uso (o resultado com segredos fica só no hub) e importar os escolhidos |
+| `PUT /api/office-memory` · `PUT`/`DELETE /api/office-memory/:projectId` | Memória do escritório: notas gerais `{ general }` e bloco de um projeto `{ text }` |
+| `POST /api/projects/:id/share` · `POST /api/projects/:id/report` | Enviar a memória da mesa para o escritório; gerar o relatório do dia |
 | `GET /api/files/:nome` | Imagem anexada a uma conversa (só do escritório da conta logada) |
 | `POST /api/projects/:id/answer` | Responde o pedido pendente: `{ requestId, decision: "allow" \| "always" \| "deny" }` ou `{ requestId, answers: [...] }` |
 | `POST /api/projects/:id/stop` | Interrompe o agente |

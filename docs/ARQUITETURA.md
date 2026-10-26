@@ -232,6 +232,19 @@ O fluxo de um pedido:
 
 **Modo de permissão (por mesa).** `project.permissionMode` (`''`, `acceptEdits`, `auto`, `bypassPermissions`) vai no `run` e vira `permissionMode` do SDK (`'default'` quando vazio; `bypassPermissions` exige `allowDangerouslySkipPermissions`). O `AskUserQuestion` sempre passa pelo `canUseTool`, em qualquer modo (testado), então as perguntas de decisão continuam chegando. Como o SDK só aplica o modo no início, uma troca no meio do pedido vai ao conector (`set-mode`), e o runner passa a aprovar sozinho o que o novo modo libera (`autoAllowed`), inclusive o pedido em aberto.
 
+**Secretária, memória do escritório e fila.**
+
+- **Memória do escritório e relatórios.** `state.officeMemory` = `{ general, projects: { id: { text, at, agent } } }`, preenchido por "Enviar para o escritório" (copia a memória da mesa). `state.reports[dia][projectId]` traz os relatórios do dia: o conector resume as entradas daquele dia com uma chamada curta, sem ferramentas (`dailyReport`). O dia segue o fuso `HUB_TZ` (padrão America/Sao_Paulo), e os relatórios ficam por 30 dias.
+- **Mesa da secretária** (`project.role = 'secretaria'`):
+  - **Sem pasta:** não precisa de pasta, e o conector usa `~/.techtie-hub/secretaria` (`folder: '@secretaria'`).
+  - **Contexto a cada pedido:** o `briefFor` manda `secretary.context` (`secretaryContext()`: instruções, mesas, memória do escritório e relatórios de hoje), que entra no `append` do prompt de sistema.
+  - **Ferramentas próprias:** o runner cria um servidor MCP em processo (`createSdkMcpServer`, nome `escritorio`) com `listar_mesas`, `ler_mesa`, `delegar`, `ler_relatorios` e `anotar_memoria_escritorio`. Elas chamam `/api/connector/office/*` com o token do PC (o hub confere que o pedido vem de uma mesa de secretária) e são aprovadas automaticamente, porque só mexem no hub.
+- **Delegar** (`delegate` no `server.js`):
+  - acha a mesa pelo nome do projeto ou do agente (`findDesk`, sem acento e sem maiúscula);
+  - escolhe um PC conectado onde a mesa tem pasta, de preferência o da secretária (`envForDesk`);
+  - inicia o pedido com `startRun` (o mesmo caminho do chat), com o texto marcado "📨 Demanda da secretária".
+- **Fila:** se a mesa estiver ocupada, ou sem PC com a pasta, a demanda entra em `state.queue[projectId]`. A fila anda quando a mesa fica livre (`Office.idle` → `onIdle` → `processQueue`) ou quando um PC conecta.
+
 **Servidores MCP do hub.** Ficam em `state.mcpServers` do escritório. A URL, os cabeçalhos e as variáveis de ambiente são criptografados com AES-256-GCM (`secrets.js`, chave `HUB_SECRET_KEY` ou `data/secret.key`). A API devolve sempre mascarado (`mcpPublic`), e um valor "••••" no PATCH significa manter o atual.
 
 - **No pedido:** o comando `run` leva `mcpServers` da mesa (`mcpFor`: ligados e que valem para ela), já abertos, e o runner passa ao SDK. Eles se somam aos MCPs que o Claude Code do PC já tiver.

@@ -438,3 +438,8 @@ button.warn { color: var(--warn); border-color: var(--warn); }
 .mcp-tools { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 .mcp-tools code { font-size: 11px; background: var(--bg); padding: 2px 5px; }
 .mcp-projects { padding-left: 22px; }
+
+/* ---------- memória do escritório ---------- */
+.office-general { width: 100%; min-height: 90px; resize: vertical; }
+.office-block summary { cursor: pointer; }
+.office-text { margin-top: 8px; padding: 8px 10px; font-size: 12px; white-space: pre-wrap; }

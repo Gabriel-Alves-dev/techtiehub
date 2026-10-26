@@ -13,6 +13,7 @@ Leia `docs/ARQUITETURA.md` antes de mudanças estruturais.
 - `chats.js` / `session-store.js`: conversas e sessões do Claude, guardadas no hub.
 - `runner.js`: roda no conector. Uma execução do Claude por mesa; `canUseTool` fica pendente até o usuário responder. Também cuida da memória do agente.
 - `remote-store.js` / `local-ops.js`: no conector, as sessões lidas/gravadas no hub e as operações locais (pastas, seletor, VS Code).
+- **Começar um pedido numa mesa:** sempre por `startRun` no `server.js` (chat, delegação e fila usam o mesmo caminho), e o que a mesa leva ao conector sai de `briefFor`.
 - **Pacote do conector** (`GET /api/connector-download`, `zip.js`, `pacote/`, `preparar.js`): se um arquivo novo passar a ser usado pelo conector, inclua-o em `FILES` no `connector-files.js` (vale para o pacote e para a atualização automática). Os `.bat` precisam ser só ASCII e todo comando deve usar caminho completo ou o PATH (há PCs com `NoDefaultCurrentDirectoryInExePath`). PowerShell 5.1: desfaça arrays de JSON com `ForEach-Object { $_ }`.
 - `git.js`: HEAD, remote e comparação de commits das pastas dos projetos.
 - `public/app.js`: canvas do escritório, balões HTML, janelas flutuantes e diálogos. JS puro, sem build.

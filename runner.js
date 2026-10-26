@@ -159,6 +159,9 @@ class Runner {
     const chat = this.chats.get(project.id);
     const resuming = !!chat.sessionId;
     if (!resuming) this.update(project.id, { sessionAppend: this.memoryPrompt(chat) });
+    // MCPs do hub para esta mesa + as ferramentas do escritório, se for a secretária
+    const mcp = { ...(project.mcpServers || {}) };
+    if (project.secretary) mcp.escritorio = await this.secretaryTools(project);
     let started = false, success = false;
     try {
       const q = query({
@@ -182,7 +185,10 @@ class Runner {
           sessionStore: this.store,
           // snapshot:false = o prompt de sistema é montado a cada pedido, com a pasta e o
           // git do PC atual (gravado na sessão, ele carregaria a pasta do PC antigo)
-          systemPrompt: { type: 'preset', preset: 'claude_code', append: chat.sessionAppend || undefined, snapshot: false },
+          systemPrompt: {
+            type: 'preset', preset: 'claude_code', snapshot: false,
+            append: [chat.sessionAppend, project.secretary?.context].filter(Boolean).join('\n\n') || undefined,
+          },
           // modelo e esforço escolhidos para o agente; vazio = o padrão do Claude Code deste PC
           model: project.model || undefined,
           effort: project.effort || undefined,
@@ -190,7 +196,7 @@ class Runner {
           permissionMode: project.permissionMode || 'default',
           allowDangerouslySkipPermissions: project.permissionMode === 'bypassPermissions',
           // servidores MCP configurados no hub para esta mesa (somam-se aos do Claude Code do PC)
-          mcpServers: project.mcpServers && Object.keys(project.mcpServers).length ? project.mcpServers : undefined,
+          mcpServers: Object.keys(mcp).length ? mcp : undefined,
           abortController: run.abort,
           canUseTool: (name, input, opts) => this.ask(project.id, run, name, input, opts),
         },
@@ -275,6 +281,7 @@ class Runner {
 
   autoAllowed(run, toolName) {
     if (toolName === 'AskUserQuestion') return false; // decisões são sempre do usuário
+    if (toolName.startsWith('mcp__escritorio__')) return true; // ferramentas da secretária: só mexem no hub
     if (run.mode === 'bypassPermissions') return true;
     return run.mode === 'acceptEdits' && ['Edit', 'MultiEdit', 'Write', 'NotebookEdit'].includes(toolName);
   }
@@ -333,6 +340,66 @@ class Runner {
     const wasRunning = this.isRunning(projectId);
     this.runs.get(projectId)?.abort.abort();
     return { ok: true, wasRunning }; // false: o hub achava que rodava, mas aqui já tinha acabado
+  }
+
+  // ---------- Secretária ----------
+  // Ferramentas que rodam aqui no conector e consultam/delegam pelo hub (servidor MCP "escritorio").
+  async secretaryTools(project) {
+    const { createSdkMcpServer, tool } = await loadSdk();
+    const { z } = require('zod');
+    const call = (method, sub, data = {}) => this.hub.office(method, sub, { secretaria: project.id, ...data });
+    const reply = (v) => ({ content: [{ type: 'text', text: typeof v === 'string' ? v : JSON.stringify(v, null, 2) }] });
+    const safe = (fn) => async (args) => {
+      try {
+        return reply(await fn(args || {}));
+      } catch (e) {
+        return { ...reply('Erro: ' + e.message), isError: true };
+      }
+    };
+    return createSdkMcpServer({
+      name: 'escritorio',
+      version: '1.0.0',
+      tools: [
+        tool('listar_mesas', 'Lista as mesas (projetos) do escritório: agente responsável, descrição, sala e status.', {},
+          safe(() => call('GET', 'desks'))),
+        tool('ler_mesa', 'Detalhes de uma mesa: memória do projeto e últimas mensagens. Aceita o nome da mesa ou do agente.',
+          { mesa: z.string().describe('nome da mesa/projeto ou do agente') },
+          safe(({ mesa }) => call('GET', 'desk', { q: mesa }))),
+        tool('delegar', 'Passa uma demanda para a mesa certa: o agente daquela mesa começa a trabalhar nela, ou ela entra na fila se ' +
+          'a mesa estiver ocupada. O pedido deve ser completo e autossuficiente (contexto, o que fazer, critérios, links/IDs).',
+          { mesa: z.string().describe('nome da mesa/projeto ou do agente responsável'), pedido: z.string().describe('a demanda completa para o agente') },
+          safe(({ mesa, pedido }) => call('POST', 'delegate', { mesa, pedido }))),
+        tool('ler_relatorios', 'Lê os relatórios do dia enviados pelas mesas.',
+          { dia: z.string().optional().describe('AAAA-MM-DD; vazio = hoje') },
+          safe(({ dia }) => call('GET', 'reports', dia ? { dia } : {}))),
+        tool('anotar_memoria_escritorio', 'Acrescenta uma nota às notas gerais da memória do escritório.',
+          { nota: z.string() },
+          safe(({ nota }) => call('POST', 'note', { nota }))),
+      ],
+    });
+  }
+
+  // Relatório do dia para a secretária (chamada curta ao Claude, sem ferramentas).
+  async dailyReport(project, entries) {
+    const label = { user: 'Usuário', assistant: 'Agente', tool: 'Ação', system: 'Hub' };
+    const convo = entries.map((e) => `${label[e.role] || e.role}: ${clip(e.text, e.role === 'tool' ? 150 : 1200)}`).join('\n\n').slice(-60000);
+    const prompt = `Projeto: ${project.name}${project.description ? ` — ${project.description}` : ''}\n\n` +
+      `O que aconteceu hoje nesta mesa:\n<conversa>\n${convo}\n</conversa>\n\n` +
+      'Escreva o relatório do dia deste projeto para a secretária do escritório, em tópicos curtos: o que foi feito, o que ficou ' +
+      'pendente, bloqueios e próximos passos. Seja objetivo (até ~200 palavras).';
+    const { query } = await loadSdk();
+    let out = '';
+    for await (const m of query({
+      prompt,
+      options: {
+        cwd: os.tmpdir(), tools: [], maxTurns: 1, settingSources: [], persistSession: false,
+        systemPrompt: 'Você escreve relatórios diários curtos e objetivos sobre o trabalho de um agente de programação. Responda só com o relatório, em português.',
+      },
+    })) {
+      if (m.type === 'result' && m.subtype === 'success') out = m.result || '';
+    }
+    if (!out.trim()) throw new Error('não consegui gerar o relatório');
+    return { text: out.trim() };
   }
 
   // ---------- Memória do agente ----------

@@ -74,6 +74,13 @@ class Office {
     }
     s.environments ??= {};
     s.mcpServers ??= [];
+    // memória do escritório: notas gerais + um bloco por projeto (enviado pela mesa)
+    s.officeMemory ??= { general: '', projects: {} };
+    // relatórios do dia: { 'AAAA-MM-DD': { projectId: { text, at, agent } } } — guarda 30 dias
+    s.reports ??= {};
+    for (const day of Object.keys(s.reports).sort().slice(0, -30)) delete s.reports[day];
+    // demandas esperando a mesa ficar livre: { projectId: [{ text, from, at }] }
+    s.queue ??= {};
     return s;
   }
 
@@ -167,7 +174,10 @@ class Office {
 
   // `age` vira um horário no relógio do hub (cada PC tem o seu relógio)
   setLive(projectId, l, envId) {
-    if (!l) return delete this.live[projectId];
+    if (!l) {
+      delete this.live[projectId];
+      return this.idle(projectId);
+    }
     const phase = l.phase && { kind: l.phase.kind, name: l.phase.name, since: Date.now() - (l.phase.age || 0) };
     this.live[projectId] = { ...l, phase, envId };
   }
@@ -183,6 +193,69 @@ class Office {
     delete this.live[projectId];
     this.chats.push(projectId, 'system', reason);
     this.setStatus(projectId, 'ocioso', 'Parou', true);
+    this.idle(projectId);
+  }
+
+  // a mesa terminou: se houver demanda na fila, o servidor começa a próxima (ver server.js)
+  idle(projectId) {
+    if (this.state.queue[projectId]?.length) setImmediate(() => this.onIdle?.(projectId));
+  }
+
+  // ---------- Memória do escritório, relatórios e visão da secretária ----------
+  // Dia no fuso do escritório (o servidor pode estar em UTC).
+  day(t = Date.now()) {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: process.env.HUB_TZ || 'America/Sao_Paulo' }).format(new Date(t));
+  }
+
+  // As mesas como a secretária enxerga.
+  roster() {
+    return this.state.projects.map((p) => {
+      const a = this.agentOf(p.id);
+      const room = this.state.rooms.find((r) => r.id === p.roomId);
+      return {
+        id: p.id, mesa: p.name, descricao: p.description || '', sala: room?.name || '',
+        agente: a ? `${a.name}${a.role ? ` (${a.role})` : ''}` : null,
+        status: a?.status || 'sem agente', ocupada: !!this.live[p.id], naFila: this.state.queue[p.id]?.length || 0,
+        secretaria: p.role === 'secretaria',
+      };
+    });
+  }
+
+  // Acha a mesa pelo nome do projeto ou do agente (sem acento/maiúscula). { project } ou { error }
+  findDesk(q) {
+    const norm = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+    const k = norm(q);
+    if (!k) return { error: 'informe a mesa ou o agente' };
+    const cands = this.state.projects.filter((p) => p.role !== 'secretaria').map((p) => ({ p, names: [p.name, this.agentOf(p.id)?.name].filter(Boolean).map(norm) }));
+    for (const test of [(n) => n === k, (n) => n.startsWith(k), (n) => n.includes(k) || k.includes(n)]) {
+      const hits = cands.filter((c) => c.names.some(test));
+      if (hits.length === 1) return { project: hits[0].p };
+      if (hits.length > 1) return { error: `mais de uma mesa combina com "${q}": ${hits.map((h) => h.p.name).join(', ')}. Use o nome exato.` };
+    }
+    return { error: `nenhuma mesa ou agente chamado "${q}". Mesas: ${cands.map((c) => c.p.name).join(', ')}` };
+  }
+
+  // Contexto que vai no prompt de sistema da secretária a cada pedido (sempre atualizado).
+  secretaryContext() {
+    const desks = this.roster().filter((d) => !d.secretaria).map((d) =>
+      `- **${d.mesa}**${d.agente ? ` — agente ${d.agente}` : ' — sem agente'}${d.sala ? ` · sala ${d.sala}` : ''}${d.descricao ? ` · ${d.descricao}` : ''} · ${d.ocupada ? 'trabalhando agora' : d.status}${d.naFila ? ` · ${d.naFila} na fila` : ''}`);
+    const mem = this.state.officeMemory;
+    const blocks = Object.entries(mem.projects).map(([id, b]) => `### ${this.state.projects.find((p) => p.id === id)?.name || 'Projeto removido'}\n${b.text}`);
+    const today = this.state.reports[this.day()] || {};
+    const reports = Object.entries(today).map(([id, r]) => `### ${this.state.projects.find((p) => p.id === id)?.name || 'Projeto'} (${r.agent || 'agente'})\n${r.text}`);
+    return [
+      '# Você é a secretária do escritório (Techtie Hub)',
+      'Seu trabalho é receber demandas do usuário (por exemplo, mensagens e tarefas do Bitrix), organizar o que for pedido ' +
+      '(como criar tarefas, usando as ferramentas do Bitrix quando disponíveis) e **passar a demanda para a mesa certa** com a ferramenta ' +
+      'delegar. Você não faz o trabalho técnico dos projetos e não acompanha a conversa da mesa depois de delegar: o usuário acompanha e responde lá.',
+      'Ao delegar, escreva um pedido completo e autossuficiente para o agente da mesa: contexto, o problema, o que fazer, critérios de pronto, ' +
+      'e links/IDs (por exemplo, o número da tarefa criada no Bitrix e quem relatou). A mesa pode ser indicada pelo nome do projeto ou do agente. ' +
+      'Se não tiver certeza de qual mesa é, use as ferramentas listar_mesas e ler_mesa. Depois de delegar, diga ao usuário em uma frase para qual mesa foi.',
+      `Hoje é ${this.day()}.`,
+      '## Mesas do escritório', desks.join('\n') || '(nenhuma)',
+      '## Memória do escritório', mem.general?.trim() || '(sem notas gerais)', ...blocks,
+      '## Relatórios de hoje', reports.join('\n\n') || '(nenhum relatório enviado hoje)',
+    ].join('\n\n');
   }
 
   envName(envId) {

@@ -1177,6 +1177,7 @@ function updateProjectWindow(win) {
       ${p.folder ? `<button data-act="folder" title="${esc(p.folder)}">📁 Pasta</button><button data-act="vscode">VS Code</button>` : ''}
       <button data-act="edit-desk" title="Editar mesa">⚙ Mesa</button>
       <button data-act="memory" title="O que o agente sabe deste projeto">🧠 Memória</button>
+      ${p.role === 'secretaria' ? '' : '<button data-act="report" title="O agente resume o que aconteceu hoje nesta mesa e envia para a secretária">📋 Relatório</button>'}
       <select data-act="perm" title="Quando o agente pede permissão para agir nesta mesa">
         ${Object.entries(PERMISSION_NAMES).map(([k, v]) => `<option value="${k}" ${k === (p.permissionMode || '') ? 'selected' : ''}>🔐 ${v}</option>`).join('')}
       </select>
@@ -1192,6 +1193,17 @@ function updateProjectWindow(win) {
     on('vscode', () => api('POST', `/api/projects/${p.id}/open`, { app: 'vscode' }));
     on('edit-desk', () => openProjectDialog(p));
     on('memory', () => openMemoryWindow(p.id));
+    on('report', async (e) => {
+      if (!confirm('Gerar o relatório de hoje desta mesa e enviar para a secretária?')) return;
+      e.target.disabled = true;
+      e.target.textContent = 'Gerando…';
+      try {
+        await api('POST', `/api/projects/${p.id}/report`, {});
+      } finally {
+        e.target.disabled = false;
+        e.target.textContent = '📋 Relatório';
+      }
+    });
     on('edit-agent', () => openAgentDialog(a));
     tb.querySelector('[data-act=assign]').onchange = (e) => api('PATCH', `/api/projects/${p.id}`, { agentId: e.target.value || null });
     tb.querySelector('[data-act=perm]').onchange = (e) => {
@@ -1201,10 +1213,13 @@ function updateProjectWindow(win) {
 
   const who = a ? a.name : 'o agente';
   const input = win.body.querySelector('textarea');
-  input.placeholder = p.folder ? `Peça algo para ${who}… (Enter envia · Shift+Enter quebra linha)` : 'Defina a pasta do projeto primeiro';
-  input.disabled = !p.folder;
+  const canChat = !!p.folder || p.role === 'secretaria'; // a secretária não precisa de pasta de projeto
+  input.placeholder = p.role === 'secretaria'
+    ? `Peça algo para ${who}… (ex.: leia minhas mensagens no Bitrix e passe a demanda para a mesa certa)`
+    : p.folder ? `Peça algo para ${who}… (Enter envia · Shift+Enter quebra linha)` : 'Defina a pasta do projeto primeiro';
+  input.disabled = !canChat;
   const send = win.body.querySelector('[data-act=send]');
-  send.disabled = !p.folder || !!live?.running;
+  send.disabled = !canChat || !!live?.running;
   send.textContent = live?.running ? 'Trabalhando…' : 'Enviar';
   win.body.querySelector('[data-act=stop]').hidden = !live?.running;
   win.body.querySelector('[data-act=reset]').disabled = !!live?.running;
@@ -1226,6 +1241,8 @@ function renderBanner(win, p) {
   if (l?.running && l.envId !== state.env?.id) {
     msgs.push(`⚙️ Este pedido está rodando no PC <b>${esc(state.connectors?.[l.envId]?.name || state.environments?.[l.envId]?.name || 'outro PC')}</b>. Você pode acompanhar e responder daqui.`);
   }
+  const queued = state.queue?.[p.id]?.length;
+  if (queued) msgs.push(`📨 ${queued} demanda${queued > 1 ? 's' : ''} da secretária na fila: começa${queued > 1 ? 'm' : ''} sozinha${queued > 1 ? 's' : ''} quando a mesa ficar livre.`);
   if (state.env && outdated(state.env.id)) {
     msgs.push(state.connectors[state.env.id].version
       ? `🔄 O conector do PC <b>${esc(state.env.name)}</b> está se atualizando (espera as tarefas em andamento terminarem).`
@@ -1236,7 +1253,7 @@ function renderBanner(win, p) {
     msgs.push(Object.keys(state.connectors || {}).length
       ? '🖥 Escolha em qual PC executar no botão <b>PC</b> (topo).'
       : '🖥 Nenhum PC conectado ao hub. Abra o botão <b>PC</b> para conectar o seu computador.');
-  } else if (!p.folder) {
+  } else if (!p.folder && p.role !== 'secretaria') {
     const others = Object.entries(p.folders || {})
       .map(([envId, f]) => `<b>${esc(state.environments?.[envId]?.name || 'outro PC')}</b>: ${esc(f)}`);
     msgs.push(others.length
@@ -1310,6 +1327,48 @@ async function refreshGit(win) {
   }
   const p = state.projects.find((x) => x.id === win.projectId);
   if (p && wins.has(win.key)) renderBanner(win, p);
+}
+
+// ---------- Janela da memória do escritório ----------
+// Notas gerais + o bloco que cada mesa enviou + relatórios do dia. A secretária recebe tudo isso.
+function openOfficeMemoryWindow() {
+  const win = openWindow('office-memory', { w: 560, h: 640, cls: 'win-office' }, (win) => {
+    win.titleEl.textContent = '🏢 Memória do escritório';
+    win.render = renderOfficeMemory;
+  });
+  renderOfficeMemory(win);
+}
+
+function renderOfficeMemory(win) {
+  if (win.body.contains(document.activeElement) && ['TEXTAREA', 'INPUT'].includes(document.activeElement.tagName)) return;
+  const mem = state.officeMemory || { general: '', projects: {} };
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date());
+  const reports = state.reports?.[today] || {};
+  const name = (id) => state.projects.find((p) => p.id === id)?.name || '(mesa removida)';
+  win.body.innerHTML = `
+    <p class="muted">A visão geral do escritório. A <b>secretária</b> recebe tudo isto a cada pedido. Cada mesa envia o seu bloco
+      em <b>🧠 Memória → 🏢 Enviar para o escritório</b>, e o seu relatório em <b>📋 Relatório</b>.</p>
+    <h3>Notas gerais</h3>
+    <textarea class="mem-text office-general" rows="5" placeholder="Regras da empresa, clientes, padrões, contatos…">${esc(mem.general || '')}</textarea>
+    <div class="row"><button class="primary" data-act="save-general">Salvar notas</button><span class="muted" data-field="saved"></span></div>
+    <h3>Projetos</h3>
+    ${Object.entries(mem.projects).map(([id, b]) => `<details class="card office-block">
+      <summary><b>${esc(name(id))}</b> <span class="muted">· ${b.agent ? esc(b.agent) + ' · ' : ''}${timeAgo(b.at)}</span></summary>
+      <div class="msg-assistant office-text">${formatText(b.text)}</div>
+      <div class="row"><button class="danger" data-rm="${id}">Tirar do escritório</button></div>
+    </details>`).join('') || '<p class="muted">Nenhuma mesa enviou a memória ainda.</p>'}
+    <h3>Relatórios de hoje</h3>
+    ${Object.entries(reports).map(([id, r]) => `<details class="card office-block">
+      <summary><b>${esc(name(id))}</b> <span class="muted">· ${r.agent ? esc(r.agent) + ' · ' : ''}${timeAgo(r.at)}</span></summary>
+      <div class="msg-assistant office-text">${formatText(r.text)}</div>
+    </details>`).join('') || '<p class="muted">Nenhum relatório hoje.</p>'}`;
+  win.body.querySelector('[data-act=save-general]').onclick = async () => {
+    await api('PUT', '/api/office-memory', { general: win.body.querySelector('.office-general').value });
+    win.body.querySelector('[data-field=saved]').textContent = 'Salvo.';
+  };
+  win.body.querySelectorAll('[data-rm]').forEach((b) => (b.onclick = async () => {
+    if (confirm('Tirar este bloco da memória do escritório? (A memória da mesa continua.)')) await api('DELETE', `/api/office-memory/${b.dataset.rm}`);
+  }));
 }
 
 // ---------- Janela de servidores MCP ----------
@@ -1494,6 +1553,7 @@ function openMemoryWindow(projectId) {
       <div class="row">
         <button class="primary" data-act="save">Salvar</button>
         <button data-act="refresh" title="Pede ao Claude para resumir a conversa recente na memória">Atualizar com a conversa</button>
+        <button data-act="share" title="Copia esta memória para a memória geral do escritório (a secretária enxerga)">🏢 Enviar para o escritório</button>
       </div>`;
     const text = win.body.querySelector('.mem-text');
     const meta = win.body.querySelector('.mem-meta');
@@ -1506,6 +1566,11 @@ function openMemoryWindow(projectId) {
     win.body.querySelector('[data-act=save]').onclick = async () => {
       await api('PUT', `/api/projects/${projectId}/memory`, { memory: text.value });
       meta.textContent = 'Salva agora';
+    };
+    win.body.querySelector('[data-act=share]').onclick = async (e) => {
+      await api('PUT', `/api/projects/${projectId}/memory`, { memory: text.value }); // envia o que está na tela
+      await api('POST', `/api/projects/${projectId}/share`, {});
+      e.target.textContent = '✓ Enviada para o escritório';
     };
     win.body.querySelector('[data-act=refresh]').onclick = async (e) => {
       e.target.disabled = true;
@@ -1887,6 +1952,9 @@ function openProjectDialog(p) {
     <h2>${p ? 'Editar mesa' : 'Nova mesa (projeto)'}</h2>
     <label>Nome do projeto<input name="name" required maxlength="40" value="${esc(p?.name || '')}" /></label>
     <label>Descrição<textarea name="description" rows="2">${esc(p?.description || '')}</textarea></label>
+    <label class="option"><input type="checkbox" name="secretaria" ${p?.role === 'secretaria' ? 'checked' : ''} />
+      <span><b>Mesa da secretária</b><br><span class="muted">Recebe a memória do escritório e os relatórios, enxerga todas as mesas e pode
+      passar demandas para elas. Não precisa de pasta de projeto.</span></span></label>
     <label>Pasta do projeto no PC ${esc(state.env?.name || '(nenhum PC conectado)')}
       <div class="folder-row">
         <input name="folder" placeholder="C:\\Users\\...\\meu-projeto" value="${esc(p?.folder || '')}" />
@@ -1900,6 +1968,8 @@ function openProjectDialog(p) {
     </div>
     ${p ? '' : `<label>Agente<select name="agentId"><option value="">— sem agente —</option>${state.agents.map((a) => `<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select></label>`}
   `, async (d) => {
+    d.role = d.secretaria ? 'secretaria' : '';
+    delete d.secretaria;
     const submit = async (body) => {
       try {
         if (p) await api('PATCH', `/api/projects/${p.id}`, body, { quiet: true });
@@ -1988,6 +2058,7 @@ document.getElementById('btn-log').onclick = () => openLogWindow();
 document.getElementById('btn-env').onclick = () => openEnvWindow();
 document.getElementById('btn-account').onclick = () => openAccountWindow();
 document.getElementById('btn-mcp').onclick = () => openMcpWindow();
+document.getElementById('btn-office-memory').onclick = () => openOfficeMemoryWindow();
 
 // ---------- Início ----------
 boot();

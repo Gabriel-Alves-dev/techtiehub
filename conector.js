@@ -120,17 +120,31 @@ function start({ hub, token, envFile = ENV_FILE, log = console.log, embedded = f
       update: (projectId, fields) => emit('chat-update', { projectId, fields }),
       status: (projectId, status, message, logIt) => emit('status', { projectId, status, message, log: logIt }),
       live: (projectId, live) => emit('live', { projectId, live }),
+      // ferramentas da secretária: consultas e delegação no escritório (com o token deste PC)
+      office: async (method, sub, data = {}) => {
+        const qs = method === 'GET' ? '?' + new URLSearchParams(data) : '';
+        const res = await fetch(`${hub}/api/connector/office/${sub}${qs}`, { method, headers, body: method === 'GET' ? undefined : JSON.stringify(data) });
+        const out = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(out.error || `hub respondeu ${res.status}`);
+        return out;
+      },
     },
   });
 
   const handlers = {
     run: ({ project, text, chat, images, imageRefs }) => {
+      // a secretária não tem pasta de projeto: usa uma pasta própria neste PC
+      if (project.folder === '@secretaria') {
+        project.folder = path.join(HOME_DIR, 'secretaria');
+        fs.mkdirSync(project.folder, { recursive: true });
+      }
       if (!ops.isDir(project.folder)) throw new Error(`a pasta ${project.folder} não existe neste PC`);
       return runner.send(project, text, chat, { images, imageRefs });
     },
     answer: ({ projectId, ...body }) => runner.answer(projectId, body),
     stop: ({ projectId }) => runner.stop(projectId),
     memory: ({ project, chat }) => runner.refreshMemory(project, chat),
+    report: ({ project, entries }) => runner.dailyReport(project, entries),
     git: ({ folder, last }) => git.status(folder, last),
     'folder-info': ({ folder }) => ops.folderInfo(folder),
     'pick-folder': () => ops.pickFolder(),
