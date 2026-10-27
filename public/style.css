@@ -58,7 +58,25 @@ h1 { font: 16px var(--pixel); margin: 0; color: var(--accent); letter-spacing: 1
 .usage-fill.bad::before { background: var(--bad); }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
 
-.actions { display: flex; gap: 8px; }
+.actions { display: flex; gap: 8px; align-items: center; }
+
+/* ---------- menu "Mais" (agrupa os botões secundários do topo) ---------- */
+.menu { position: relative; }
+.menu-list {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  background: var(--panel);
+  border: 2px solid var(--line);
+  box-shadow: 6px 6px 0 #0008;
+  min-width: 170px;
+}
+.menu-list button { text-align: left; box-shadow: none; }
 
 button {
   font: 10px var(--pixel);
@@ -478,6 +496,8 @@ button.warn { color: var(--warn); border-color: var(--warn); }
   .actions { flex-basis: 100%; overflow-x: auto; scrollbar-width: none; }
   .actions::-webkit-scrollbar { display: none; }
   .actions button { flex: none; padding: 8px 10px; font-size: 9px; }
+  /* dentro da faixa que rola, "absolute" ficaria cortado pelo overflow: ancora na tela inteira */
+  .menu-list { position: fixed; top: calc(80px + env(safe-area-inset-top)); right: 10px; left: 10px; min-width: 0; }
   .roombar { gap: 8px; padding: 6px 10px 0; }
   .zoom button { padding: 6px 8px; }
   .hint { display: none; }

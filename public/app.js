@@ -2235,6 +2235,15 @@ document.getElementById('btn-mcp').onclick = () => openMcpWindow();
 document.getElementById('btn-vars').onclick = () => openVarsWindow();
 document.getElementById('btn-office-memory').onclick = () => openOfficeMemoryWindow();
 
+// ---------- Menu "Mais" (agrupa os botões secundários do topo) ----------
+const moreMenu = document.getElementById('more-menu');
+document.getElementById('btn-more').addEventListener('click', (e) => {
+  e.stopPropagation();
+  moreMenu.hidden = !moreMenu.hidden;
+});
+moreMenu.addEventListener('click', (e) => { if (e.target.closest('button')) moreMenu.hidden = true; });
+document.addEventListener('click', (e) => { if (!moreMenu.hidden && !e.target.closest('.menu')) moreMenu.hidden = true; });
+
 // ---------- Início ----------
 boot();
 requestAnimationFrame(frame);
