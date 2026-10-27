@@ -110,6 +110,8 @@ function start({ hub, token, envFile = ENV_FILE, log = console.log, embedded = f
     flushing = false;
   }
 
+  // último limite de uso conhecido (pra mesclar um evento parcial de rate_limit_event sem perder o outro campo)
+  let lastUsage = {};
   const store = new RemoteSessionStore((op, body) => post('/api/connector/sessions/' + op, body));
   const runner = new Runner({
     env,
@@ -120,6 +122,10 @@ function start({ hub, token, envFile = ENV_FILE, log = console.log, embedded = f
       update: (projectId, fields) => emit('chat-update', { projectId, fields }),
       status: (projectId, status, message, logIt) => emit('status', { projectId, status, message, log: logIt }),
       live: (projectId, live) => emit('live', { projectId, live }),
+      usage: (partial) => {
+        lastUsage = { ...lastUsage, ...partial };
+        emit('usage', { usage: lastUsage });
+      },
       // ferramentas da secretária: consultas e delegação no escritório (com o token deste PC)
       office: async (method, sub, data = {}) => {
         const qs = method === 'GET' ? '?' + new URLSearchParams(data) : '';
@@ -204,6 +210,17 @@ function start({ hub, token, envFile = ENV_FILE, log = console.log, embedded = f
       updating = false;
     }
   }
+
+  // ---------- Limite de uso da conta Claude (barra no hub) ----------
+  // Confere ao conectar e a cada 10 minutos; sem chamada de modelo (checkUsage interrompe antes de
+  // mandar qualquer mensagem). Só quando nada está rodando, pra não competir com um pedido de verdade.
+  async function checkUsageIfIdle() {
+    if (Object.keys(runner.allLive()).length) return;
+    const r = await runner.checkUsage().catch(() => null);
+    if (r) runner.hub.usage(r);
+  }
+  checkUsageIfIdle();
+  setInterval(checkUsageIfIdle, 10 * 60 * 1000);
 
   let stopped = false;
   (async function loop() {

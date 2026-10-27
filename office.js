@@ -47,6 +47,7 @@ class Office {
     this.state = this.load();
     this.browsers = new Set();
     this.live = {}; // projectId -> { running, pending, envId } — pedidos em andamento (não salvo)
+    this.usage = {}; // envId -> { subscription, fiveHour, sevenDay, at } — limite de uso da conta Claude (não salvo)
     this.chats = new ChatStore(path.join(dir, 'chats'), (projectId, entry) => this.broadcast('chat', { projectId, entry }));
     this.sessions = new FileSessionStore(path.join(dir, 'sessions'));
     this.connectors = new Connectors({
@@ -91,7 +92,13 @@ class Office {
   // O navegador recebe o estado salvo + o que está rodando + os PCs conectados.
   snapshot() {
     // now: relógio do hub, para o navegador acertar os cronômetros com o dele
-    return { ...this.state, live: this.live, connectors: this.connectors.online(), connectorVersion: this.connectorVersion, now: Date.now() };
+    return { ...this.state, live: this.live, connectors: this.connectors.online(), connectorVersion: this.connectorVersion, now: Date.now(), usage: this.usage };
+  }
+
+  // Limite de uso (conta Claude) de um PC, mandado pelo conector.
+  setUsage(envId, data) {
+    this.usage[envId] = { ...data, at: Date.now() };
+    this.broadcast(null, this.snapshot());
   }
 
   broadcast(event, data) {

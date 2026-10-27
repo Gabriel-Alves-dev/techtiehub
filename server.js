@@ -330,6 +330,11 @@ async function connectorApi(req, res, url, op, sub) {
       o.syncLive(envId, body.lives || {});
       return send(res, 200, { ok: true });
     }
+    // limite de uso da conta Claude deste PC (barra no topo)
+    if (type === 'usage') {
+      o.setUsage(envId, body.usage || {});
+      return send(res, 200, { ok: true });
+    }
     if (!o.state.projects.some((p) => p.id === projectId)) return send(res, 200, { ignored: true });
     if (type === 'chat-push') o.chats.push(projectId, body.role, body.text, [].concat(body.images || []).filter((n) => o.hasUpload(n)));
     else if (type === 'chat-update') o.chats.update(projectId, body.fields || {});

@@ -957,6 +957,38 @@ function renderStats() {
   document.getElementById('stats').innerHTML =
     `<span><b>${state.projects.length}</b> mesas</span><span><b>${state.agents.length}</b> agentes</span>` +
     Object.entries(STATUS).map(([k, v]) => `<span><i class="dot" style="background:${v.color}"></i>${count(k)} ${v.label.toLowerCase()}</span>`).join('');
+  renderUsageBar();
+}
+
+// Barra com o limite de uso da conta Claude do PC em uso (como a tela "Account & Usage" do Claude Code).
+const SUBSCRIPTION_NAMES = { pro: 'Pro', max: 'Max', team: 'Team', enterprise: 'Enterprise' };
+
+// "em 3h", "em 20 min"… para quando o limite reinicia (resetsAt é no futuro)
+function timeUntil(t) {
+  const s = Math.floor((t - Date.now()) / 1000);
+  if (s <= 0) return 'já';
+  if (s < 60) return 'em instantes';
+  if (s < 3600) return `em ${Math.ceil(s / 60)} min`;
+  if (s < 86400) return `em ${Math.round(s / 3600)} h`;
+  return `em ${Math.round(s / 86400)} dias`;
+}
+
+function usageMeter(label, m) {
+  if (!m || m.percent == null) return '';
+  const cls = m.percent >= 90 ? 'bad' : m.percent >= 70 ? 'warn' : 'ok';
+  const resets = m.resetsAt ? timeUntil(new Date(m.resetsAt).getTime()) : '';
+  return `<span class="usage-meter" title="${label}${resets ? ' · reinicia ' + esc(resets) : ''}">
+    ${label} <i class="usage-fill ${cls}" style="--pct:${Math.min(100, m.percent)}%"></i> ${Math.round(m.percent)}%</span>`;
+}
+
+function renderUsageBar() {
+  const box = document.getElementById('usage-bar');
+  const u = state.env && state.usage?.[state.env.id];
+  if (!u || (!u.fiveHour && !u.sevenDay)) { box.hidden = true; return; }
+  box.hidden = false;
+  box.innerHTML =
+    `<span class="muted">${u.subscription ? esc(SUBSCRIPTION_NAMES[u.subscription] || u.subscription) : 'Claude'} · ${esc(state.env.name)}</span>` +
+    usageMeter('Sessão (5h)', u.fiveHour) + usageMeter('Semana', u.sevenDay);
 }
 
 // ---------- Janelas flutuantes ----------

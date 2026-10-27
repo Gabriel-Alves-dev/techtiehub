@@ -27,7 +27,8 @@ const AUTO_CLEAR_TOKENS = Number(process.env.HUB_AUTO_CLEAR_TOKENS) || 100000;
 class Runner {
   // env: { id, name } deste PC; store: SessionStore (no hub)
   // hub: { push(projectId, role, text), update(projectId, fields),
-  //        status(projectId, status, message, log), live(projectId, live|null) }
+  //        status(projectId, status, message, log), live(projectId, live|null),
+  //        usage(partial) — limite de uso da conta Claude deste PC (mescla com o que já tem) }
   constructor({ env, store, hub, describeTool }) {
     Object.assign(this, { env, store, hub, describeTool });
     this.runs = new Map(); // projectId -> { running, pending, abort }
@@ -238,6 +239,15 @@ class Runner {
   }
 
   handle(projectId, m) {
+    // atualização de limite de uso, de graça, durante um pedido normal (sem chamada extra)
+    if (m.type === 'rate_limit_event') {
+      const i = m.rate_limit_info;
+      // resetsAt vem em épocas (ms ou s, conforme a versão do SDK): se for pequeno demais pra ser ms, é segundos
+      const resetsAt = i.resetsAt ? new Date(i.resetsAt < 1e12 ? i.resetsAt * 1000 : i.resetsAt).toISOString() : null;
+      if (i.rateLimitType === 'five_hour') this.hub.usage({ fiveHour: { percent: i.utilization ?? null, resetsAt } });
+      else if (i.rateLimitType === 'seven_day') this.hub.usage({ sevenDay: { percent: i.utilization ?? null, resetsAt } });
+      return;
+    }
     if (m.type === 'system' && m.subtype === 'init') {
       this.update(projectId, { sessionId: m.session_id, lastModel: m.model });
       const run = this.runs.get(projectId);
@@ -424,6 +434,51 @@ class Runner {
           { nota: z.string() },
           safe(({ nota }) => call('POST', 'note', { nota }))),
     ];
+  }
+
+  // ---------- Limite de uso da conta Claude (barra no hub) ----------
+  // Abre uma sessão descartável em modo "entrada contínua" (só assim dá pra chamar o método de
+  // controle usage_EXPERIMENTAL), espera ela iniciar (não gasta chamada de modelo) e já interrompe:
+  // nenhuma mensagem de usuário chega a ser enviada, então isto não consome tokens nem a cota de uso.
+  async checkUsage() {
+    const { query } = await loadSdk();
+    const q = query({
+      // nunca produz valor: a sessão fica esperando, só para abrir o canal de controle
+      prompt: (async function* () { await new Promise(() => {}); })(),
+      options: { cwd: os.tmpdir(), tools: [], settingSources: [], persistSession: false, includePartialMessages: false },
+    });
+    // sem login, sem rede ou um CLI que nunca inicia: não pode travar o loop periódico para sempre
+    const timeout = new Promise((resolve) => setTimeout(() => resolve(null), 15000));
+    const work = (async () => {
+      try {
+        for await (const m of q) {
+          if (m.type !== 'system' || m.subtype !== 'init') continue;
+          const r = await q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true });
+          if (!r.rate_limits_available || !r.rate_limits) return null;
+          // "session" (5h) e "weekly"/"weekly_all" (7 dias): usa o grupo, mais estável que o kind exato;
+          // dentro de cada grupo, a linha "ativa" é a que o próprio servidor destaca (ex.: a mais cheia)
+          const row = (group) => {
+            const rows = (r.rate_limits.limits || []).filter((l) => l.group === group);
+            return rows.find((l) => l.is_active) || rows[0] || null;
+          };
+          const fiveHour = row('session'), sevenDay = row('weekly');
+          return {
+            subscription: r.subscription_type,
+            fiveHour: fiveHour && { percent: fiveHour.percent, resetsAt: fiveHour.resets_at },
+            sevenDay: sevenDay && { percent: sevenDay.percent, resetsAt: sevenDay.resets_at },
+          };
+        }
+      } catch {
+        return null; // sem login, sem plano com limites, ou erro de rede: só não mostra a barra
+      }
+      return null;
+    })();
+    try {
+      return await Promise.race([work, timeout]);
+    } finally {
+      await q.interrupt().catch(() => {});
+      await q.return?.().catch(() => {});
+    }
   }
 
   // Relatório do dia para a secretária (chamada curta ao Claude, sem ferramentas).
