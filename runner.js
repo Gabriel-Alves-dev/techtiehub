@@ -242,10 +242,14 @@ class Runner {
     // atualização de limite de uso, de graça, durante um pedido normal (sem chamada extra)
     if (m.type === 'rate_limit_event') {
       const i = m.rate_limit_info;
-      // resetsAt vem em épocas (ms ou s, conforme a versão do SDK): se for pequeno demais pra ser ms, é segundos
-      const resetsAt = i.resetsAt ? new Date(i.resetsAt < 1e12 ? i.resetsAt * 1000 : i.resetsAt).toISOString() : null;
-      if (i.rateLimitType === 'five_hour') this.hub.usage({ fiveHour: { percent: i.utilization ?? null, resetsAt } });
-      else if (i.rateLimitType === 'seven_day') this.hub.usage({ sevenDay: { percent: i.utilization ?? null, resetsAt } });
+      // utilization é opcional: alguns eventos só avisam status, sem trazer a porcentagem de novo —
+      // nesse caso não mexe no que já estava mostrando (melhor manter o valor antigo que apagar a barra)
+      if (i.utilization != null && ['five_hour', 'seven_day'].includes(i.rateLimitType)) {
+        // resetsAt vem em épocas (ms ou s, conforme a versão do SDK): se for pequeno demais pra ser ms, é segundos
+        const resetsAt = i.resetsAt ? new Date(i.resetsAt < 1e12 ? i.resetsAt * 1000 : i.resetsAt).toISOString() : null;
+        const field = i.rateLimitType === 'five_hour' ? 'fiveHour' : 'sevenDay';
+        this.hub.usage({ [field]: { percent: i.utilization, resetsAt } });
+      }
       return;
     }
     if (m.type === 'system' && m.subtype === 'init') {

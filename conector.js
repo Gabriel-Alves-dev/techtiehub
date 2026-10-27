@@ -216,8 +216,15 @@ function start({ hub, token, envFile = ENV_FILE, log = console.log, embedded = f
   // mandar qualquer mensagem). Só quando nada está rodando, pra não competir com um pedido de verdade.
   async function checkUsageIfIdle() {
     if (Object.keys(runner.allLive()).length) return;
-    const r = await runner.checkUsage().catch(() => null);
+    let r;
+    try {
+      r = await runner.checkUsage();
+    } catch (e) {
+      log('Não consegui ler o limite de uso da conta Claude:', e.message);
+      return;
+    }
     if (r) runner.hub.usage(r);
+    else log('Limite de uso indisponível agora (conta sem plano com limites, sem login, ou o Claude Code não respondeu a tempo).');
   }
   checkUsageIfIdle();
   setInterval(checkUsageIfIdle, 10 * 60 * 1000);
