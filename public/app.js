@@ -139,7 +139,12 @@ function resolveEnv() {
   const online = Object.keys(state.connectors || {});
   const id = online.includes(preferredEnv) ? preferredEnv : online.length === 1 ? online[0] : null;
   state.env = id ? { id, name: state.connectors[id].name } : null;
-  for (const p of state.projects) p.folder = id ? p.folders?.[id] || null : null;
+  for (const p of state.projects) {
+    p.folder = id ? p.folders?.[id] || null : null;
+    // PC onde os pedidos desta mesa rodam: este, se tiver a pasta; senão, outro conectado que tenha
+    // (é o que o hub faz): dá para usar o PC do escritório pelo celular
+    p.runEnv = p.role === 'secretaria' ? id || online[0] || null : p.folder ? id : online.find((e) => p.folders?.[e]) || null;
+  }
 }
 
 function chooseEnv(id) {
@@ -1214,10 +1219,10 @@ function updateProjectWindow(win) {
 
   const who = a ? a.name : 'o agente';
   const input = win.body.querySelector('textarea');
-  const canChat = !!p.folder || p.role === 'secretaria'; // a secretária não precisa de pasta de projeto
+  const canChat = !!p.runEnv; // a secretária não precisa de pasta de projeto
   input.placeholder = p.role === 'secretaria'
     ? `Peça algo para ${who}… (ex.: leia minhas mensagens no Bitrix e passe a demanda para a mesa certa)`
-    : p.folder ? `Peça algo para ${who}… (Enter envia · Shift+Enter quebra linha)` : 'Defina a pasta do projeto primeiro';
+    : p.runEnv ? `Peça algo para ${who}… (Enter envia · Shift+Enter quebra linha)` : 'Defina a pasta do projeto primeiro';
   input.disabled = !canChat;
   const send = win.body.querySelector('[data-act=send]');
   send.disabled = !canChat || !!live?.running;
@@ -1250,11 +1255,14 @@ function renderBanner(win, p) {
       : `⚠️ O conector do PC <b>${esc(state.env.name)}</b> é de uma versão antiga: imagens, modelo e permissões não funcionam nele. ` +
         'Baixe o conector de novo nesse PC (<b>PC → Conectar um PC → Baixar conector</b>) e extraia por cima. Depois disso ele passa a se atualizar sozinho.');
   }
-  if (!state.env) {
+  const runName = (envId) => state.connectors?.[envId]?.name || 'outro PC';
+  if (p.runEnv && p.runEnv !== state.env?.id && !l?.running && p.role !== 'secretaria') {
+    msgs.push(`🛰 Os pedidos desta mesa rodam no PC <b>${esc(runName(p.runEnv))}</b>, onde está a pasta dela. Dá para usar daqui normalmente, inclusive pelo celular.`);
+  } else if (!state.env && !p.runEnv) {
     msgs.push(Object.keys(state.connectors || {}).length
       ? '🖥 Escolha em qual PC executar no botão <b>PC</b> (topo).'
       : '🖥 Nenhum PC conectado ao hub. Abra o botão <b>PC</b> para conectar o seu computador.');
-  } else if (!p.folder && p.role !== 'secretaria') {
+  } else if (!p.runEnv && !p.folder && p.role !== 'secretaria') {
     const others = Object.entries(p.folders || {})
       .map(([envId, f]) => `<b>${esc(state.environments?.[envId]?.name || 'outro PC')}</b>: ${esc(f)}`);
     msgs.push(others.length
@@ -1494,6 +1502,80 @@ async function scanMcp(win) {
     await api('POST', '/api/mcp-import', { scanId: r.scanId, picks });
     loadMcp(win);
   };
+}
+
+// ---------- Variáveis de ambiente do escritório ----------
+function openVarsWindow() {
+  const win = openWindow('vars', { w: 540, h: 600, cls: 'win-vars' }, (win) => {
+    win.titleEl.textContent = '🔑 Variáveis do escritório';
+  });
+  loadVars(win);
+}
+
+async function loadVars(win) {
+  win.vars = await api('GET', '/api/vars');
+  renderVars(win);
+}
+
+function renderVars(win) {
+  const list = win.vars || [];
+  win.body.innerHTML = `
+    <p class="muted">Webhooks, credenciais de banco, chaves de API… Ficam criptografadas no hub e chegam aos agentes como
+      <b>variáveis de ambiente</b>, em qualquer PC conectado (ex.: <code>$BITRIX_WEBHOOK</code> no terminal,
+      <code>process.env.PG_URL</code> no código). O agente sabe quais existem, mas não vê os valores aqui no chat.
+      Nos servidores MCP, use <code>\${NOME}</code> na URL, nos cabeçalhos ou nas variáveis.</p>
+    <div class="row"><button class="primary" data-act="add">+ Adicionar</button></div>
+    <h3>Variáveis</h3>
+    ${list.map((v) => `<div class="card var-card" data-id="${v.id}">
+      <div class="title mono">${esc(v.name)}</div>
+      ${v.description ? `<div class="sub">${esc(v.description)}</div>` : ''}
+      <div class="sub mono">${esc(v.value)}</div>
+      <div class="sub">Mesas: ${v.projects === 'all' ? 'todas' : esc(v.projects.map(projectName).join(', ') || 'nenhuma')}</div>
+      ${v.lost ? '<div class="sub" style="color:var(--bad)">⚠️ Guardada com outra chave (HUB_SECRET_KEY mudou): edite e digite o valor de novo.</div>' : ''}
+      <div class="row"><button data-act="edit">Editar</button><button class="danger" data-act="del">Remover</button></div>
+    </div>`).join('') || '<p class="muted">Nenhuma variável ainda.</p>'}`;
+  win.body.querySelector('[data-act=add]').onclick = () => openVarDialog(win);
+  win.body.querySelectorAll('.var-card').forEach((card) => {
+    const v = list.find((x) => x.id === card.dataset.id);
+    card.querySelector('[data-act=edit]').onclick = () => openVarDialog(win, v);
+    card.querySelector('[data-act=del]').onclick = async () => {
+      if (!confirm(`Remover a variável ${v.name}? Os agentes deixam de recebê-la.`)) return;
+      await api('DELETE', `/api/vars/${v.id}`);
+      loadVars(win);
+    };
+  });
+}
+
+function openVarDialog(win, v) {
+  const projects = v?.projects || 'all';
+  openDialog(`
+    <h2>${v ? 'Editar variável' : 'Nova variável'}</h2>
+    <label>Nome<input name="name" required maxlength="64" pattern="[A-Za-z_][A-Za-z0-9_]*" value="${esc(v?.name || '')}"
+      placeholder="BITRIX_WEBHOOK" autocapitalize="characters" autocomplete="off" /></label>
+    <label>Valor<textarea name="value" rows="2" ${v ? '' : 'required'} autocomplete="off" spellcheck="false"
+      placeholder="https://… ou postgres://usuario:senha@host:5432/banco">${esc(v?.value || '')}</textarea></label>
+    <label>Para que serve (o agente lê isto)<input name="description" maxlength="200" value="${esc(v?.description || '')}"
+      placeholder="Webhook do Bitrix24 (REST) da empresa" /></label>
+    <fieldset class="areas"><legend>Mesas que recebem esta variável</legend>
+      <label class="option"><input type="radio" name="scope" value="all" ${projects === 'all' ? 'checked' : ''} /><span>Todas as mesas</span></label>
+      <label class="option"><input type="radio" name="scope" value="some" ${projects === 'all' ? '' : 'checked'} /><span>Só estas:</span></label>
+      <div class="mcp-projects">${state.projects.map((p) => `<label class="option"><input type="checkbox" name="proj" value="${p.id}"
+        ${projects !== 'all' && projects.includes(p.id) ? 'checked' : ''} /><span>${esc(p.name)}</span></label>`).join('')}</div>
+    </fieldset>
+    ${v ? '<p class="muted dialog-hint">O valor com •••• está guardado e não aparece por segurança: deixe como está para manter, ou apague e digite um novo.</p>' : ''}
+  `, async (d) => {
+    const body = {
+      name: d.name.trim(), value: d.value, description: d.description,
+      projects: d.scope === 'all' ? 'all' : [...form.querySelectorAll('input[name=proj]:checked')].map((i) => i.value),
+    };
+    try {
+      if (v) await api('PATCH', `/api/vars/${v.id}`, body, { quiet: true });
+      else await api('POST', '/api/vars', body, { quiet: true });
+      loadVars(win);
+    } catch (e) {
+      alert(e.message);
+    }
+  }, v && { label: 'Remover', confirm: `Remover a variável ${v.name}?`, action: async () => { await api('DELETE', `/api/vars/${v.id}`); loadVars(win); } });
 }
 
 // "Nome: valor" por linha <-> objeto (cabeçalhos); "NOME=valor" por linha <-> objeto (variáveis)
@@ -2118,6 +2200,7 @@ document.getElementById('btn-log').onclick = () => openLogWindow();
 document.getElementById('btn-env').onclick = () => openEnvWindow();
 document.getElementById('btn-account').onclick = () => openAccountWindow();
 document.getElementById('btn-mcp').onclick = () => openMcpWindow();
+document.getElementById('btn-vars').onclick = () => openVarsWindow();
 document.getElementById('btn-office-memory').onclick = () => openOfficeMemoryWindow();
 
 // ---------- Início ----------

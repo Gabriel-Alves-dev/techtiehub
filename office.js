@@ -83,6 +83,8 @@ class Office {
     s.queue ??= {};
     // recados das mesas para a secretária (ferramenta avisar_secretaria) — guarda os 200 mais recentes
     s.inbox ??= [];
+    // variáveis de ambiente do escritório (webhooks, credenciais…): valores criptografados
+    s.vars ??= [];
     return s;
   }
 
@@ -372,10 +374,46 @@ class Office {
   }
 
   // Configuração pronta para o Claude Agent SDK (segredos abertos) — só vai para o conector.
+  // ${NOME} na URL, cabeçalhos, argumentos e variáveis vira o valor da variável do escritório
   mcpConfig(server) {
-    const open = (map) => Object.fromEntries(Object.entries(map || {}).map(([k, v]) => [k, this.secrets.decrypt(v)]));
-    if (server.type === 'stdio') return { type: 'stdio', command: server.command, args: server.args || [], env: open(server.env) };
-    return { type: server.type, url: this.secrets.decrypt(server.url), headers: open(server.headers) };
+    const vars = this.varsFor(null);
+    const expand = (t) => String(t ?? '').replace(/\$\{([A-Za-z_]\w*)\}/g, (m, n) => vars[n] ?? m);
+    const open = (map) => Object.fromEntries(Object.entries(map || {}).map(([k, v]) => [k, expand(this.secrets.decrypt(v))]));
+    if (server.type === 'stdio') return { type: 'stdio', command: server.command, args: (server.args || []).map(expand), env: open(server.env) };
+    return { type: server.type, url: expand(this.secrets.decrypt(server.url)), headers: open(server.headers) };
+  }
+
+  // ---------- Variáveis de ambiente do escritório ----------
+  // valor mascarado para o navegador; lost = guardado com outra HUB_SECRET_KEY
+  varsPublic() {
+    return this.state.vars.map((v) => ({
+      id: v.id, name: v.name, description: v.description || '', projects: v.projects || 'all',
+      value: mask(this.secrets.decrypt(v.value)),
+      lost: !this.secrets.decrypt(v.value),
+    }));
+  }
+
+  // variáveis que valem para uma mesa: { NOME: valor } (abertas, só para o conector); null = todas
+  varsFor(projectId) {
+    const out = {};
+    for (const v of this.state.vars) {
+      if (projectId && v.projects !== 'all' && !v.projects.includes(projectId)) continue;
+      const value = this.secrets.decrypt(v.value);
+      if (value) out[v.name] = value;
+    }
+    return out;
+  }
+
+  // o agente conhece os nomes, nunca os valores
+  varsContext(projectId) {
+    const list = this.state.vars.filter((v) => v.projects === 'all' || v.projects.includes(projectId));
+    if (!list.length) return '';
+    return [
+      '## Variáveis de ambiente do escritório',
+      'Já estão definidas no ambiente (use $NOME no terminal, process.env.NOME no Node ou os.environ["NOME"] no Python). ' +
+      'Use-as em vez de pedir as credenciais ao usuário, e nunca escreva os valores em arquivos, commits ou respostas.',
+      list.map((v) => `- ${v.name}${v.description ? ` — ${v.description}` : ''}`).join('\n'),
+    ].join('\n\n');
   }
 
   // MCPs que valem para uma mesa: { nome: configuração }

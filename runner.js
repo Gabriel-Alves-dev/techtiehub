@@ -197,6 +197,8 @@ class Runner {
           allowDangerouslySkipPermissions: project.permissionMode === 'bypassPermissions',
           // servidores MCP configurados no hub para esta mesa (somam-se aos do Claude Code do PC)
           mcpServers: Object.keys(mcp).length ? mcp : undefined,
+          // variáveis do escritório (webhooks, credenciais…) somadas às do PC
+          env: Object.keys(project.env || {}).length ? { ...process.env, ...project.env } : undefined,
           abortController: run.abort,
           canUseTool: (name, input, opts) => this.ask(project.id, run, name, input, opts),
         },

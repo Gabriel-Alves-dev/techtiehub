@@ -232,6 +232,15 @@ O fluxo de um pedido:
 
 **Modo de permissão (por mesa).** `project.permissionMode` (`''`, `acceptEdits`, `auto`, `bypassPermissions`) vai no `run` e vira `permissionMode` do SDK (`'default'` quando vazio; `bypassPermissions` exige `allowDangerouslySkipPermissions`). O `AskUserQuestion` sempre passa pelo `canUseTool`, em qualquer modo (testado), então as perguntas de decisão continuam chegando. Como o SDK só aplica o modo no início, uma troca no meio do pedido vai ao conector (`set-mode`), e o runner passa a aprovar sozinho o que o novo modo libera (`autoAllowed`), inclusive o pedido em aberto.
 
+**Em qual PC o pedido roda.** As ações da mesa (chat, relatório, memória) usam `envForDesk(o, project, envFor(req))`: o PC escolhido no navegador, se a mesa tiver pasta nele; senão, o primeiro PC conectado que tenha. Assim o celular (que não escolhe PC) usa o PC do escritório. No front, `resolveEnv` calcula o mesmo em `p.runEnv`, que libera o chat e mostra o aviso "🛰 roda no PC X".
+
+**Variáveis do escritório.** `state.vars = [{ id, name, value (criptografado), description, projects }]`, CRUD em `/api/vars` (o GET devolve o valor mascarado).
+- **Nomes reservados:** PATH, HOME, `ANTHROPIC_*`, `CLAUDE_*` e outros são recusados (`VAR_RESERVED`), para não quebrar o sistema nem o login do Claude.
+- **Como chegam ao agente:** o `briefFor` manda `env: varsFor(id)` e o runner passa `env: { ...process.env, ...project.env }` ao SDK. O contexto da mesa lista só os nomes e descrições (`varsContext`).
+- **Nos MCPs:** `mcpConfig` troca `${NOME}` pelo valor, na URL, nos cabeçalhos, nos argumentos e nas variáveis.
+
+**Celular.** Só CSS (`@media (max-width: 760px)` no fim do `style.css`): os botões do topo viram uma faixa que rola, e as janelas e diálogos ocupam a tela inteira.
+
 **Secretária, memória do escritório e fila.**
 
 - **Memória do escritório e relatórios.** `state.officeMemory` = `{ general, projects: { id: { text, at, agent } } }`, preenchido por "Enviar para o escritório" (copia a memória da mesa). `state.reports[dia][projectId]` traz os relatórios do dia: o conector resume as entradas daquele dia com uma chamada curta, sem ferramentas (`dailyReport`). O dia segue o fuso `HUB_TZ` (padrão America/Sao_Paulo), e os relatórios ficam por 30 dias.

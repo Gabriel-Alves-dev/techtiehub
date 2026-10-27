@@ -418,11 +418,13 @@ function briefFor(o, project, folder) {
     id: project.id, name: project.name, description: project.description, folder,
     model: agent?.model || '', effort: agent?.effort || '', permissionMode: project.permissionMode || '',
     mcpServers: o.mcpFor(project.id), // servidores MCP do hub para esta mesa (segredos abertos, só para o conector)
-    // a secretária recebe, a cada pedido, a visão atualizada do escritório
+    env: o.varsFor(project.id), // variáveis do escritório (abertas, só para o conector)
     // todo agente sabe onde está: a secretária recebe a visão do escritório; os outros, a da sua mesa
-    office: project.role === 'secretaria'
-      ? { role: 'secretaria', context: o.secretaryContext() }
-      : { role: 'mesa', context: o.deskContext(project.id) },
+    office: {
+      role: project.role === 'secretaria' ? 'secretaria' : 'mesa',
+      context: [project.role === 'secretaria' ? o.secretaryContext() : o.deskContext(project.id), o.varsContext(project.id)]
+        .filter(Boolean).join('\n\n'),
+    },
   };
 }
 
@@ -509,6 +511,46 @@ function mergeSecretMap(next, old = {}) {
   const out = {};
   for (const [k, v] of Object.entries(strMap(next))) out[k] = isMask(v) ? old[k] : secrets.encrypt(v);
   return Object.fromEntries(Object.entries(out).filter(([, v]) => v));
+}
+
+// ---------- Variáveis de ambiente do escritório ----------
+const VAR_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+// mudariam o funcionamento do sistema ou do próprio Claude no PC
+const VAR_RESERVED = /^(PATH|PATHEXT|HOME|USERPROFILE|APPDATA|LOCALAPPDATA|TEMP|TMP|SYSTEMROOT|COMSPEC|NODE_OPTIONS|(ANTHROPIC|CLAUDE)_\w*)$/i;
+
+function varsApi(res, o, id, method, body) {
+  const vars = o.state.vars;
+  if (!id && method === 'GET') return send(res, 200, o.varsPublic());
+  const v = id ? vars.find((x) => x.id === id) : null;
+  if (id && !v) return send(res, 404, { error: 'variável não encontrada' });
+  if (v && method === 'DELETE') {
+    vars.splice(vars.indexOf(v), 1);
+    o.save();
+    return send(res, 200, { ok: true });
+  }
+  if (!(method === 'POST' && !id) && !(method === 'PATCH' && v)) return send(res, 405, { error: 'método não permitido' });
+  const name = String(body.name ?? v?.name ?? '').trim();
+  if (!VAR_NAME.test(name)) throw new HttpError(400, 'nome: letras, números e _, sem espaços nem acentos, começando com letra (ex.: BITRIX_WEBHOOK)');
+  if (VAR_RESERVED.test(name)) throw new HttpError(400, `"${name}" é usado pelo sistema ou pelo Claude: escolha outro nome`);
+  if (vars.some((x) => x !== v && x.name.toUpperCase() === name.toUpperCase())) throw new HttpError(400, `já existe a variável ${name}`);
+  if (body.projects !== undefined && body.projects !== 'all' &&
+    !(Array.isArray(body.projects) && body.projects.every((pid) => o.state.projects.some((p) => p.id === pid)))) {
+    throw new HttpError(400, 'lista de mesas inválida');
+  }
+  // valor mascarado ("••••") ou ausente na edição = manter o guardado
+  const value = body.value === undefined || isMask(body.value) ? '' : String(body.value).trim();
+  if (!v && !value) throw new HttpError(400, 'informe o valor');
+  if (value.length > 20000) throw new HttpError(400, 'valor grande demais');
+  const target = v || { id: 'v' + token(6), createdAt: Date.now() };
+  Object.assign(target, {
+    name,
+    description: String(body.description ?? target.description ?? '').trim().slice(0, 200),
+    projects: body.projects ?? target.projects ?? 'all',
+  });
+  if (value) target.value = secrets.encrypt(value);
+  if (!v) vars.push(target);
+  o.save();
+  return send(res, v ? 200 : 201, { ok: true });
 }
 
 function mcpCreate(o, body) {
@@ -705,7 +747,9 @@ async function officeApi(req, res, url, o, user) {
       return send(res, 200, { ok: true });
     }
 
-    const envId = o.needEnv(req);
+    // o PC escolhido no navegador, se a mesa tiver pasta nele; senão, outro PC conectado que tenha
+    // (ex.: pelo celular, usando o PC do escritório)
+    const envId = envForDesk(o, project, o.envFor(req)) || o.needEnv(req);
     if (action === 'open') return send(res, 200, await connectors.rpc(envId, 'open', { folder: project.folders[envId], app: body.app }));
 
     // 🏢 manda a memória desta mesa para a memória do escritório
@@ -778,6 +822,7 @@ async function officeApi(req, res, url, o, user) {
 
   // ---------- Servidores MCP do escritório ----------
   if (resource === 'mcp') return mcpApi(req, res, o, id, action, method, body);
+  if (resource === 'vars') return varsApi(res, o, id, method, body);
   if (resource === 'mcp-scan' && method === 'POST') {
     // procura no PC escolhido os MCPs que o Claude Code de lá já conhece
     const envId = o.needEnv(req);

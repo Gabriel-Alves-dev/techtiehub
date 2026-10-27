@@ -447,3 +447,31 @@ button.warn { color: var(--warn); border-color: var(--warn); }
 .mcp-paste { margin-bottom: 10px; font-size: 12px; color: var(--muted); }
 .mcp-paste summary { cursor: pointer; }
 .mcp-paste textarea { font: 11px Consolas, monospace; }
+
+/* ---------- celular ---------- */
+@media (max-width: 760px) {
+  body { height: 100dvh; }
+  header { flex-wrap: wrap; gap: 6px 12px; padding: 8px 10px; padding-top: max(8px, env(safe-area-inset-top)); }
+  h1 { font-size: 11px; }
+  .stats { flex: 1; gap: 10px; font-size: 11px; overflow-x: auto; white-space: nowrap; }
+  /* botões do topo numa faixa que rola de lado */
+  .actions { flex-basis: 100%; overflow-x: auto; scrollbar-width: none; }
+  .actions::-webkit-scrollbar { display: none; }
+  .actions button { flex: none; padding: 8px 10px; font-size: 9px; }
+  .roombar { gap: 8px; padding: 6px 10px 0; }
+  .zoom button { padding: 6px 8px; }
+  .hint { display: none; }
+  /* janelas ocupam a tela inteira (a posição salva no computador é ignorada) */
+  .win {
+    left: 0 !important; top: 0 !important; width: 100vw !important; height: 100dvh !important;
+    min-width: 0; resize: none; border: 0; box-shadow: none; animation: none;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .win-bar { cursor: default; padding: 8px 8px 8px 12px; padding-top: max(8px, env(safe-area-inset-top)); }
+  .win-btn[data-act=min] { display: none; }
+  .win-btn { padding: 8px 12px; font-size: 11px; }
+  /* 16px evita o zoom automático do iPhone ao tocar num campo */
+  input, select, textarea { font-size: 16px; }
+  .pw-toolbar button { padding: 8px 9px; }
+  dialog { width: 100vw; max-width: 100vw; max-height: 100dvh; margin: 0; padding: 16px; border-width: 0; overflow-y: auto; }
+}
