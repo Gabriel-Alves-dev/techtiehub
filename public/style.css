@@ -512,6 +512,25 @@ button.warn { color: var(--warn); border-color: var(--warn); }
   .win-btn { padding: 8px 12px; font-size: 11px; }
   /* 16px evita o zoom automático do iPhone ao tocar num campo */
   input, select, textarea { font-size: 16px; }
-  .pw-toolbar button { padding: 8px 9px; }
+  .win-body { padding: 10px; }
+  /* barra da mesa numa faixa só (rola de lado), para sobrar tela para a conversa */
+  .pw-toolbar { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; flex-shrink: 0; margin-bottom: 8px; padding-bottom: 2px; }
+  .pw-toolbar::-webkit-scrollbar { display: none; }
+  .pw-toolbar button, .pw-toolbar select { flex: none; }
+  .pw-toolbar button { padding: 10px 11px; font-size: 9px; }
+  .pw-toolbar select { padding: 8px 6px; max-width: 150px; }
+  .msg { font-size: 14px; max-width: 96%; padding: 8px 10px; }
+  .msg-tool, .msg-system { font-size: 12px; }
+  .msg pre { font-size: 12px; }
+  .chat-input textarea { resize: none; min-height: 52px; max-height: 30vh; }
+  /* botões do envio: alvo de toque maior; Enviar ocupa o espaço que sobra */
+  .chat-input .row { flex-wrap: nowrap; gap: 6px; }
+  .chat-input .row button { padding: 12px 14px; font-size: 11px; flex: none; }
+  .chat-input .row .primary { flex: 1; }
+  .chat-input .row .spacer { display: none; }
+  .pending-box { max-height: 45%; }
+  .option { padding: 6px 0; font-size: 14px; }
+  .option input { width: 20px; height: 20px; }
+  .card { padding: 12px; }
   dialog { width: 100vw; max-width: 100vw; max-height: 100dvh; margin: 0; padding: 16px; border-width: 0; overflow-y: auto; }
 }

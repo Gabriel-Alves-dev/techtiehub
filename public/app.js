@@ -1136,7 +1136,7 @@ function openProjectWindow(projectId) {
           <button data-act="attach" title="Anexar imagem (ou cole um print com Ctrl+V, ou arraste para a janela)">📎</button>
           <input type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden />
           <span class="spacer"></span>
-          <button data-act="reset" title="Começa uma conversa do zero (o agente esquece o contexto)">Nova conversa</button>
+          <button data-act="reset" title="Compactar a conversa: guarda o essencial na memória e começa uma sessão limpa (menos tokens)">🧹</button>
         </div>
       </div>`;
     const input = win.body.querySelector('textarea');
@@ -1186,9 +1186,14 @@ function openProjectWindow(projectId) {
     };
     win.body.querySelector('[data-act=stop]').onclick = () => api('POST', `/api/projects/${projectId}/stop`, {});
     win.body.querySelector('[data-act=reset]').onclick = async () => {
-      if (!confirm('Começar uma conversa nova? O agente guarda um resumo na memória e começa uma sessão limpa.')) return;
-      win.body.querySelector('[data-act=reset]').textContent = 'Guardando memória…';
-      await api('POST', `/api/projects/${projectId}/reset`, {});
+      if (!confirm('Compactar a conversa? O agente guarda um resumo na memória e começa uma sessão limpa.')) return;
+      const btn = win.body.querySelector('[data-act=reset]');
+      btn.textContent = '⏳';
+      try {
+        await api('POST', `/api/projects/${projectId}/reset`, {});
+      } finally {
+        btn.textContent = '🧹';
+      }
       loadChat(projectId);
     };
     loadChat(projectId);
