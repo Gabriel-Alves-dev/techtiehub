@@ -15,6 +15,7 @@ let sdk;
 const loadSdk = async () => (sdk ??= await import('@anthropic-ai/claude-agent-sdk'));
 
 const clip = (s, n) => (s && s.length > n ? s.slice(0, n) + '…' : s || '');
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const MEMORY_SYSTEM = 'Você mantém a memória de trabalho de um agente de programação que trabalha num projeto ' +
   'ao longo de várias sessões e computadores. Responda somente com a memória atualizada, em Markdown e em português, sem introdução.';
@@ -444,44 +445,51 @@ class Runner {
   // Abre uma sessão descartável em modo "entrada contínua" (só assim dá pra chamar o método de
   // controle usage_EXPERIMENTAL), espera ela iniciar (não gasta chamada de modelo) e já interrompe:
   // nenhuma mensagem de usuário chega a ser enviada, então isto não consome tokens nem a cota de uso.
-  async checkUsage() {
+  async checkUsage(log = () => {}) {
     const { query } = await loadSdk();
     const q = query({
       // nunca produz valor: a sessão fica esperando, só para abrir o canal de controle
       prompt: (async function* () { await new Promise(() => {}); })(),
       options: { cwd: os.tmpdir(), tools: [], settingSources: [], persistSession: false, includePartialMessages: false },
     });
+    // consome o stream em paralelo (senão os control requests abaixo nunca recebem resposta:
+    // o transporte do SDK despacha as respostas de dentro do loop de leitura das mensagens)
+    const pump = (async () => { try { for await (const _ of q) { /* nada a fazer com elas aqui */ } } catch {} })();
     // sem login, sem rede ou um CLI que nunca inicia: não pode travar o loop periódico para sempre
-    const timeout = new Promise((resolve) => setTimeout(() => resolve(null), 15000));
+    const timeout = new Promise((resolve) => setTimeout(() => { log('timeout esperando a inicialização'); resolve(null); }, 15000));
     const work = (async () => {
       try {
-        for await (const m of q) {
-          if (m.type !== 'system' || m.subtype !== 'init') continue;
-          const r = await q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true });
-          if (!r.rate_limits_available || !r.rate_limits) return null;
-          // "session" (5h) e "weekly"/"weekly_all" (7 dias): usa o grupo, mais estável que o kind exato;
-          // dentro de cada grupo, a linha "ativa" é a que o próprio servidor destaca (ex.: a mais cheia)
-          const row = (group) => {
-            const rows = (r.rate_limits.limits || []).filter((l) => l.group === group);
-            return rows.find((l) => l.is_active) || rows[0] || null;
-          };
-          const fiveHour = row('session'), sevenDay = row('weekly');
-          return {
-            subscription: r.subscription_type,
-            fiveHour: fiveHour && { percent: fiveHour.percent, resetsAt: fiveHour.resets_at },
-            sevenDay: sevenDay && { percent: sevenDay.percent, resetsAt: sevenDay.resets_at },
-          };
-        }
-      } catch {
-        return null; // sem login, sem plano com limites, ou erro de rede: só não mostra a barra
+        log('aguardando initializationResult()…');
+        await q.initializationResult(); // a "primeira resposta de conexão": não gasta chamada de modelo
+        log('inicializado; chamando usage_EXPERIMENTAL…');
+        const r = await q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true });
+        log('usage_EXPERIMENTAL respondeu: rate_limits_available=' + r.rate_limits_available +
+          ' subscription_type=' + r.subscription_type + ' limits=' + JSON.stringify(r.rate_limits?.limits));
+        if (!r.rate_limits_available || !r.rate_limits) return null;
+        // "session" (5h) e "weekly"/"weekly_all" (7 dias): usa o grupo, mais estável que o kind exato;
+        // dentro de cada grupo, a linha "ativa" é a que o próprio servidor destaca (ex.: a mais cheia)
+        const row = (group) => {
+          const rows = (r.rate_limits.limits || []).filter((l) => l.group === group);
+          return rows.find((l) => l.is_active) || rows[0] || null;
+        };
+        const fiveHour = row('session'), sevenDay = row('weekly');
+        return {
+          subscription: r.subscription_type,
+          fiveHour: fiveHour && { percent: fiveHour.percent, resetsAt: fiveHour.resets_at },
+          sevenDay: sevenDay && { percent: sevenDay.percent, resetsAt: sevenDay.resets_at },
+        };
+      } catch (e) {
+        log('erro: ' + e.message); // sem login, sem plano com limites, ou erro de rede: só não mostra a barra
+        return null;
       }
-      return null;
     })();
     try {
       return await Promise.race([work, timeout]);
     } finally {
+      // fecha primeiro (senão "pump" nunca termina, já que ele só para quando o generator fecha)
       await q.interrupt().catch(() => {});
       await q.return?.().catch(() => {});
+      await Promise.race([pump, sleep(2000)]).catch(() => {});
     }
   }
 

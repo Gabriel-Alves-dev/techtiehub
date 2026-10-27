@@ -218,7 +218,7 @@ function start({ hub, token, envFile = ENV_FILE, log = console.log, embedded = f
     if (Object.keys(runner.allLive()).length) return;
     let r;
     try {
-      r = await runner.checkUsage();
+      r = await runner.checkUsage((msg) => log('  [uso]', msg));
     } catch (e) {
       log('Não consegui ler o limite de uso da conta Claude:', e.message);
       return;
