@@ -49,6 +49,11 @@ class Auth {
     // pairings: { sha(código): { officeId, exp } } — códigos de parear PC, uso único
     for (const k of ['users']) this.db[k] ??= [];
     for (const k of ['sessions', 'invites', 'connectors', 'pairings']) this.db[k] ??= {};
+    // instalações de antes do isOwner existir: a primeira conta cadastrada vira a dona
+    if (this.db.users.length && !this.db.users.some((u) => u.isOwner)) {
+      this.db.users[0].isOwner = true;
+      this.save();
+    }
     this.failures = new Map(); // ip -> { n, until } (freio contra adivinhar senha)
   }
 
@@ -61,7 +66,7 @@ class Auth {
   }
 
   publicUser(u) {
-    return u && { id: u.id, email: u.email, name: u.name, offices: u.offices };
+    return u && { id: u.id, email: u.email, name: u.name, offices: u.offices, isOwner: !!u.isOwner };
   }
 
   // ---------- Contas ----------
@@ -87,7 +92,10 @@ class Auth {
       }
       delete this.db.invites[sha(String(invite).trim().toUpperCase())];
     }
-    const user = { id: 'u' + token(6), email, name, ...hashPassword(password), offices: [officeId], createdAt: Date.now() };
+    // a primeira conta do hub é a "dona": só ela pode convidar outras pessoas (criarUser.hasUsers()
+    // já checou antes de entrar aqui, então "sem usuário nenhum ainda" = esta é a primeira)
+    const isOwner = !this.hasUsers();
+    const user = { id: 'u' + token(6), email, name, ...hashPassword(password), offices: [officeId], createdAt: Date.now(), isOwner };
     this.db.users.push(user);
     this.save();
     return user;
@@ -160,7 +168,11 @@ class Auth {
     for (const [h, p] of Object.entries(this.db.pairings)) if (p.exp < now) delete this.db.pairings[h];
   }
 
+  // só a dona do hub (a primeira conta) convida outras pessoas — quem entrou por convite
+  // ganha o próprio escritório, isolado, mas não pode criar mais contas sozinho
   createInvite(userId) {
+    const u = this.db.users.find((x) => x.id === userId);
+    if (!u?.isOwner) throw new Error('só quem criou a primeira conta deste hub pode gerar convites');
     const code = shortCode();
     this.db.invites[sha(code)] = { by: userId, exp: Date.now() + INVITE_DAYS * 86400000 };
     this.save();

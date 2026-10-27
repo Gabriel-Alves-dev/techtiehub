@@ -903,9 +903,9 @@ function openAccountWindow() {
         <label>Nova senha<input name="next" type="password" required minlength="8" autocomplete="new-password" /></label>
         <div class="row"><button>Trocar senha</button><span class="muted" data-field="pw-msg"></span></div>
       </form>
-      <h3>Convidar alguém</h3>
+      ${me?.isOwner ? `<h3>Convidar alguém</h3>
       <p class="muted">A pessoa cria a própria conta, com um escritório só dela, usando este código (vale 7 dias e só uma vez).</p>
-      <div data-field="invite"><div class="row"><button data-act="invite">Gerar convite</button></div></div>
+      <div data-field="invite"><div class="row"><button data-act="invite">Gerar convite</button></div></div>` : ''}
       <h3>Sessão</h3>
       <div class="row"><button class="danger" data-act="logout">Sair</button></div>`;
     win.body.querySelector('[data-form=password]').onsubmit = async (e) => {
@@ -914,11 +914,11 @@ function openAccountWindow() {
       e.target.reset();
       win.body.querySelector('[data-field=pw-msg]').textContent = 'Senha trocada. As outras sessões foram encerradas.';
     };
-    win.body.querySelector('[data-act=invite]').onclick = async () => {
+    win.body.querySelector('[data-act=invite]')?.addEventListener('click', async () => {
       const inv = await api('POST', '/api/auth/invite', {});
       win.body.querySelector('[data-field=invite]').innerHTML = `<div class="code">${esc(inv.code)}</div>
         <p class="muted">Envie o código e o endereço do hub. A pessoa clica em “Recebi um convite” na tela de entrada.</p>`;
-    };
+    });
     win.body.querySelector('[data-act=logout]').onclick = async () => {
       await api('POST', '/api/auth/logout', {});
       location.reload();
