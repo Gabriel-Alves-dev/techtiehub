@@ -19,6 +19,11 @@ const clip = (s, n) => (s && s.length > n ? s.slice(0, n) + '…' : s || '');
 const MEMORY_SYSTEM = 'Você mantém a memória de trabalho de um agente de programação que trabalha num projeto ' +
   'ao longo de várias sessões e computadores. Responda somente com a memória atualizada, em Markdown e em português, sem introdução.';
 
+// Tamanho de sessão a partir do qual o hub guarda a memória e começa uma conversa nova sozinho (como o
+// /clear do Claude Code), para a cota de uso não esgotar com uma conversa que só cresce. Cada pedido novo
+// reenvia a sessão inteira; sem isso, o custo de cada pedido cresce para sempre na mesma mesa.
+const AUTO_CLEAR_TOKENS = Number(process.env.HUB_AUTO_CLEAR_TOKENS) || 100000;
+
 class Runner {
   // env: { id, name } deste PC; store: SessionStore (no hub)
   // hub: { push(projectId, role, text), update(projectId, fields),
@@ -133,6 +138,15 @@ class Runner {
             lastCommit: (await git.head(project.folder)) || chat.lastCommit || null,
             lastEnv: this.env.id, lastEnvName: this.env.name, lastFolder: project.folder,
           });
+          // sessão grande demais: guarda a memória (incremental, como o botão "Nova conversa") e
+          // começa do zero no próximo pedido, para não reenviar uma conversa que só cresce
+          if ((run.contextTokens || 0) > AUTO_CLEAR_TOKENS) {
+            try {
+              const m = await this.refreshMemory(project, this.chats.get(project.id));
+              this.update(project.id, { ...m, sessionId: null });
+              this.push(project.id, 'system', '🧹 Conversa compactada sozinha: o essencial foi guardado na memória do projeto, e o próximo pedido começa do zero (menos tokens).');
+            } catch {} // se falhar, segue na mesma sessão; tenta de novo no próximo pedido grande
+          }
         }
       } catch (e) {
         if (!run.abort.signal.aborted) {
@@ -244,8 +258,16 @@ class Runner {
     } else if (m.type === 'user') {
       this.setPhase(projectId, 'thinking'); // a ferramenta respondeu: o Claude volta a pensar
     } else if (m.type === 'result') {
-      if (m.subtype === 'success') this.hub.status(projectId, 'concluido', 'Terminou — aguardando você', true);
-      else {
+      if (m.subtype === 'success') {
+        this.hub.status(projectId, 'concluido', 'Terminou — aguardando você', true);
+        // tamanho atual da sessão (o que seria reenviado no próximo pedido): se passou do limite,
+        // guarda a memória e já deixa marcado para começar uma conversa nova sozinho
+        const u = m.usage;
+        if (u) {
+          const run = this.runs.get(projectId);
+          if (run) run.contextTokens = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+        }
+      } else {
         this.push(projectId, 'system', `Parou com erro (${m.subtype}).`);
         this.hub.status(projectId, 'bloqueado', `Parou com erro (${m.subtype})`, true);
       }
