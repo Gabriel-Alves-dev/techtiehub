@@ -245,6 +245,8 @@ techtiehub/
 ├── secrets.js         # Criptografia dos segredos dos MCPs (AES-256-GCM, chave em HUB_SECRET_KEY)
 ├── mcp-local.js       # (no conector) procurar MCPs do PC e testar um MCP sem gastar uso
 ├── office.js          # Um escritório: estado, conversas, sessões, PCs conectados
+├── community.js       # Chat da comunidade: sala geral e conversas individuais (data/community.json)
+├── tasks.js           # Tarefas da equipe, compartilháveis (data/tasks.json)
 ├── chats.js           # Conversas das mesas (data/chats/)
 ├── connectors.js      # PCs conectados: comandos (RPC) e eventos
 ├── session-store.js   # Sessões do Claude guardadas no hub (data/sessions/)

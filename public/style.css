@@ -349,6 +349,28 @@ dialog .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16
 .msg pre { background: #0008; padding: 6px; overflow-x: auto; margin: 4px 0; font: 11px/1.4 Consolas, monospace; }
 .msg code { background: #0006; padding: 0 3px; font: 12px Consolas, monospace; }
 .chat-input { margin-top: 8px; }
+/* chat da comunidade: abas rolam de lado, o histórico ocupa o resto */
+.win-community .win-body { display: flex; flex-direction: column; overflow: hidden; }
+.comm-tabs { display: flex; gap: 6px; overflow-x: auto; flex: none; padding-bottom: 8px; }
+.comm-tab { flex: none; white-space: nowrap; box-shadow: none; }
+.comm-tab.on { background: var(--accent); color: #fff; }
+.comm-tab b { background: var(--bad); color: #fff; padding: 0 5px; margin-left: 4px; font-size: 11px; }
+.comm-visit { flex: none; margin-bottom: 8px; box-shadow: none; }
+.win-tasks .win-body { display: flex; flex-direction: column; }
+.task-new { display: flex; gap: 8px; margin-bottom: 8px; }
+.task-new input { margin-top: 0; flex: 1; }
+.task { border: 2px solid var(--line); background: var(--bg); padding: 8px; margin-bottom: 6px; }
+.task summary { cursor: pointer; display: flex; flex-direction: column; gap: 2px; }
+.task-title { font-size: 13px; }
+.task.st-done .task-title { text-decoration: line-through; opacity: .6; }
+.task[open] summary { margin-bottom: 8px; }
+.task .row { display: flex; gap: 8px; align-items: center; }
+.task .row select { margin-top: 0; flex: 1; }
+.task label.inline { display: inline-block; margin: 0 8px 4px 0; color: var(--text); }
+.task label.inline input { display: inline; width: auto; margin: 0 4px 0 0; }
+.comm-name { display: block; font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+.msg-user .comm-name { color: #fffc; }
+.comm-time { display: block; font-size: 10px; opacity: .6; text-align: right; margin-top: 2px; }
 .pending-box { flex-shrink: 0; max-height: 55%; overflow-y: auto; }
 .chat-input textarea { resize: vertical; margin-top: 0; }
 .chat-input .row { margin-top: 8px; }

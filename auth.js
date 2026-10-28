@@ -54,6 +54,10 @@ class Auth {
       this.db.users[0].isOwner = true;
       this.save();
     }
+    // equipe: quem entra por convite fica na equipe de quem convidou (cada um com o seu escritório).
+    // Contas de antes da equipe existir entram na equipe da dona.
+    const owner = this.db.users.find((u) => u.isOwner);
+    for (const u of this.db.users) if (!u.teamId && owner) { u.teamId = owner.id; this.save(); }
     this.failures = new Map(); // ip -> { n, until } (freio contra adivinhar senha)
   }
 
@@ -66,7 +70,7 @@ class Auth {
   }
 
   publicUser(u) {
-    return u && { id: u.id, email: u.email, name: u.name, offices: u.offices, isOwner: !!u.isOwner };
+    return u && { id: u.id, email: u.email, name: u.name, offices: u.offices, isOwner: !!u.isOwner, teamId: u.teamId };
   }
 
   // ---------- Contas ----------
@@ -83,6 +87,7 @@ class Auth {
       this.fail(ip, 'signup');
       throw new Error('código de instalação inválido (veja nos logs do servidor)');
     }
+    let inviter = null;
     if (this.hasUsers()) {
       // depois da primeira conta, só com convite
       const inv = this.db.invites[sha(String(invite || '').trim().toUpperCase())];
@@ -91,11 +96,13 @@ class Auth {
         throw new Error('convite inválido ou vencido');
       }
       delete this.db.invites[sha(String(invite).trim().toUpperCase())];
+      inviter = this.findUser(inv.by);
     }
     // a primeira conta do hub é a "dona": só ela pode convidar outras pessoas (criarUser.hasUsers()
     // já checou antes de entrar aqui, então "sem usuário nenhum ainda" = esta é a primeira)
     const isOwner = !this.hasUsers();
-    const user = { id: 'u' + token(6), email, name, ...hashPassword(password), offices: [officeId], createdAt: Date.now(), isOwner };
+    const id = 'u' + token(6);
+    const user = { id, email, name, ...hashPassword(password), offices: [officeId], createdAt: Date.now(), isOwner, teamId: inviter?.teamId || id };
     this.db.users.push(user);
     this.save();
     return user;
@@ -103,6 +110,11 @@ class Auth {
 
   findUser(id) {
     return this.db.users.find((u) => u.id === id) || null;
+  }
+
+  // Quem está na mesma equipe (inclui a própria pessoa).
+  teamMembers(user) {
+    return this.db.users.filter((u) => u.teamId === user.teamId);
   }
 
   changePassword(userId, current, next) {

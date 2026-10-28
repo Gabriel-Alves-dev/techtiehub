@@ -10,6 +10,9 @@ Leia `docs/ARQUITETURA.md` antes de mudanças estruturais.
 - `server.js`: hub. Servidor HTTP nativo (sem framework): rotas, login, canal dos conectores (`/api/connector/*`) e hooks.
 - `auth.js`: contas (scrypt), sessões, convites e tokens dos PCs, em `data/auth.json` (só hashes).
 - `office.js`: um escritório por conta (`data/offices/<id>/`): estado, conversas, sessões, PCs conectados. **Nunca misture escritórios**: toda rota do navegador recebe o `Office` da conta logada.
+- `community.js`: chat da comunidade (sala geral + conversas individuais entre contas), em `data/community.json`. É o **único dado compartilhado entre contas**: fica no nível do hub, com SSE próprio (`/api/community/*`), e nunca passa pelo `Office`.
+- **Equipe:** cada conta tem `teamId` (a de quem convidou; contas antigas entram na da dona). O chat e as tarefas só alcançam colegas de equipe, e só a dona (`isOwner`) visita escritórios (`/api/team/:id/office`, resumo só de leitura). A secretária fala com a de um colega por `team-send` (usa `delegate` no escritório dele).
+- `tasks.js`: tarefas da equipe em `data/tasks.json` (nível do hub, como o chat). Visíveis a quem criou e a quem foi adicionado em `people`; delegar a um agente é sempre na mesa do próprio escritório (`delegateTask` no `server.js`). A secretária usa as ferramentas `listar_tarefas`, `criar_tarefa`, `atualizar_tarefa`, `delegar_tarefa` (`runner.js`).
 - `chats.js` / `session-store.js`: conversas e sessões do Claude, guardadas no hub.
 - `runner.js`: roda no conector. Uma execução do Claude por mesa; `canUseTool` fica pendente até o usuário responder. Também cuida da memória do agente.
 - `remote-store.js` / `local-ops.js`: no conector, as sessões lidas/gravadas no hub e as operações locais (pastas, seletor, VS Code).

@@ -9,6 +9,8 @@ const fs = require('fs');
 const path = require('path');
 const git = require('./git');
 const { Auth, token, shortCode } = require('./auth');
+const { Community } = require('./community');
+const { Tasks, briefOf } = require('./tasks');
 const { Office, HttpError, STATUSES, FLOORS, AREAS } = require('./office');
 const conector = require('./conector');
 const { createZip } = require('./zip');
@@ -55,6 +57,8 @@ const TRUST_PROXY = process.env.HUB_TRUST_PROXY === '1'; // atrás de proxy (Coo
 // gerado e mostrado nos logs) — senão quem achasse o endereço antes poderia tomar o hub.
 const secrets = new Secrets(DATA_DIR);
 const auth = new Auth(DATA_DIR, { setupCode: process.env.HUB_SETUP_CODE || (EXPOSED ? shortCode() : null) });
+const community = new Community(DATA_DIR, auth);
+const tasks = new Tasks(DATA_DIR, auth, (...a) => community.push(...a));
 const LOCAL_ENV = EMBEDDED ? conector.loadEnv() : null;
 
 // ---------- Escritórios ----------
@@ -241,7 +245,7 @@ async function connectorApi(req, res, url, op, sub) {
     const me = o.state.projects.find((p) => p.id === (body.mesa_id || body.secretaria));
     if (!me) return send(res, 403, { error: 'mesa desconhecida' });
     const isSec = me.role === 'secretaria';
-    if (['desk', 'delegate', 'note'].includes(sub) && !isSec) return send(res, 403, { error: 'só a secretária usa esta ferramenta' });
+    if (['desk', 'delegate', 'note', ...TEAM_TOOLS].includes(sub) && !isSec) return send(res, 403, { error: 'só a secretária usa esta ferramenta' });
     const meAgent = o.agentOf(me.id)?.name || null;
     if (sub === 'memory') {
       const mem = o.state.officeMemory;
@@ -301,6 +305,17 @@ async function connectorApi(req, res, url, op, sub) {
       return send(res, 200, { mesa: found.project.name, agente: o.agentOf(found.project.id)?.name || null, ...r });
     }
     if (sub === 'reports') return send(res, 200, o.state.reports[body.dia || o.day()] || {});
+
+    // equipe e tarefas: a secretária age em nome do dono do escritório
+    if (TEAM_TOOLS.includes(sub)) {
+      const owner = auth.db.users.find((u) => u.offices.includes(o.id));
+      if (!owner) return send(res, 404, { error: 'escritório sem dono' });
+      try {
+        return send(res, 200, await secretaryTeamTool(o, owner, sub, body));
+      } catch (e) {
+        return send(res, e instanceof HttpError ? e.code : 400, { error: e.message });
+      }
+    }
     if (sub === 'note' && req.method === 'POST') {
       const nota = String(body.nota || '').trim();
       if (!nota) return send(res, 400, { error: 'nota vazia' });
@@ -427,7 +442,7 @@ function briefFor(o, project, folder) {
     // todo agente sabe onde está: a secretária recebe a visão do escritório; os outros, a da sua mesa
     office: {
       role: project.role === 'secretaria' ? 'secretaria' : 'mesa',
-      context: [project.role === 'secretaria' ? o.secretaryContext() : o.deskContext(project.id), o.varsContext(project.id)]
+      context: [project.role === 'secretaria' ? o.secretaryContext() + teamContext(o) : o.deskContext(project.id), o.varsContext(project.id)]
         .filter(Boolean).join('\n\n'),
     },
   };
@@ -978,6 +993,170 @@ async function officeApi(req, res, url, o, user) {
   send(res, 404, { error: 'rota desconhecida' });
 }
 
+// /api/community/{events|summary|general|dm/:id|read/:chat}
+async function communityApi(req, res, url, user) {
+  const [, , , part, id] = url.pathname.split('/');
+  const method = req.method;
+  if (part === 'events' && method === 'GET') return community.attach(user.id, req, res);
+  if (part === 'summary' && method === 'GET') return send(res, 200, community.summary(user));
+  const chat = part === 'general' ? 'general' : part === 'dm' ? id : null;
+  if (!chat) return send(res, 404, { error: 'rota desconhecida' });
+  if (method === 'GET') {
+    if (chat !== 'general' && !community.sameTeam(user, chat)) return send(res, 404, { error: 'pessoa não encontrada' });
+    return send(res, 200, community.history(user, chat, Number(url.searchParams.get('before')) || 0));
+  }
+  if (method === 'POST') {
+    const body = await readBody(req, 20e3);
+    try {
+      return send(res, 201, chat === 'general' ? community.sendGeneral(user, body.text) : community.sendDirect(user, chat, body.text));
+    } catch (e) {
+      return send(res, 400, { error: e.message });
+    }
+  }
+  if (method === 'PUT') { // marca a conversa como lida
+    community.markRead(user.id, chat);
+    community.save();
+    return send(res, 200, { ok: true });
+  }
+  send(res, 404, { error: 'rota desconhecida' });
+}
+
+// ---------- Equipe e tarefas ----------
+const TEAM_TOOLS = ['team', 'team-send', 'tasks', 'task', 'task-update', 'task-delegate'];
+const normName = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
+
+// Acha um colega de equipe pelo nome (ou e-mail). Erro se não achar ou se houver mais de um.
+function findMate(user, q) {
+  const k = normName(q);
+  const mates = auth.teamMembers(user).filter((u) => u.id !== user.id);
+  if (!k) throw new HttpError(400, 'informe a pessoa');
+  for (const test of [(n) => n === k, (n) => n.startsWith(k), (n) => n.includes(k)]) {
+    const hits = mates.filter((u) => [u.name, u.email].map(normName).some(test));
+    if (hits.length === 1) return hits[0];
+    if (hits.length > 1) throw new HttpError(400, `mais de uma pessoa combina com "${q}": ${hits.map((h) => h.name).join(', ')}`);
+  }
+  throw new HttpError(404, `ninguém da equipe chamado "${q}". Equipe: ${mates.map((m) => m.name).join(', ') || '(só você)'}`);
+}
+
+// Parte do prompt da secretária: equipe, ferramentas novas e tarefas abertas do dono.
+function teamContext(o) {
+  const owner = auth.db.users.find((u) => u.offices.includes(o.id));
+  if (!owner) return '';
+  const mates = auth.teamMembers(owner).filter((u) => u.id !== owner.id).map((u) => u.name);
+  const open = tasks.visible(owner).filter((t) => t.status !== 'done').slice(0, 30).map((t) => {
+    const v = taskView(t, owner);
+    return `- [${v.id}] ${v.titulo} · ${v.status} · prioridade ${v.prioridade}${v.prazo ? ` · prazo ${v.prazo}` : ''}` +
+      `${v.minha ? '' : ` · de ${v.criadaPor}`}${v.participantes.length ? ` · com ${v.participantes.join(', ')}` : ''}${v.delegadaPara ? ` · na mesa ${v.delegadaPara}` : ''}`;
+  });
+  return '\n\n' + [
+    '## Equipe e tarefas',
+    `Equipe de ${owner.name}: ${mates.join(', ') || '(só ele/ela)'}. Cada pessoa tem o próprio escritório; você pode mandar uma demanda para a secretária de um colega com enviar_para_pessoa ` +
+    '(ela chega como demanda da sua secretária; só use quando o usuário pedir). Tarefas ficam no módulo de Tarefas do hub: use listar_tarefas, criar_tarefa, ' +
+    'atualizar_tarefa (inclusive compartilhar com colegas) e delegar_tarefa (passa para um agente do escritório).',
+    '### Tarefas abertas', open.join('\n') || '(nenhuma)',
+  ].join('\n\n');
+}
+
+// A tarefa como a secretária enxerga.
+const taskView = (t, user) => ({
+  id: t.id, titulo: t.title, descricao: t.description, status: t.status, prioridade: t.priority, prazo: t.due, bitrix: t.bitrix || undefined,
+  criadaPor: t.byName, minha: t.by === user.id,
+  participantes: t.people.map((id) => auth.findUser(id)?.name).filter(Boolean),
+  delegadaPara: t.delegations.at(-1)?.desk || undefined,
+});
+
+// Passa a tarefa para uma mesa do escritório (do usuário) e anota na tarefa.
+async function delegateTask(o, user, task, deskKey) {
+  const found = o.findDesk(deskKey);
+  const project = found.project || o.state.projects.find((p) => p.id === deskKey);
+  if (!project) throw new HttpError(404, found.error);
+  const r = await delegate(o, project, briefOf(task), { from: `${user.name} (tarefa)` });
+  tasks.noteDelegation(user, task, project.name);
+  return { mesa: project.name, agente: o.agentOf(project.id)?.name || null, ...r };
+}
+
+async function secretaryTeamTool(o, user, sub, body) {
+  if (sub === 'team') {
+    return auth.teamMembers(user).filter((u) => u.id !== user.id).map((u) => ({
+      nome: u.name, secretaria: getOffice(u.offices[0]).state.projects.some((p) => p.role === 'secretaria'),
+    }));
+  }
+  if (sub === 'team-send') {
+    // demanda para a secretária de outra pessoa da equipe (cai na mesa dela e segue o fluxo normal)
+    const mate = findMate(user, body.pessoa);
+    const pedido = String(body.pedido || '').trim();
+    if (!pedido) throw new HttpError(400, 'o pedido está vazio');
+    const other = getOffice(mate.offices[0]);
+    const sec = other.state.projects.find((p) => p.role === 'secretaria');
+    if (!sec) throw new HttpError(404, `${mate.name} ainda não tem uma secretária no escritório`);
+    const r = await delegate(other, sec, pedido, { from: `secretária de ${user.name}` });
+    return { para: mate.name, ...r };
+  }
+  if (sub === 'tasks') return tasks.visible(user).filter((t) => !body.status || t.status === body.status).map((t) => taskView(t, user));
+  if (sub === 'task') {
+    const people = [].concat(body.com || []).map((n) => findMate(user, n).id);
+    return taskView(tasks.create(user, { title: body.titulo, description: body.descricao, priority: body.prioridade, due: body.prazo, bitrix: body.bitrix, people }), user);
+  }
+  if (sub === 'task-update') {
+    const t = tasks.get(user, body.id);
+    const changes = { title: body.titulo, description: body.descricao, status: body.status, priority: body.prioridade, due: body.prazo, bitrix: body.bitrix };
+    if (body.com) changes.people = [...new Set([...t.people, ...[].concat(body.com).map((n) => findMate(user, n).id)])];
+    return taskView(tasks.update(user, body.id, Object.fromEntries(Object.entries(changes).filter(([, v]) => v !== undefined))), user);
+  }
+  if (sub === 'task-delegate') return delegateTask(o, user, tasks.get(user, body.id), body.mesa);
+}
+
+// Resumo (só leitura) do escritório de um colega: a dona do hub visita sem mexer em nada.
+function officeSummary(o) {
+  return {
+    rooms: o.state.rooms.map((r) => ({ id: r.id, name: r.name })),
+    desks: o.state.projects.map((p) => {
+      const a = o.agentOf(p.id);
+      return {
+        name: p.name, description: p.description || '', roomId: p.roomId, secretaria: p.role === 'secretaria', ocupada: !!o.live[p.id],
+        agent: a ? { name: a.name, role: a.role, status: a.status, message: a.message } : null, naFila: o.state.queue[p.id]?.length || 0,
+      };
+    }),
+  };
+}
+
+async function teamApi(req, res, url, user) {
+  const [, , , id, sub] = url.pathname.split('/');
+  if (!id && req.method === 'GET') {
+    return send(res, 200, auth.teamMembers(user).filter((u) => u.id !== user.id).map((u) => ({ id: u.id, name: u.name, isOwner: !!u.isOwner })));
+  }
+  if (sub === 'office' && req.method === 'GET') {
+    if (!user.isOwner) return send(res, 403, { error: 'só a dona do hub visita os escritórios da equipe' });
+    const mate = auth.findUser(id);
+    if (!mate || mate.id === user.id || mate.teamId !== user.teamId) return send(res, 404, { error: 'pessoa não encontrada' });
+    return send(res, 200, { name: mate.name, ...officeSummary(getOffice(mate.offices[0])) });
+  }
+  send(res, 404, { error: 'rota desconhecida' });
+}
+
+// /api/tasks[/:id[/delegate]]
+async function tasksApi(req, res, url, user) {
+  const [, , , id, sub] = url.pathname.split('/');
+  const o = getOffice(user.offices[0]);
+  try {
+    if (!id && req.method === 'GET') {
+      return send(res, 200, { tasks: tasks.visible(user), people: auth.teamMembers(user).filter((u) => u.id !== user.id).map((u) => ({ id: u.id, name: u.name })) });
+    }
+    if (!id && req.method === 'POST') return send(res, 201, tasks.create(user, await readBody(req, 50e3)));
+    if (id && sub === 'delegate' && req.method === 'POST') {
+      return send(res, 200, await delegateTask(o, user, tasks.get(user, id), (await readBody(req, 10e3)).mesa));
+    }
+    if (id && req.method === 'PATCH') return send(res, 200, tasks.update(user, id, await readBody(req, 50e3)));
+    if (id && req.method === 'DELETE') {
+      tasks.remove(user, id);
+      return send(res, 204, {});
+    }
+  } catch (e) {
+    return send(res, e instanceof HttpError ? e.code : 400, { error: e.message });
+  }
+  send(res, 404, { error: 'rota desconhecida' });
+}
+
 async function api(req, res, url) {
   const [, , resource, id, action] = url.pathname.split('/');
 
@@ -1002,6 +1181,10 @@ async function api(req, res, url) {
 
   const user = auth.userForSession(cookies(req)[COOKIE]);
   if (!user) return send(res, 401, { error: 'faça login' });
+  // chat da comunidade: único dado compartilhado entre contas (não passa pelo escritório)
+  if (resource === 'community') return communityApi(req, res, url, user);
+  if (resource === 'team') return teamApi(req, res, url, user);
+  if (resource === 'tasks') return tasksApi(req, res, url, user);
   return officeApi(req, res, url, getOffice(user.offices[0]), user);
 }
 

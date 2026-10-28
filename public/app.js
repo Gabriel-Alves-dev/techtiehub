@@ -834,6 +834,7 @@ async function boot() {
   me = status.user;
   document.getElementById('login').hidden = true;
   connect();
+  connectCommunity();
 }
 
 // setup: ainda não há conta; needCode: o hub está exposto e a primeira conta pede o código de instalação
@@ -2248,6 +2249,269 @@ document.getElementById('btn-more').addEventListener('click', (e) => {
 });
 moreMenu.addEventListener('click', (e) => { if (e.target.closest('button')) moreMenu.hidden = true; });
 document.addEventListener('click', (e) => { if (!moreMenu.hidden && !e.target.closest('.menu')) moreMenu.hidden = true; });
+
+// ---------- Chat da comunidade ----------
+// Sala geral + conversas individuais entre contas. Canal próprio (SSE), separado do escritório.
+const comm = { people: [], unread: { general: 0, dm: {} }, active: 'general', msgs: {}, stream: null };
+
+const commUnreadTotal = () => comm.unread.general + Object.values(comm.unread.dm).reduce((a, b) => a + b, 0);
+
+function renderCommBadge() {
+  const n = commUnreadTotal();
+  document.getElementById('btn-community').textContent = '💬 Comunidade' + (n ? ` (${n > 99 ? '99+' : n})` : '');
+  document.getElementById('btn-more').textContent = '☰ Mais' + (n ? ' •' : '');
+}
+
+async function loadCommunity() {
+  try {
+    Object.assign(comm, await api('GET', '/api/community/summary', undefined, { quiet: true }));
+  } catch { return; }
+  renderCommBadge();
+  const win = wins.get('community');
+  if (win) renderCommTabs(win);
+}
+
+function connectCommunity() {
+  comm.stream?.close();
+  comm.stream = new EventSource('/api/community/events');
+  comm.stream.addEventListener('msg', (e) => onCommMessage(JSON.parse(e.data)));
+  comm.stream.addEventListener('tasks', () => { const w = wins.get('tasks'); if (w) loadTasks(w); });
+  // ao (re)conectar, recupera o que passou enquanto estava fora
+  comm.stream.onopen = async () => {
+    await loadCommunity();
+    const win = wins.get('community');
+    if (win) loadCommChat(win, comm.active);
+  };
+}
+
+const commUnreadOf = (key) => (key === 'general' ? comm.unread.general : comm.unread.dm[key] || 0);
+
+function onCommMessage({ chat, from, to, msg }) {
+  const key = chat === 'general' ? 'general' : from === me.id ? to : from;
+  if (chat === 'dm' && !comm.people.some((p) => p.id === key)) loadCommunity();
+  if (comm.msgs[key] && !comm.msgs[key].some((m) => m.id === msg.id)) comm.msgs[key].push(msg);
+  const win = wins.get('community');
+  const watching = win && !win.minimized && comm.active === key && !document.hidden;
+  if (msg.from !== me.id) {
+    if (watching) api('PUT', `/api/community/${key === 'general' ? 'general' : 'dm/' + key}`, {}, { quiet: true }).catch(() => {});
+    else if (key === 'general') comm.unread.general++;
+    else comm.unread.dm[key] = (comm.unread.dm[key] || 0) + 1;
+  }
+  if (win && comm.active === key) renderCommLog(win);
+  if (win) renderCommTabs(win);
+  renderCommBadge();
+}
+
+const commPath = (key) => (key === 'general' ? '/api/community/general' : `/api/community/dm/${key}`);
+
+function renderCommTabs(win) {
+  const tab = (key, label) => {
+    const n = commUnreadOf(key);
+    return `<button class="comm-tab ${comm.active === key ? 'on' : ''}" data-chat="${esc(key)}">${esc(label)}${n ? ` <b>${n}</b>` : ''}</button>`;
+  };
+  win.body.querySelector('.comm-tabs').innerHTML =
+    tab('general', '# Geral') + comm.people.map((p) => tab(p.id, p.name)).join('');
+  // a dona do hub visita o escritório de quem está na conversa aberta
+  const visit = win.body.querySelector('.comm-visit');
+  const person = me?.isOwner && comm.people.find((p) => p.id === comm.active);
+  visit.hidden = !person;
+  visit.onclick = () => person && openVisitWindow(person);
+  if (person) visit.textContent = `🏢 Visitar escritório de ${person.name}`;
+}
+
+function renderCommLog(win) {
+  const log = win.body.querySelector('.comm-log');
+  const list = comm.msgs[comm.active];
+  const atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
+  if (!list) { log.innerHTML = '<p class="muted">Carregando…</p>'; return; }
+  const dm = comm.active !== 'general';
+  log.innerHTML = list.length ? list.map((m) => {
+    const mine = m.from === me.id;
+    const time = new Date(m.t).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    return `<div class="msg ${mine ? 'msg-user' : 'msg-assistant'}">${!mine && !dm ? `<b class="comm-name">${esc(m.name)}</b>` : ''}${esc(m.text)}<time class="comm-time">${time}</time></div>`;
+  }).join('') : `<p class="muted">${dm ? 'Nenhuma mensagem ainda. Diga oi!' : 'A sala está quieta. Comece a conversa!'}</p>`;
+  if (atEnd || win.stickBottom) log.scrollTop = log.scrollHeight;
+  win.stickBottom = false;
+}
+
+async function loadCommChat(win, key) {
+  comm.active = key;
+  win.stickBottom = true;
+  renderCommTabs(win);
+  renderCommLog(win);
+  try {
+    comm.msgs[key] = await api('GET', commPath(key), undefined, { quiet: true });
+  } catch { return; }
+  if (comm.active !== key) return; // trocou de conversa enquanto carregava
+  renderCommLog(win);
+  if (commUnreadOf(key)) {
+    if (key === 'general') comm.unread.general = 0;
+    else delete comm.unread.dm[key];
+    renderCommTabs(win);
+    renderCommBadge();
+    api('PUT', commPath(key), {}, { quiet: true }).catch(() => {});
+  }
+  win.body.querySelector('textarea').placeholder = key === 'general'
+    ? 'Mensagem para todos… (Enter envia, Shift+Enter quebra a linha)'
+    : `Mensagem para ${comm.people.find((p) => p.id === key)?.name || ''}…`;
+}
+
+function openCommunityWindow() {
+  const win = openWindow('community', { w: 520, h: 560, cls: 'win-community' }, (win) => {
+    win.titleEl.textContent = '💬 Comunidade';
+    win.body.innerHTML = `
+      <div class="comm-tabs"></div>
+      <button class="comm-visit" hidden></button>
+      <div class="chat-log comm-log"></div>
+      <form class="chat-input">
+        <textarea rows="2" maxlength="2000"></textarea>
+        <div class="row"><button class="primary">Enviar</button></div>
+      </form>`;
+    const form = win.body.querySelector('form');
+    const box = form.querySelector('textarea');
+    win.body.querySelector('.comm-tabs').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-chat]');
+      if (b) loadCommChat(win, b.dataset.chat);
+    });
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const text = box.value.trim();
+      if (!text) return;
+      const key = comm.active;
+      box.value = '';
+      try {
+        const msg = await api('POST', commPath(key), { text });
+        // o servidor também manda pelo SSE; o id evita duplicar
+        if (comm.msgs[key] && !comm.msgs[key].some((m) => m.id === msg.id)) comm.msgs[key].push(msg);
+        win.stickBottom = true;
+        if (comm.active === key) renderCommLog(win);
+      } catch { box.value = text; }
+    };
+    box.addEventListener('keydown', (e) => {
+      // no celular o Enter quebra a linha (o botão envia); no PC o Enter envia
+      if (e.key === 'Enter' && !e.shiftKey && !matchMedia('(pointer: coarse)').matches) { e.preventDefault(); form.requestSubmit(); }
+    });
+    loadCommunity().then(() => loadCommChat(win, comm.active));
+  });
+  return win;
+}
+
+document.getElementById('btn-community').onclick = () => openCommunityWindow();
+
+// ---------- Visita (só a dona do hub) ----------
+// Resumo só de leitura do escritório de um colega: mesas, agentes e o que estão fazendo.
+async function openVisitWindow(person) {
+  const data = await api('GET', `/api/team/${person.id}/office`);
+  const win = openWindow('visit-' + person.id, { w: 460, h: 520 }, (win) => { win.titleEl.textContent = `🏢 Escritório de ${person.name}`; });
+  const desk = (d) => `<div class="log-item"><b>${esc(d.name)}</b>${d.secretaria ? ' 🗂️' : ''} ${d.agent ? badge(d.ocupada ? 'trabalhando' : d.agent.status) : '<span class="muted">sem agente</span>'}
+    <br><span class="muted">${d.agent ? esc(d.agent.name) + (d.agent.role ? ' · ' + esc(d.agent.role) : '') : ''}${d.naFila ? ` · ${d.naFila} na fila` : ''}</span>
+    ${d.agent?.message ? `<br>${esc(d.agent.message)}` : ''}</div>`;
+  win.body.innerHTML = '<p class="muted">Visita somente leitura.</p>' + data.rooms.map((r) =>
+    `<h3>${esc(r.name)}</h3>${data.desks.filter((d) => d.roomId === r.id).map(desk).join('') || '<p class="muted">Sem mesas.</p>'}`).join('');
+}
+
+// ---------- Tarefas ----------
+const tk = { tasks: [], people: [], filter: 'open' };
+const TASK_STATUS = { todo: 'A fazer', doing: 'Em andamento', done: 'Concluída' };
+
+async function loadTasks(win) {
+  // não recria a lista enquanto a pessoa digita dentro dela
+  if (win.body.querySelector('.task-list :focus')) { win.dirty = true; return; }
+  const r = await api('GET', '/api/tasks', undefined, { quiet: true }).catch(() => null);
+  if (!r) return;
+  Object.assign(tk, r);
+  win.dirty = false;
+  renderTasks(win);
+}
+
+function taskCard(t) {
+  const mine = t.by === me.id;
+  const who = [mine ? null : `de ${t.byName}`, ...t.people.map((id) => (id === me.id ? 'você' : tk.people.find((p) => p.id === id)?.name)).filter(Boolean)].filter(Boolean);
+  const last = t.delegations.at(-1);
+  const desks = state.projects.filter((p) => p.agentId || p.role === 'secretaria');
+  return `<details class="task st-${t.status}" data-id="${esc(t.id)}">
+    <summary><span class="task-title">${esc(t.title)}</span>
+      <span class="muted">${esc(TASK_STATUS[t.status])}${t.priority === 'alta' ? ' · 🔺 alta' : ''}${t.due ? ' · ' + esc(t.due.split('-').reverse().join('/')) : ''}${who.length ? ' · ' + esc(who.join(', ')) : ''}${last ? ' · 🤖 ' + esc(last.desk) : ''}</span></summary>
+    <label>Título<input data-f="title" value="${esc(t.title)}" maxlength="200" /></label>
+    <label>Detalhes<textarea data-f="description" rows="3">${esc(t.description)}</textarea></label>
+    <div class="colors">
+      <label>Status<select data-f="status">${Object.entries(TASK_STATUS).map(([k, v]) => `<option value="${k}" ${k === t.status ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+      <label>Prioridade<select data-f="priority">${['baixa', 'normal', 'alta'].map((k) => `<option ${k === t.priority ? 'selected' : ''}>${k}</option>`).join('')}</select></label>
+      <label>Prazo<input data-f="due" type="date" value="${esc(t.due || '')}" /></label>
+    </div>
+    <label>Bitrix (link ou número)<input data-f="bitrix" value="${esc(t.bitrix)}" maxlength="200" /></label>
+    ${mine && tk.people.length ? `<div class="task-people muted">Compartilhar com: ${tk.people.map((p) =>
+      `<label class="inline"><input type="checkbox" data-person="${esc(p.id)}" ${t.people.includes(p.id) ? 'checked' : ''} /> ${esc(p.name)}</label>`).join(' ')}</div>` : ''}
+    <div class="row">
+      <select data-f-desk><option value="">Delegar a um agente…</option>${desks.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}${p.role === 'secretaria' ? ' (secretária)' : ''}</option>`).join('')}</select>
+      ${mine ? '<button class="danger" data-act="del">Apagar</button>' : ''}
+    </div>
+    ${t.delegations.length ? `<p class="muted">${t.delegations.map((d) => `${esc(d.byName)} passou para ${esc(d.desk)} (${timeAgo(d.at)})`).join('<br>')}</p>` : ''}
+  </details>`;
+}
+
+function renderTasks(win) {
+  const open = new Set([...win.body.querySelectorAll('.task[open]')].map((d) => d.dataset.id)); // mantém abertas
+  const shown = tk.tasks.filter((t) => tk.filter === 'all' || (tk.filter === 'done') === (t.status === 'done'))
+    .sort((a, b) => (a.status === 'done') - (b.status === 'done') || (a.due || '9') .localeCompare(b.due || '9') || b.updatedAt - a.updatedAt);
+  const list = win.body.querySelector('.task-list');
+  list.innerHTML = shown.map(taskCard).join('') || '<p class="muted">Nenhuma tarefa por aqui.</p>';
+  for (const d of list.querySelectorAll('.task')) if (open.has(d.dataset.id)) d.open = true;
+  for (const b of win.body.querySelectorAll('[data-filter]')) b.classList.toggle('on', b.dataset.filter === tk.filter);
+}
+
+function openTasksWindow() {
+  const win = openWindow('tasks', { w: 520, h: 600, cls: 'win-tasks' }, (win) => {
+    win.titleEl.textContent = '📋 Tarefas';
+    win.body.innerHTML = `
+      <form class="task-new"><input name="title" placeholder="Nova tarefa…" maxlength="200" required />
+        <button class="primary">Adicionar</button></form>
+      <div class="comm-tabs">${[['open', 'Abertas'], ['done', 'Concluídas'], ['all', 'Todas']].map(([k, v]) => `<button class="comm-tab" data-filter="${k}">${v}</button>`).join('')}</div>
+      <div class="task-list"></div>`;
+    const q = (s) => win.body.querySelector(s);
+    q('.task-new').onsubmit = async (e) => {
+      e.preventDefault();
+      const title = e.target.title.value;
+      e.target.reset();
+      await api('POST', '/api/tasks', { title });
+      loadTasks(win);
+    };
+    win.body.addEventListener('click', (e) => {
+      const f = e.target.closest('[data-filter]');
+      if (f) { tk.filter = f.dataset.filter; renderTasks(win); }
+    });
+    const list = q('.task-list');
+    const idOf = (el) => el.closest('.task').dataset.id;
+    list.addEventListener('change', async (e) => {
+      const el = e.target;
+      const id = idOf(el);
+      try {
+        if (el.dataset.f) await api('PATCH', `/api/tasks/${id}`, { [el.dataset.f]: el.value });
+        else if (el.dataset.person) {
+          const t = tk.tasks.find((x) => x.id === id);
+          const people = new Set(t.people);
+          el.checked ? people.add(el.dataset.person) : people.delete(el.dataset.person);
+          await api('PATCH', `/api/tasks/${id}`, { people: [...people] });
+        } else if ('fDesk' in el.dataset) {
+          if (!el.value) return;
+          const r = await api('POST', `/api/tasks/${id}/delegate`, { mesa: el.value });
+          alert(r.naFila ? `Entrou na fila de ${r.mesa} (${r.motivo}).` : `${r.mesa} começou a trabalhar nisso.`);
+        }
+      } catch {}
+      win.dirty = false;
+      loadTasks(win);
+    });
+    list.addEventListener('click', async (e) => {
+      if (e.target.dataset.act !== 'del') return;
+      if (confirm('Apagar esta tarefa para todos que a veem?')) { await api('DELETE', `/api/tasks/${idOf(e.target)}`); loadTasks(win); }
+    });
+    list.addEventListener('focusout', () => setTimeout(() => { if (win.dirty) loadTasks(win); }, 200));
+    loadTasks(win);
+  });
+  return win;
+}
+
+document.getElementById('btn-tasks').onclick = () => openTasksWindow();
 
 // ---------- Início ----------
 boot();
