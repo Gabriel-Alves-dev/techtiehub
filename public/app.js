@@ -32,6 +32,7 @@ let preferredEnv = load('hub.env'); // PC escolhido neste navegador para executa
 const runtime = new Map(); // agentId -> posição/animação
 let selected = null; // { kind: 'project', id } — mesa da janela em foco
 let hover = null;
+let monitor = { hosts: [], configured: false, denied: false, at: 0 }; // resumo dos servidores (só a dona do hub)
 let moveMode = false; // modo de mover mesas
 let moving = null; // mesa sendo arrastada: { id, from, to, wx, wy }
 
@@ -49,6 +50,7 @@ const roomProjects = (rid = currentRoom()?.id) => state.projects.filter((p) => p
 
 // Agentes desta sala: os que têm mesa aqui + os sem mesa (ficam no lounge da primeira sala).
 function visibleAgents() {
+  if (currentRoom()?.kind === 'servidor') return [];
   const first = currentRoom() === state.rooms[0];
   return state.agents.filter((a) => {
     const desk = deskOf(a.id);
@@ -75,8 +77,23 @@ function layoutSlots(cols) {
   return { slotOf, byslot, free: nextFree() };
 }
 
+// Sala de servidores: um rack por VPS que envia dados, lado a lado. Sem mesas, agentes nem áreas.
+function serverWorld(room) {
+  const n = Math.max(1, monitor.hosts.length);
+  const W = Math.max(14, n * 4 + 3), H = WALL_H + 9;
+  const bottom = (H - 1) * T;
+  return {
+    server: true, cols: 1, rows: 1, W, H, L: (W - 1) * T, top: WALL_H * T, bottom, mid: (WALL_H * T + bottom) / 2,
+    spots: [], blocks: [], floor: room.floor || 'escuro', wall: room.wall || 'cinza',
+    slotOf: new Map(), byslot: new Map(), newSlot: -1,
+    rackX0: 1 + Math.floor(((W - 2) - (n * 4 - 1)) / 2),
+    trunkX: (W - 2) * T, door: { x: (W - 2) * T, y: bottom + 0.6 * T },
+  };
+}
+
 function computeWorld() {
   const room = currentRoom();
+  if (room?.kind === 'servidor') return serverWorld(room);
   const cols = room?.cols || 4;
   const { slotOf, byslot, free } = layoutSlots(cols);
   const loungeX = DESK_X0 + cols * CELL_W;
@@ -223,6 +240,7 @@ function applyState(next) {
   if (selected && !state.projects.some((p) => p.id === selected.id)) selected = null;
   resize();
   refreshUI();
+  if (currentRoom()?.kind === 'servidor' && Date.now() - monitor.at > 5000) loadMonitor();
   // localhost:4321/#<id-da-mesa> já abre a conversa daquela mesa
   if (firstLoad && state.projects.some((p) => p.id === location.hash.slice(1))) openProjectWindow(location.hash.slice(1));
 }
@@ -243,6 +261,7 @@ function switchRoom(id) {
   runtime.clear();
   world = computeWorld();
   syncRuntime(true);
+  loadMonitor();
   wrap.scrollTo(0, 0);
   resize();
   refreshUI();
@@ -392,7 +411,7 @@ function drawRoom(now) {
   }
 
   // relógio de verdade no lounge
-  const cx = L + 3.5 * T, cy = 1.3 * T;
+  const cx = world.server ? (W - 3) * T : L + 3.5 * T, cy = 1.3 * T;
   ctx.fillStyle = '#e8eaf2';
   ctx.beginPath(); ctx.arc(cx, cy, 9, 0, Math.PI * 2); ctx.fill();
   const d = new Date();
@@ -593,6 +612,70 @@ function drawRest({ y0 }, now, occupied) {
   rect(ax + 3, ay + 7, 10, 8, playing ? ['#3fbf7f', '#f2a93b', '#4f8cff', '#e5534b'][Math.floor(now / 180) % 4] : '#111');
   rect(ax + 2, ay + 18, 12, 3, '#1c1c24');
 }
+
+// ---------- Sala de servidores ----------
+const MON_COLOR = { ok: '#3fbf7f', atencao: '#f2a93b', critico: '#e5534b', 'sem-sinal': '#6b7088' };
+const MON_LABEL = { ok: 'OK', atencao: 'ATENCAO', critico: 'CRITICO', 'sem-sinal': 'SEM SINAL' }; // sem acento: a fonte pixel não tem
+const level = (v, warn, crit) => (v == null ? '#6b7088' : v >= crit ? MON_COLOR.critico : v >= warn ? MON_COLOR.atencao : MON_COLOR.ok);
+const RACK_W = 3 * T, RACK_H = 6 * T;
+const rackPos = (i) => ({ x: (world.rackX0 + i * 4) * T, y: (WALL_H + 1) * T });
+
+function drawRacks(now) {
+  if (!monitor.hosts.length) {
+    const { x, y } = rackPos(0);
+    ctx.strokeStyle = '#ffffff55'; ctx.setLineDash([4, 3]); ctx.lineWidth = 1;
+    ctx.strokeRect(x + 0.5, y + 0.5, RACK_W, RACK_H);
+    ctx.setLineDash([]);
+    const msg = monitor.denied ? 'SÓ A DONA DO HUB VÊ' : monitor.configured ? 'AGUARDANDO DADOS' : 'SEM MONITOR';
+    text(msg, x + RACK_W / 2, y + RACK_H / 2, 7, '#ffffffaa');
+    text('CLIQUE PARA CONFIGURAR', x + RACK_W / 2, y + RACK_H + 10, 6, '#ffffff77');
+    return;
+  }
+  monitor.hosts.forEach((h, i) => {
+    const { x, y } = rackPos(i);
+    const stale = h.status === 'sem-sinal';
+    const isHover = hover?.kind === 'rack' && hover.host === h.host;
+    rect(x - 2, y - 2, RACK_W + 4, RACK_H + 4, isHover ? '#ffffff' : '#0d0f17');
+    rect(x, y, RACK_W, RACK_H, '#1c1f2b');
+    // seis unidades: CPU, memória, disco, PM2, Docker e systemd, cada uma com a cor do seu estado
+    const unit = [
+      [level(h.cpu, 75, 90), h.cpu == null ? 0 : Math.min(1, h.cpu / 100)],
+      [level(h.mem, 80, 90), h.mem == null ? 0 : h.mem / 100],
+      [level(h.disk, 80, 90), h.disk == null ? 0 : h.disk / 100],
+      [h.pm2.errored.count ? MON_COLOR.critico : h.pm2.highRestarts.count ? MON_COLOR.atencao : MON_COLOR.ok, null],
+      [h.docker.unhealthy.count ? MON_COLOR.critico : MON_COLOR.ok, null],
+      [h.systemd.failed.count ? MON_COLOR.critico : MON_COLOR.ok, null],
+    ];
+    unit.forEach(([color, fill], u) => {
+      const uy = y + 3 + u * 15;
+      rect(x + 3, uy, RACK_W - 6, 12, '#2a2f45');
+      if (fill != null) rect(x + 12, uy + 4, Math.round((RACK_W - 18) * fill), 4, stale ? '#4a4f66' : color);
+      else rect(x + 12, uy + 4, RACK_W - 18, 4, '#171a26');
+      // LED: pisca em ritmo próprio; em alarme pisca rápido; sem sinal fica apagado
+      const on = stale ? false : color === MON_COLOR.critico ? Math.floor(now / 250) % 2 === 0 : Math.floor(now / (700 + u * 130) + i) % 5 !== 0;
+      rect(x + 5, uy + 4, 4, 4, stale ? '#33364a' : on ? color : '#1c1f2b');
+    });
+    // faixa de status no pé do rack
+    rect(x + 3, y + RACK_H - 9, RACK_W - 6, 6, stale ? '#33364a' : MON_COLOR[h.status]);
+    text(truncate(h.host.toUpperCase(), 12), x + RACK_W / 2, y + RACK_H + 10, 7, '#fff');
+    text(MON_LABEL[h.status], x + RACK_W / 2, y + RACK_H + 20, 6, MON_COLOR[h.status]);
+  });
+}
+
+async function loadMonitor() {
+  if (currentRoom()?.kind !== 'servidor') return;
+  monitor.at = Date.now();
+  try {
+    const d = await api('GET', '/api/monitor', null, { quiet: true });
+    const changed = d.hosts.length !== monitor.hosts.length;
+    monitor = { hosts: d.hosts, configured: d.configured, denied: false, at: Date.now() };
+    if (changed && world?.server) { world = computeWorld(); resize(); }
+  } catch (e) {
+    if (e.status === 403) monitor = { hosts: [], configured: false, denied: true, at: Date.now() };
+  }
+  wins.get('monitor')?.render?.(wins.get('monitor'));
+}
+setInterval(loadMonitor, 15000);
 
 function drawDesk(i, now) {
   const project = world.byslot.get(i);
@@ -802,7 +885,8 @@ function draw(now) {
   ctx.setTransform(SCALE, 0, 0, SCALE, 0, 0);
   ctx.imageSmoothingEnabled = false;
   drawRoom(now);
-  for (let i = 0; i < world.rows * world.cols; i++) drawDesk(i, now);
+  if (world.server) drawRacks(now);
+  else for (let i = 0; i < world.rows * world.cols; i++) drawDesk(i, now);
   const hour = new Date().getHours();
   if (hour >= 19 || hour < 5) { ctx.globalAlpha = 0.16; rect(0, 0, world.W * T, world.H * T, '#0d1440'); ctx.globalAlpha = 1; }
   const furniture = roomDecor().filter((d) => DECOR_META[d.type]?.layer === 'piso' && decorFits(d)).sort((p, q) => p.y - q.y);
@@ -954,6 +1038,14 @@ function hitTest(ev) {
   for (const [a, rt] of ordered) {
     if (wx > rt.x - 8 && wx < rt.x + 8 && wy > rt.y - 24 && wy < rt.y + 2) return { kind: 'agent', id: a.id };
   }
+  if (world.server) {
+    const n = Math.max(1, monitor.hosts.length);
+    for (let i = 0; i < n; i++) {
+      const { x, y } = rackPos(i);
+      if (wx > x && wx < x + RACK_W && wy > y && wy < y + RACK_H + 22) return { kind: 'rack', host: monitor.hosts[i]?.host || null };
+    }
+    return null;
+  }
   for (let i = 0; i < world.rows * world.cols; i++) {
     const c = cellOf(i);
     if (wx > c.x + 0.5 * T && wx < c.x + 4.5 * T && wy > c.y + 0.5 * T && wy < c.y + 4.3 * T) {
@@ -973,7 +1065,10 @@ canvas.addEventListener('mousemove', (ev) => {
   canvas.style.cursor = hover ? 'pointer' : 'default';
   if (!hover || hover.kind === 'slot') { tooltip.hidden = true; return; }
   let html;
-  if (hover.kind === 'agent') {
+  if (hover.kind === 'rack') {
+    const h = monitor.hosts.find((x) => x.host === hover.host);
+    html = h ? `<b>${esc(h.host)}</b><br>${MON_LABEL[h.status]} · CPU ${h.cpu ?? '?'}% · RAM ${h.mem ?? '?'}% · disco ${h.disk ?? '?'}%` : 'Monitor de servidores';
+  } else if (hover.kind === 'agent') {
     const a = state.agents.find((x) => x.id === hover.id);
     html = `<b>${esc(a.name)}</b> · ${esc(a.role || '')}<br>${STATUS[a.status]?.label || ''}${a.message ? ' — ' + esc(a.message) : ''}`;
   } else {
@@ -995,6 +1090,7 @@ canvas.addEventListener('click', (ev) => {
   if (moveMode) return;
   const hit = hitTest(ev);
   if (!hit) return;
+  if (hit.kind === 'rack') return openMonitorWindow(hit.host);
   if (hit.kind === 'slot') return openProjectDialog();
   if (hit.kind === 'project') return openProjectWindow(hit.id);
   const a = state.agents.find((x) => x.id === hit.id);
@@ -2377,6 +2473,65 @@ function openLogWindow() {
   win.render(win);
 }
 
+// ---------- Janela do monitor de servidores ----------
+const since = (ms) => {
+  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  return s < 90 ? `${s}s` : s < 5400 ? `${Math.round(s / 60)} min` : `${Math.round(s / 3600)} h`;
+};
+const uptimeText = (s) => (s == null ? '—' : s >= 86400 ? `${Math.floor(s / 86400)} d ${Math.floor(s % 86400 / 3600)} h` : `${Math.floor(s / 3600)} h ${Math.floor(s % 3600 / 60)} min`);
+
+// lista de itens com problema: nomes (se o monitor os envia) ou só a contagem
+const monItems = (label, g) => `<div class="sub">${label}: ${!g.count ? '<span style="color:var(--ok)">nenhum</span>'
+  : g.names.length ? `<b>${g.names.map(esc).join(', ')}</b>` : `<b>${g.count}</b> (o monitor não envia os nomes)`}</div>`;
+
+function renderMonitor(win) {
+  const hosts = [...monitor.hosts].sort((a, b) => (a.host === win.first ? -1 : b.host === win.first ? 1 : 0));
+  const url = location.origin + '/api/monitor/report';
+  win.body.innerHTML = monitor.denied ? '<p class="muted">Só a dona do hub vê o monitor de servidores.</p>' : `
+    ${hosts.map((h) => `<div class="card" style="border-left:4px solid ${MON_COLOR[h.status]}">
+      <div class="title mono">${esc(h.host)} <span class="badge" style="background:${MON_COLOR[h.status]};color:#000">${MON_LABEL[h.status]}</span></div>
+      <div class="sub">Último envio há ${since(h.at)} (a cada ${h.interval}s) · ligado há ${uptimeText(h.uptime)}</div>
+      <div class="sub">CPU (carga ÷ vCPUs) <b>${h.cpu ?? '—'}%</b> · memória <b>${h.mem ?? '—'}%</b> · disco <b>${h.disk ?? '—'}%</b></div>
+      <div class="sub">PM2: ${h.pm2.total} processos · Docker: ${h.docker.total} containers · systemd: ${h.systemd.total ?? '—'} serviços · portas expostas: ${h.ports.exposed ?? '—'}</div>
+      ${monItems('PM2 com erro', h.pm2.errored)}
+      ${monItems('PM2 com muitos reinícios (acumulados desde o boot)', h.pm2.highRestarts)}
+      ${monItems('Containers unhealthy', h.docker.unhealthy)}
+      ${monItems('Serviços systemd em falha', h.systemd.failed)}
+    </div>`).join('') || '<p class="muted">Nenhum servidor enviou dados ainda.</p>'}
+    <h3>Conexão</h3>
+    <p class="muted">A VPS envia um resumo para o hub (o hub nunca acessa a VPS). Endereço:
+      <code>${esc(url)}</code><br>Cabeçalho: <code>Authorization: Bearer &lt;segredo&gt;</code>, JSON de até 16 KB.</p>
+    ${win.secret ? `<div class="card"><div class="sub"><b>Segredo (aparece só agora — copie e guarde na VPS, não no chat):</b></div>
+      <div class="title mono" style="word-break:break-all;user-select:all">${esc(win.secret)}</div></div>` : ''}
+    <div class="row"><button class="primary" data-act="secret">${monitor.configured ? 'Gerar novo segredo' : 'Gerar segredo'}</button>
+      ${monitor.configured ? '<button class="danger" data-act="revoke">Revogar</button>' : ''}</div>`;
+}
+
+function openMonitorWindow(host) {
+  const win = openWindow('monitor', { w: 520, h: 620, cls: 'win-vars' }, (win) => {
+    win.titleEl.textContent = '🖥️ Servidores';
+    win.render = renderMonitor;
+    win.body.onclick = async (e) => {
+      const act = e.target.dataset.act;
+      if (act === 'secret') {
+        if (monitor.configured && !confirm('Gerar um novo segredo? O monitor atual deixa de ser aceito até você trocar o segredo nele.')) return;
+        win.secret = (await api('POST', '/api/monitor/secret')).secret;
+        monitor.configured = true;
+      } else if (act === 'revoke') {
+        if (!confirm('Revogar o segredo? O monitor para de enviar dados e os racks somem.')) return;
+        await api('DELETE', '/api/monitor/secret');
+        win.secret = null;
+        monitor = { ...monitor, configured: false, hosts: [] };
+        world = computeWorld(); resize();
+      } else return;
+      renderMonitor(win);
+    };
+  });
+  win.first = host || win.first;
+  loadMonitor().finally(() => renderMonitor(win));
+  renderMonitor(win);
+}
+
 // ---------- Barra de salas ----------
 // Quantos agentes da sala estão esperando você (pergunta, permissão ou bloqueio).
 function waitingIn(rid) {
@@ -2389,6 +2544,9 @@ function waitingIn(rid) {
 function renderRooms() {
   const bar = document.getElementById('room-tabs');
   const cur = currentRoom();
+  // sala de servidores não tem mesas para mover
+  document.getElementById('btn-move').hidden = cur?.kind === 'servidor';
+  if (cur?.kind === 'servidor' && moveMode) setMoveMode(false);
   bar.innerHTML = state.rooms.map((r) => {
     const waiting = waitingIn(r.id);
     return `<button class="room-tab ${r === cur ? 'active' : ''}" data-room="${r.id}" title="${r === cur ? 'Clique para configurar a sala' : 'Ir para a sala'}">
@@ -2441,6 +2599,10 @@ function openRoomDialog(r) {
   openDialog(`
     <h2>${r ? 'Configurar sala' : 'Nova sala'}</h2>
     <label>Nome da sala<input name="name" required maxlength="30" placeholder="Ex.: Clientes, Produto, Jurídico" value="${esc(r?.name || '')}" /></label>
+    <label>Tipo<select name="kind">
+      <option value="" ${!r?.kind ? 'selected' : ''}>Escritório (mesas e agentes)</option>
+      <option value="servidor" ${r?.kind === 'servidor' ? 'selected' : ''}>Sala de servidores (monitor de VPS)</option>
+    </select></label>
     <label>Mesas por fileira: <b id="cols-out">${r?.cols || 4}</b>
       <input type="range" name="cols" min="2" max="8" value="${r?.cols || 4}" />
     </label>

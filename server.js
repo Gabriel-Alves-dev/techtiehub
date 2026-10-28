@@ -11,6 +11,7 @@ const git = require('./git');
 const { Auth, token, shortCode } = require('./auth');
 const { Community } = require('./community');
 const { Tasks, briefOf } = require('./tasks');
+const { Monitor } = require('./monitor');
 const { Office, HttpError, STATUSES, FLOORS, AREAS, WALLS, DECOR, MAX_DECOR } = require('./office');
 const conector = require('./conector');
 const { createZip } = require('./zip');
@@ -59,6 +60,7 @@ const secrets = new Secrets(DATA_DIR);
 const auth = new Auth(DATA_DIR, { setupCode: process.env.HUB_SETUP_CODE || (EXPOSED ? shortCode() : null) });
 const community = new Community(DATA_DIR, auth);
 const tasks = new Tasks(DATA_DIR, auth, (...a) => community.push(...a));
+const monitor = new Monitor(DATA_DIR); // resumos que a VPS envia (nível do hub, só a dona vê)
 const LOCAL_ENV = EMBEDDED ? conector.loadEnv() : null;
 
 // ---------- Escritórios ----------
@@ -393,7 +395,7 @@ function pick(obj, fields) {
 const FIELDS = {
   projects: ['name', 'description', 'color', 'agentId', 'roomId', 'permissionMode', 'role'], // pasta: tratada à parte (uma por PC)
   agents: ['name', 'role', 'shirt', 'hair', 'skin', 'hairStyle', 'accessory', 'status', 'message', 'model', 'effort'],
-  rooms: ['name', 'cols', 'floor', 'wall', 'decor', 'slots', 'areas'],
+  rooms: ['name', 'kind', 'cols', 'floor', 'wall', 'decor', 'slots', 'areas'],
 };
 
 // Aceita id ou nome (sem diferenciar maiúsculas), para facilitar o uso por scripts.
@@ -935,6 +937,8 @@ async function officeApi(req, res, url, o, user) {
       }
       body.slots = out;
     }
+    // tipo da sala: '' = escritório com mesas; 'servidor' = racks do monitor de VPS
+    if (body.kind !== undefined && !['', 'servidor'].includes(body.kind)) body.kind = '';
     if (body.wall !== undefined && !WALLS.includes(body.wall)) body.wall = 'cinza';
     if (body.decor !== undefined) {
       // posições em tiles; itens inválidos são descartados em vez de recusar a lista toda
@@ -1181,10 +1185,39 @@ async function tasksApi(req, res, url, user) {
   send(res, 404, { error: 'rota desconhecida' });
 }
 
+// POST /api/monitor/report — Authorization: Bearer <segredo>. Exige JSON e no máximo 16 KB.
+async function monitorReport(req, res) {
+  if (req.method !== 'POST') return send(res, 405, { error: 'use POST' });
+  const ip = clientIp(req);
+  try { auth.guard(ip, 'monitor'); } catch (e) { return send(res, 429, { error: e.message }); }
+  if (!monitor.check(bearer(req))) {
+    auth.fail(ip, 'monitor');
+    return send(res, 401, { error: 'não autorizado' });
+  }
+  if (!String(req.headers['content-type']).startsWith('application/json')) return send(res, 415, { error: 'use Content-Type: application/json' });
+  try {
+    const body = await readBody(req, 16e3);
+    send(res, 200, { ok: true, host: monitor.ingest(body).host });
+  } catch (e) {
+    send(res, 400, { error: e.message });
+  }
+}
+
+// /api/monitor — só a dona do hub: ver os servidores e gerar/revogar o segredo
+async function monitorApi(req, res, sub, user) {
+  if (!user.isOwner) return send(res, 403, { error: 'só a dona do hub vê o monitor de servidores' });
+  if (!sub && req.method === 'GET') return send(res, 200, { configured: monitor.configured(), hosts: monitor.view(), now: Date.now() });
+  if (sub === 'secret' && req.method === 'POST') return send(res, 200, { secret: monitor.newSecret() });
+  if (sub === 'secret' && req.method === 'DELETE') { monitor.revoke(); return send(res, 204, {}); }
+  send(res, 404, { error: 'rota desconhecida' });
+}
+
 async function api(req, res, url) {
   const [, , resource, id, action] = url.pathname.split('/');
 
   if (resource === 'connector') return connectorApi(req, res, url, id, action);
+  // a VPS envia o resumo com o segredo da integração (sem login); o corpo é pequeno e validado
+  if (resource === 'monitor' && id === 'report') return monitorReport(req, res);
 
   // Só aceita JSON: impede que um site qualquer dispare a API com um <form>.
   if (req.method !== 'GET' && req.method !== 'DELETE' && !String(req.headers['content-type']).startsWith('application/json')) {
@@ -1209,6 +1242,7 @@ async function api(req, res, url) {
   if (resource === 'community') return communityApi(req, res, url, user);
   if (resource === 'team') return teamApi(req, res, url, user);
   if (resource === 'tasks') return tasksApi(req, res, url, user);
+  if (resource === 'monitor') return monitorApi(req, res, id, user);
   return officeApi(req, res, url, getOffice(user.offices[0]), user);
 }
 
