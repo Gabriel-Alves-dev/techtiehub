@@ -393,7 +393,7 @@ function pick(obj, fields) {
 const FIELDS = {
   projects: ['name', 'description', 'color', 'agentId', 'roomId', 'permissionMode', 'role'], // pasta: tratada à parte (uma por PC)
   agents: ['name', 'role', 'shirt', 'hair', 'skin', 'hairStyle', 'accessory', 'status', 'message', 'model', 'effort'],
-  rooms: ['name', 'cols', 'floor', 'wall', 'decor', 'areas'],
+  rooms: ['name', 'cols', 'floor', 'wall', 'decor', 'slots', 'areas'],
 };
 
 // Aceita id ou nome (sem diferenciar maiúsculas), para facilitar o uso por scripts.
@@ -923,6 +923,18 @@ async function officeApi(req, res, url, o, user) {
     // aparência do agente: '' = automático (cabelo) / nenhum (acessório)
     if (body.hairStyle !== undefined && !['', 'curto', 'longo', 'coque'].includes(body.hairStyle)) body.hairStyle = '';
     if (body.accessory !== undefined && !['', 'oculos', 'fone', 'bone'].includes(body.accessory)) body.accessory = '';
+    if (body.slots !== undefined) {
+      // posição de cada mesa na grade da sala: { idDoProjeto: { c: coluna, r: fileira } }
+      const ids = new Set(state.projects.map((p) => p.id));
+      const out = {}, taken = new Set();
+      for (const [id, v] of Object.entries(body.slots && typeof body.slots === 'object' ? body.slots : {})) {
+        if (!ids.has(id) || !Number.isInteger(v?.c) || !Number.isInteger(v?.r)) continue;
+        if (v.c < 0 || v.c > 7 || v.r < 0 || v.r > 49 || taken.has(v.c + ',' + v.r)) continue;
+        taken.add(v.c + ',' + v.r);
+        out[id] = { c: v.c, r: v.r };
+      }
+      body.slots = out;
+    }
     if (body.wall !== undefined && !WALLS.includes(body.wall)) body.wall = 'cinza';
     if (body.decor !== undefined) {
       // posições em tiles; itens inválidos são descartados em vez de recusar a lista toda

@@ -68,7 +68,7 @@ No Windows, você também pode dar dois cliques em **`iniciar.bat`**. Ele instal
 
 1. **Entre na sua conta.** O login fica salvo por 30 dias.
 1. **Contrate agentes** no botão **+ Contratar**: escolha nome, cargo, as cores, o estilo do cabelo (curto, longo ou coque), um acessório (óculos, fone ou boné) e, se quiser, o **modelo** (Opus, Sonnet, Haiku) e o **esforço**. "Padrão do PC" usa a configuração do Claude Code do computador que executa.
-2. **Crie salas, se quiser,** pela aba **+ Sala**. Clique na aba da sala atual (⚙) para mudar o nome, as mesas por fileira, as áreas especiais, o piso e a parede. O botão **🎨 Decorar** deixa colocar quadros, bandeiras, plantas, tapetes, estantes, abajures e impressoras onde quiser (🧽 apaga).
+2. **Crie salas, se quiser,** pela aba **+ Sala**. Clique na aba da sala atual (⚙) para mudar o nome, as mesas por fileira, as áreas especiais, o piso e a parede. O botão **🪑 Mover mesas** deixa arrastar cada mesa para outra posição da grade (soltando sobre outra mesa, as duas trocam de lugar). O botão **🎨 Decorar** deixa colocar quadros, bandeiras, plantas, tapetes, estantes, abajures e impressoras onde quiser (🧽 apaga).
 3. **Crie uma mesa** no botão **+ Mesa** ou clicando na mesa tracejada. Dê um nome, escolha a **pasta do projeto** com o botão "Escolher…" e o agente que vai sentar nela.
 4. **Clique na mesa ou no personagem** para abrir a janela de conversa e peça algo, por exemplo: *"Analisa a estrutura do projeto e me diz o que falta para o MVP"*.
 5. **Acompanhe pelos balões.** Quando o balão ficar amarelo, clique nele para responder.
@@ -211,7 +211,7 @@ O hub escuta só em `127.0.0.1:4321` (variáveis `PORT` e `HUB_HOST`). As rotas 
 | `GET /api/events` | Stream SSE. Evento padrão = estado completo; evento `chat` = nova mensagem `{ projectId, entry }` |
 | `POST /api/report` | Atualiza um agente: `{ agent, status, message?, project? }`. `agent` e `project` aceitam id ou nome |
 | `POST /api/hook` | Recebe eventos do `hub-hook.js` |
-| `POST /api/rooms` · `PATCH /api/rooms/:id` · `DELETE /api/rooms/:id` | CRUD de salas: `{ name, cols (2–8), areas: ["copa", "reuniao", "descanso"], floor: "madeira" | "carpete" | "piso" | "escuro", wall: "cinza" | "azul" | "verde" | "vinho" | "bege", decor: [{ type, x, y }] (em tiles, até 80 itens) }`. Ao remover uma sala, as mesas dela vão para outra |
+| `POST /api/rooms` · `PATCH /api/rooms/:id` · `DELETE /api/rooms/:id` | CRUD de salas: `{ name, cols (2–8), areas: ["copa", "reuniao", "descanso"], floor: "madeira" | "carpete" | "piso" | "escuro", wall: "cinza" | "azul" | "verde" | "vinho" | "bege", decor: [{ type, x, y }] (em tiles, até 80 itens), slots: { idDaMesa: { c, r } } (coluna e fileira de cada mesa na grade) }`. Ao remover uma sala, as mesas dela vão para outra |
 | `POST /api/projects` · `PATCH /api/projects/:id` · `DELETE /api/projects/:id` | CRUD de mesas: `{ name, description, color, folder, agentId, roomId }`. `folder` é a pasta **neste PC**; se a mesa já tem repositório e a pasta é de outro, responde 409 `repo_mismatch` (reenvie com `forceFolder: true` para confirmar) |
 | `POST /api/agents` · `PATCH /api/agents/:id` · `DELETE /api/agents/:id` | CRUD de agentes: `{ name, role, shirt, hair, skin, status, message }` |
 | `GET /api/projects/:id/chat` | Conversa salva da mesa: `{ sessionId, entries, memory, lastCommit, … }` |

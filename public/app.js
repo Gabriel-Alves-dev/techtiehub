@@ -32,6 +32,8 @@ let preferredEnv = load('hub.env'); // PC escolhido neste navegador para executa
 const runtime = new Map(); // agentId -> posição/animação
 let selected = null; // { kind: 'project', id } — mesa da janela em foco
 let hover = null;
+let moveMode = false; // modo de mover mesas
+let moving = null; // mesa sendo arrastada: { id, from, to, wx, wy }
 
 // preferências do navegador (sala aberta, zoom, posição das janelas)
 function load(key) {
@@ -54,15 +56,37 @@ function visibleAgents() {
   });
 }
 
+// Posição de cada mesa na grade (índice = fileira * colunas + coluna). O usuário arruma em room.slots;
+// mesas sem posição válida (novas, ou fora da grade depois de reduzir as colunas) ocupam a primeira célula livre.
+function layoutSlots(cols) {
+  const saved = currentRoom()?.slots || {};
+  const slotOf = new Map(), byslot = new Map();
+  const list = roomProjects();
+  for (const p of list) {
+    const v = saved[p.id];
+    if (!Number.isInteger(v?.c) || !Number.isInteger(v?.r) || v.c < 0 || v.c >= cols || v.r < 0) continue;
+    const i = v.r * cols + v.c;
+    if (byslot.has(i)) continue;
+    slotOf.set(p.id, i); byslot.set(i, p);
+  }
+  let free = 0;
+  const nextFree = () => { while (byslot.has(free)) free++; return free; };
+  for (const p of list) if (!slotOf.has(p.id)) { const i = nextFree(); slotOf.set(p.id, i); byslot.set(i, p); }
+  return { slotOf, byslot, free: nextFree() };
+}
+
 function computeWorld() {
   const room = currentRoom();
   const cols = room?.cols || 4;
-  const slots = roomProjects().length + 1; // +1 = mesa vazia para criar projeto
-  const rows = Math.max(2, Math.ceil(slots / cols));
+  const { slotOf, byslot, free } = layoutSlots(cols);
   const loungeX = DESK_X0 + cols * CELL_W;
   const areas = AREA_ORDER.filter((a) => (room?.areas || AREA_ORDER).includes(a));
   if (!areas.length) areas.push('copa');
   const areaTiles = areas.reduce((sum, a) => sum + AREA_H[a], 0);
+  // sobra sempre uma célula livre depois da última mesa (a "nova mesa"). Ao mover mesas ganha uma fileira
+  // a mais, mas só se couber na altura que as áreas laterais já ocupam (senão o zoom automático encolheria)
+  const need = Math.max(2, Math.ceil((Math.max(-1, ...slotOf.values()) + 2) / cols));
+  const rows = moveMode ? Math.max(need, Math.min(need + 1, Math.floor(areaTiles / CELL_H))) : need;
   const W = loungeX + LOUNGE_W + 1;
   const H = WALL_H + Math.max(rows * CELL_H, areaTiles) + 1;
   const L = loungeX * T;
@@ -81,7 +105,7 @@ function computeWorld() {
   const spots = blocks.flatMap((b) => areaSpots(b, L));
 
   return {
-    cols, rows, W, H, L, top, bottom, mid, spots, blocks, floor: room?.floor || 'madeira',
+    cols, rows, W, H, L, top, bottom, mid, spots, blocks, floor: room?.floor || 'madeira', slotOf, byslot, newSlot: free,
     wall: room?.wall || 'cinza',
     trunkX: (loungeX - 0.4) * T,
     door: { x: (loungeX - 0.4) * T, y: bottom + 0.6 * T },
@@ -162,8 +186,8 @@ function chooseEnv(id) {
 function deskOf(agentId) {
   const project = state.projects.find((p) => p.agentId === agentId);
   if (!project) return null;
-  const i = roomProjects().indexOf(project);
-  return { project, here: i >= 0, cell: i >= 0 ? cellOf(i) : null };
+  const i = world?.slotOf.get(project.id);
+  return { project, here: i != null, cell: i != null ? cellOf(i) : null };
 }
 
 // Cria/remove personagens da sala exibida. Ao entrar numa sala, quem trabalha já aparece sentado.
@@ -239,7 +263,7 @@ function update(dt, now) {
 
     if (desk && !goIdle) {
       target = desk.cell.seat;
-      key = 'desk:' + desk.project.id + ':' + roomProjects().indexOf(desk.project) + ':' + world.cols;
+      key = 'desk:' + desk.project.id + ':' + world.slotOf.get(desk.project.id) + ':' + world.cols;
       rt.spot = null;
     } else {
       if (rt.spot == null || now > rt.wanderAt) {
@@ -571,7 +595,7 @@ function drawRest({ y0 }, now, occupied) {
 }
 
 function drawDesk(i, now) {
-  const project = roomProjects()[i];
+  const project = world.byslot.get(i);
   const c = cellOf(i);
   const agent = project ? state.agents.find((a) => a.id === project.agentId) : null;
   const rt = agent && runtime.get(agent.id);
@@ -579,7 +603,16 @@ function drawDesk(i, now) {
   const isHover = hover && hover.kind === (project ? 'project' : 'slot') && (!project || hover.id === project.id);
 
   if (!project) {
-    // mesa vaga: clique para criar um projeto
+    // mesa vaga: clique para criar um projeto. As outras células vazias só aparecem ao mover mesas
+    const spare = i !== world.newSlot;
+    if (spare && !moveMode) return;
+    if (spare) {
+      ctx.strokeStyle = '#ffffff22';
+      ctx.setLineDash([2, 4]); ctx.lineWidth = 1;
+      ctx.strokeRect(c.x + 0.5 * T + 0.5, c.y + 0.5 * T + 0.5, 4 * T, 3.8 * T);
+      ctx.setLineDash([]);
+      return;
+    }
     ctx.strokeStyle = isHover ? '#ffffffcc' : '#ffffff55';
     ctx.setLineDash([4, 3]); ctx.lineWidth = 1;
     ctx.strokeRect(c.x + 0.5 * T + 0.5, c.y + 0.5 * T + 0.5, 4 * T, 3.8 * T);
@@ -769,13 +802,13 @@ function draw(now) {
   ctx.setTransform(SCALE, 0, 0, SCALE, 0, 0);
   ctx.imageSmoothingEnabled = false;
   drawRoom(now);
-  const slots = roomProjects().length + 1;
-  for (let i = 0; i < slots; i++) drawDesk(i, now);
+  for (let i = 0; i < world.rows * world.cols; i++) drawDesk(i, now);
   const hour = new Date().getHours();
   if (hour >= 19 || hour < 5) { ctx.globalAlpha = 0.16; rect(0, 0, world.W * T, world.H * T, '#0d1440'); ctx.globalAlpha = 1; }
   const furniture = roomDecor().filter((d) => DECOR_META[d.type]?.layer === 'piso' && decorFits(d)).sort((p, q) => p.y - q.y);
   for (const d of furniture) DECOR_DRAW[d.type](d.x * T, d.y * T, now);
   if (decorMode && decorHover) drawDecorCursor();
+  if (moving) drawMoveGhost();
 
   const ordered = visibleAgents().map((a) => [a, runtime.get(a.id)]).sort((p, q) => p[1].y - q[1].y);
   for (const [a, rt] of ordered) {
@@ -843,9 +876,11 @@ let drag = null, suppressClick = false;
 canvas.addEventListener('pointerdown', (e) => {
   if (e.button === 1) e.preventDefault();
   if (e.button > 1) return;
+  if (moveMode && startMove(e)) return;
   drag = { x: e.clientX, y: e.clientY, sl: wrap.scrollLeft, st: wrap.scrollTop, moved: false };
 });
 window.addEventListener('pointermove', (e) => {
+  if (moving) { const c = cellAt(e); Object.assign(moving, { to: c.idx, wx: c.wx, wy: c.wy }); canvas.style.cursor = 'grabbing'; return; }
   if (!drag) return;
   const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
   if (!drag.moved && Math.hypot(dx, dy) > 5) {
@@ -859,6 +894,7 @@ window.addEventListener('pointermove', (e) => {
   }
 });
 window.addEventListener('pointerup', () => {
+  if (moving) return finishMove();
   if (drag?.moved) {
     suppressClick = true;
     canvas.style.cursor = '';
@@ -918,11 +954,12 @@ function hitTest(ev) {
   for (const [a, rt] of ordered) {
     if (wx > rt.x - 8 && wx < rt.x + 8 && wy > rt.y - 24 && wy < rt.y + 2) return { kind: 'agent', id: a.id };
   }
-  const rp = roomProjects();
-  for (let i = 0; i <= rp.length; i++) {
+  for (let i = 0; i < world.rows * world.cols; i++) {
     const c = cellOf(i);
     if (wx > c.x + 0.5 * T && wx < c.x + 4.5 * T && wy > c.y + 0.5 * T && wy < c.y + 4.3 * T) {
-      return rp[i] ? { kind: 'project', id: rp[i].id } : { kind: 'slot' };
+      const p = world.byslot.get(i);
+      if (p) return { kind: 'project', id: p.id };
+      return i === world.newSlot ? { kind: 'slot' } : null;
     }
   }
   return null;
@@ -930,6 +967,7 @@ function hitTest(ev) {
 
 canvas.addEventListener('mousemove', (ev) => {
   if (drag?.moved) return;
+  if (moveMode) { canvas.style.cursor = world.byslot.has(cellAt(ev).idx) ? 'grab' : 'default'; tooltip.hidden = true; return; }
   if (decorMode) { decorHover = decorTile(ev); canvas.style.cursor = 'crosshair'; tooltip.hidden = true; return; }
   hover = hitTest(ev);
   canvas.style.cursor = hover ? 'pointer' : 'default';
@@ -954,6 +992,7 @@ canvas.addEventListener('mouseleave', () => { hover = null; decorHover = null; t
 canvas.addEventListener('click', (ev) => {
   if (suppressClick) { suppressClick = false; return; } // foi um arrasto, não um clique
   if (decorMode) return placeDecor(decorTile(ev));
+  if (moveMode) return;
   const hit = hitTest(ev);
   if (!hit) return;
   if (hit.kind === 'slot') return openProjectDialog();
@@ -963,6 +1002,72 @@ canvas.addEventListener('click', (ev) => {
   if (desk) openProjectWindow(desk.project.id);
   else openAgentDialog(a);
 });
+
+// ---------- Modo mover mesas ----------
+function cellAt(ev) {
+  const r = canvas.getBoundingClientRect();
+  const wx = (ev.clientX - r.left) / SCALE, wy = (ev.clientY - r.top) / SCALE;
+  const c = Math.floor((wx / T - DESK_X0) / CELL_W), row = Math.floor((wy / T - WALL_H) / CELL_H);
+  const inside = c >= 0 && c < world.cols && row >= 0 && row < world.rows;
+  return { idx: inside ? row * world.cols + c : null, wx, wy };
+}
+
+function startMove(e) {
+  const { idx, wx, wy } = cellAt(e);
+  const p = world.byslot.get(idx);
+  if (!p) return false;
+  e.preventDefault();
+  moving = { id: p.id, from: idx, to: idx, wx, wy };
+  return true;
+}
+
+// Soltou: vai para a célula de destino; se já houver uma mesa lá, as duas trocam de lugar.
+function finishMove() {
+  const m = moving;
+  moving = null;
+  canvas.style.cursor = '';
+  if (!m || m.to == null || m.to === m.from) return;
+  const room = currentRoom(), cols = world.cols;
+  const next = new Map(world.slotOf);
+  const other = world.byslot.get(m.to);
+  next.set(m.id, m.to);
+  if (other) next.set(other.id, m.from);
+  room.slots = Object.fromEntries([...next].map(([id, i]) => [id, { c: i % cols, r: Math.floor(i / cols) }]));
+  world = computeWorld(); // aparece na hora; o hub confirma em seguida
+  resize();
+  api('PATCH', `/api/rooms/${room.id}`, { slots: room.slots }).catch(() => {});
+}
+
+function drawMoveGhost() {
+  const m = moving;
+  if (m.to == null) return;
+  const x = (DESK_X0 + (m.to % world.cols) * CELL_W) * T, y = (WALL_H + Math.floor(m.to / world.cols) * CELL_H) * T;
+  const swap = m.to !== m.from && world.byslot.has(m.to);
+  ctx.strokeStyle = m.to === m.from ? '#ffffff88' : swap ? '#f2a93b' : '#3fbf7f';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x + 0.5 * T, y + 0.5 * T, 4 * T, 4.1 * T);
+  ctx.lineWidth = 1;
+  const p = state.projects.find((q) => q.id === m.id);
+  if (p) text(truncate(p.name.toUpperCase(), 14), m.wx, m.wy - 6, 7, '#ffd166');
+}
+
+function setMoveMode(on) {
+  if (on && decorMode) setDecorMode(false);
+  moveMode = on;
+  moving = null;
+  document.getElementById('btn-move').classList.toggle('active', on);
+  const bar = document.getElementById('decor-bar');
+  bar.hidden = !on;
+  canvas.style.touchAction = on ? 'none' : ''; // no celular, arrastar não pode rolar a página
+  canvas.style.cursor = '';
+  if (on) {
+    bar.innerHTML = '<span class="muted">Arraste uma mesa para outra posição. Se já houver uma mesa lá, as duas trocam de lugar.</span><button id="move-done">Concluir</button>';
+    bar.querySelector('#move-done').onclick = () => setMoveMode(false);
+  }
+  world = computeWorld();
+  resize();
+}
+document.getElementById('btn-move').onclick = () => setMoveMode(!moveMode);
 
 // ---------- Modo decorar ----------
 let decorMode = false;
@@ -1010,6 +1115,7 @@ function drawDecorCursor() {
 }
 
 function setDecorMode(on) {
+  if (on && moveMode) setMoveMode(false);
   decorMode = on;
   decorHover = null;
   document.getElementById('btn-decor').classList.toggle('active', on);
@@ -1345,8 +1451,8 @@ function updateHint() {
 const chats = new Map(); // projectId -> entries
 
 function deskAnchor(projectId) {
-  const i = roomProjects().findIndex((p) => p.id === projectId);
-  if (i < 0) return null;
+  const i = world?.slotOf.get(projectId);
+  if (i == null) return null;
   const c = cellOf(i);
   const r = canvas.getBoundingClientRect();
   return { x: r.left + (c.x + 4.5 * T) * SCALE, y: r.top + (c.y + 2.5 * T) * SCALE };
