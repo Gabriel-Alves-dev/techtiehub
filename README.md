@@ -31,7 +31,10 @@ Você vê de relance quem está trabalhando, quem terminou e quem precisa de voc
 - **Compacta a conversa quando você quiser.** O botão 🧹 da caixa de conversa guarda o essencial na memória do projeto (incremental) e começa uma sessão limpa, para a cota de uso do seu plano não esgotar com conversas que só crescem.
 - **Variáveis do escritório.** Webhooks, credenciais de banco, chaves de API (botão **Variáveis**). Ficam criptografadas no hub e chegam aos agentes como variáveis de ambiente em qualquer PC (`$BITRIX_WEBHOOK`, `process.env.PG_URL`). O agente sabe quais existem, mas os valores não aparecem no chat. Nos MCPs, use `${NOME}` na URL, nos cabeçalhos ou nas variáveis.
 - **Use de qualquer lugar, até pelo celular.** Cada pedido roda no PC que tem a pasta da mesa. Do celular (ou de outro computador) você conversa com a mesa e o trabalho acontece no PC do escritório, desde que ele esteja ligado com o conector aberto. No celular, as janelas ocupam a tela inteira, e dá para usar **Adicionar à tela inicial** para abrir como app.
-- **Contas.** Login com e-mail e senha; cada conta tem o seu próprio escritório, isolado dos outros. Novas contas só entram com convite.
+- **Contas e equipe.** Login com e-mail e senha; cada conta tem o seu próprio escritório, isolado dos outros. Novas contas só entram com convite e ficam na equipe de quem convidou.
+- **Chat da equipe (💬 Comunidade).** Sala geral e conversas individuais entre colegas de equipe, em tempo real, com contador de não lidas. A dona do hub pode **visitar** (somente leitura) o escritório de quem está na conversa.
+- **Tarefas (📋 Tarefas).** Tarefas suas e compartilhadas com a equipe: status, prioridade, prazo e link do Bitrix. Dá para **delegar a um agente** do seu escritório ou pedir à secretária (ela lista, cria, atualiza e delega). Quem foi adicionado vê a tarefa e acompanha.
+- **Secretárias conversam entre escritórios.** Peça à sua secretária para mandar uma demanda à secretária de um colega; ela chega como "Demanda da secretária de …".
 - **Hub e conectores.** O hub guarda tudo; um conector em cada PC roda os agentes com as pastas e o login do Claude daquele computador. Cada PC tem a sua pasta para cada mesa, e o agente **continua a mesma conversa** em qualquer PC conectado. Se a sessão completa não estiver disponível, ele recebe a **memória** do projeto. O hub também avisa quando falta `git pull`.
 - **Integração com o Claude Code do VS Code (opcional).** Por hooks, sessões abertas no VS Code dentro da pasta de uma mesa também atualizam o escritório.
 - **API simples** para qualquer script ou agente reportar status.
@@ -163,6 +166,7 @@ O conector troca o código por um token só daquele PC e salva em `~/.techtie-hu
 - **Cada conta tem o seu escritório**, com mesas, agentes, conversas, memória e PCs próprios. Ninguém vê o escritório de outra conta.
 - **Primeira conta:** criada livremente na primeira vez que o hub abre; herda os dados que já existiam.
 - **Hub publicado na internet:** a primeira conta pede um **código de instalação**, que aparece nos logs do servidor ou vem de `HUB_SETUP_CODE`. Assim ninguém toma o hub antes de você.
+- **Equipe:** quem entra por convite fica na equipe de quem convidou. O chat, as tarefas compartilhadas e as demandas entre secretárias só alcançam colegas da mesma equipe; os escritórios continuam isolados (a visita é só leitura e só da dona).
 - **Outras contas:** só com convite. Em **Conta → Gerar convite**, envie o código (vale 7 dias, uso único) e o endereço do hub; a pessoa clica em *Recebi um convite* na tela de entrada.
 - **Conta:** trocar a senha (encerra as outras sessões) e sair.
 - O trabalho dos agentes usa o login do Claude Code **do PC onde o conector roda**, não a conta do hub.
@@ -201,6 +205,9 @@ O hub escuta só em `127.0.0.1:4321` (variáveis `PORT` e `HUB_HOST`). As rotas 
 |---|---|
 | `GET /api/auth/status` · `POST /api/auth/{signup,login,logout,password,invite}` | Contas: cadastro (`{ email, name, password, invite }`), login, sair, trocar senha, gerar convite |
 | `GET /api/state` | Estado completo do escritório: mesas, agentes, histórico, `live` e `connectors` |
+| `GET /api/team` · `GET /api/team/:id/office` | Colegas de equipe; visita somente leitura ao escritório de um colega (só a dona) |
+| `GET /api/community/events` · `summary` · `general` · `dm/:id` | Chat da equipe: SSE (`msg`, `tasks`), pessoas e não lidas, histórico (`GET`), enviar `{ text }` (`POST`), marcar como lida (`PUT`) |
+| `GET`/`POST /api/tasks` · `PATCH`/`DELETE /api/tasks/:id` · `POST /api/tasks/:id/delegate` | Tarefas da equipe `{ title, description, status, priority, due, bitrix, people }`; delegar `{ mesa }` |
 | `GET /api/events` | Stream SSE. Evento padrão = estado completo; evento `chat` = nova mensagem `{ projectId, entry }` |
 | `POST /api/report` | Atualiza um agente: `{ agent, status, message?, project? }`. `agent` e `project` aceitam id ou nome |
 | `POST /api/hook` | Recebe eventos do `hub-hook.js` |
@@ -310,7 +317,8 @@ O hub abre pastas e programas e executa agentes que editam arquivos, então:
 - Notificação do Windows quando um agente ficar esperando você
 - Reunião de verdade: escolher agentes e um tema para eles discutirem e devolverem um resumo
 - Modo de edição para montar e decorar as salas (arrastar mesas, móveis)
-- Escritório compartilhado entre contas (vários membros)
+- Aviso no chat quando uma secretária recebe demanda de outra, e sincronização das tarefas com o Bitrix
+- Escritório realmente compartilhado (vários membros nas mesmas mesas)
 - Vários agentes na mesma mesa
 - Contador de horas trabalhadas por projeto
 - Sons e mais animações (comemoração ao concluir, por exemplo)

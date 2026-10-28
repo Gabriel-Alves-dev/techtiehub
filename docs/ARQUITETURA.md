@@ -58,6 +58,27 @@ Os princípios:
 - **Conector embutido:** no modo local, o hub emite um token para o PC local no escritório da primeira conta (`data/hub.json`) e grava `~/.techtie-hub/conector.json` (se apontar para este hub) para o `hub-hook.js`.
 - **Migração:** a primeira conta criada recebe os arquivos que estavam soltos em `data/` (`state.json`, `chats/`, `sessions/`).
 
+### Equipe
+
+Cada usuário tem `teamId`: quem entra por convite herda o `teamId` de quem convidou (`createUser`); a dona usa o próprio id. Contas anteriores ao campo entram na equipe da dona na carga do `Auth`. `teamMembers(user)` lista quem está na mesma equipe. Cada pessoa continua com o escritório isolado; a equipe só define quem alcança o chat, as tarefas e a secretária de quem.
+
+## Dados compartilhados entre contas (nível do hub)
+
+São os **únicos** dados fora do `Office`. Sempre filtrados pela equipe de quem pede.
+
+### Chat da comunidade (`community.js` → `data/community.json`)
+
+`generals` (sala geral por `teamId`), `dms` (`"idMenor|idMaior"` → mensagens) e `reads` (última leitura por pessoa e conversa). Máx. 2000 caracteres por mensagem e 500 por conversa. Conversa individual só entre colegas de equipe (`sameTeam`). Tempo real por SSE próprio (`GET /api/community/events`, evento `msg`; o mesmo canal leva o evento `tasks`). Rotas: `GET summary` (pessoas + não lidas), `GET|POST general`, `GET|POST dm/:id`, `PUT general|dm/:id` (marca como lida). A mensagem de quem envia nunca conta como não lida.
+
+### Tarefas (`tasks.js` → `data/tasks.json`)
+
+`{ id, by, byName, title, description, status (todo|doing|done), priority (baixa|normal|alta), due, bitrix, people[], delegations[] }`. Vê a tarefa quem criou e quem está em `people` (só colegas de equipe entram). Participantes mudam andamento e texto; só quem criou muda `people` e apaga. Delegar (`delegateTask`, `server.js`) passa a tarefa a uma mesa do **escritório de quem delega**, via `delegate` (mesmo caminho da secretária), anota em `delegations` e move `todo` → `doing`. Rotas: `GET|POST /api/tasks`, `PATCH|DELETE /api/tasks/:id`, `POST /api/tasks/:id/delegate`. O campo `bitrix` é só texto/link (sem sincronização).
+
+### Visita e secretária entre escritórios
+
+- `GET /api/team` lista colegas; `GET /api/team/:id/office` é a **visita**, só para a dona (`isOwner`): resumo somente leitura (salas, mesas, agente, status, fila). Não expõe conversas, memória nem variáveis.
+- As ferramentas da secretária (`runner.js` → `/api/connector/office/*`, só mesa com `role: 'secretaria'`): `listar_equipe` (`team`), `enviar_para_pessoa` (`team-send`: `delegate` na secretária do colega, com origem "secretária de X"; vai para a fila se o PC dele não estiver conectado), `listar_tarefas`, `criar_tarefa`, `atualizar_tarefa`, `delegar_tarefa`. Agem em nome do dono do escritório. `teamContext` acrescenta equipe e tarefas abertas ao prompt da secretária a cada pedido.
+
 ## Modelo de dados (por escritório)
 
 `data/offices/<id>/state.json`:
