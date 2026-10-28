@@ -57,7 +57,7 @@ class Connectors {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`o PC "${c.name}" não respondeu a tempo`));
+        reject(new Error(`o PC "${c.name}" não respondeu a tempo (pode estar reiniciando, dormindo ou sem internet; tente de novo em instantes)`));
       }, timeout);
       this.pending.set(id, { resolve, reject, timer, envId });
       c.res.write(`event: cmd\ndata: ${JSON.stringify({ id, type, payload })}\n\n`);

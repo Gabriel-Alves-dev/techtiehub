@@ -460,7 +460,8 @@ class Runner {
     // o transporte do SDK despacha as respostas de dentro do loop de leitura das mensagens)
     const pump = (async () => { try { for await (const _ of q) { /* nada a fazer com elas aqui */ } } catch {} })();
     // sem login, sem rede ou um CLI que nunca inicia: não pode travar o loop periódico para sempre
-    const timeout = new Promise((resolve) => setTimeout(() => { log('timeout esperando a inicialização'); resolve(null); }, 15000));
+    let timer;
+    const timeout = new Promise((resolve) => { timer = setTimeout(() => { log('timeout esperando a inicialização'); resolve(null); }, 15000); });
     const work = (async () => {
       try {
         log('aguardando initializationResult()…');
@@ -490,6 +491,7 @@ class Runner {
     try {
       return await Promise.race([work, timeout]);
     } finally {
+      clearTimeout(timer); // senão o aviso de timeout dispara mesmo após o sucesso
       // fecha primeiro (senão "pump" nunca termina, já que ele só para quando o generator fecha)
       await q.interrupt().catch(() => {});
       await q.return?.().catch(() => {});
