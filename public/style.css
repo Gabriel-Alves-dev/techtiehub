@@ -131,6 +131,11 @@ main { flex: 1; display: flex; min-height: 0; }
   background: #ffd166;
   animation: bob 0.9s ease-in-out infinite;
 }
+#btn-decor { margin-bottom: 6px; padding: 6px 10px; box-shadow: none; }
+#btn-decor.active, .decor-bar button.active { border-color: var(--accent); background: var(--panel-2); color: var(--text); }
+.decor-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 20px; background: var(--bg); border-bottom: 2px solid var(--line); }
+.decor-bar button { padding: 5px 9px; font: 600 12px Inter, sans-serif; box-shadow: none; }
+.decor-bar .muted { font-size: 12px; margin-left: 6px; }
 .zoom { display: flex; align-items: center; gap: 6px; padding-bottom: 6px; }
 .zoom button { padding: 6px 10px; box-shadow: none; }
 #zoom-label { min-width: 44px; text-align: center; font: 9px var(--pixel); color: var(--muted); }

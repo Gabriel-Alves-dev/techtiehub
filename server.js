@@ -11,7 +11,7 @@ const git = require('./git');
 const { Auth, token, shortCode } = require('./auth');
 const { Community } = require('./community');
 const { Tasks, briefOf } = require('./tasks');
-const { Office, HttpError, STATUSES, FLOORS, AREAS } = require('./office');
+const { Office, HttpError, STATUSES, FLOORS, AREAS, WALLS, DECOR, MAX_DECOR } = require('./office');
 const conector = require('./conector');
 const { createZip } = require('./zip');
 const { Secrets, isMask, mask } = require('./secrets');
@@ -393,7 +393,7 @@ function pick(obj, fields) {
 const FIELDS = {
   projects: ['name', 'description', 'color', 'agentId', 'roomId', 'permissionMode', 'role'], // pasta: tratada à parte (uma por PC)
   agents: ['name', 'role', 'shirt', 'hair', 'skin', 'status', 'message', 'model', 'effort'],
-  rooms: ['name', 'cols', 'floor', 'areas'],
+  rooms: ['name', 'cols', 'floor', 'wall', 'decor', 'areas'],
 };
 
 // Aceita id ou nome (sem diferenciar maiúsculas), para facilitar o uso por scripts.
@@ -920,6 +920,13 @@ async function officeApi(req, res, url, o, user) {
     // papel da mesa: '' = projeto; 'secretaria' = recebe a memória do escritório e delega para as outras
     if (body.role !== undefined && !['', 'secretaria'].includes(body.role)) body.role = '';
     if (body.effort !== undefined && !['', 'low', 'medium', 'high', 'xhigh', 'max'].includes(body.effort)) body.effort = '';
+    if (body.wall !== undefined && !WALLS.includes(body.wall)) body.wall = 'cinza';
+    if (body.decor !== undefined) {
+      // posições em tiles; itens inválidos são descartados em vez de recusar a lista toda
+      body.decor = (Array.isArray(body.decor) ? body.decor : []).slice(0, MAX_DECOR)
+        .filter((d) => d && DECOR.includes(d.type) && Number.isFinite(d.x) && Number.isFinite(d.y))
+        .map((d) => ({ type: d.type, x: Math.max(0, Math.min(80, Math.round(d.x))), y: Math.max(0, Math.min(80, Math.round(d.y))) }));
+    }
     if (body.areas !== undefined) {
       // sempre sobra ao menos uma área, para os agentes ociosos terem para onde ir
       body.areas = AREAS.filter((a) => [].concat(body.areas).includes(a));
@@ -933,6 +940,8 @@ async function officeApi(req, res, url, o, user) {
       if (resource === 'rooms') {
         item.cols ??= 4;
         item.floor ??= 'carpete';
+        item.wall ??= 'cinza';
+        item.decor ??= [];
         item.areas ??= [...AREAS];
       }
       if (resource === 'projects') {

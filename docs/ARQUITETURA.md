@@ -86,7 +86,8 @@ São os **únicos** dados fora do `Office`. Sempre filtrados pela equipe de quem
 ```jsonc
 {
   "rooms": [
-    { "id": "r1", "name": "Escritório", "cols": 4, "floor": "madeira",
+    { "id": "r1", "name": "Escritório", "cols": 4, "floor": "madeira", "wall": "cinza",
+      "decor": [{ "type": "planta", "x": 3, "y": 5 }], // itens de decoração, posição em tiles
       "areas": ["copa", "reuniao", "descanso"] } // cols: mesas por fileira (2–8); areas: blocos da coluna lateral
   ],
   "projects": [

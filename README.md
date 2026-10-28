@@ -14,7 +14,7 @@ Você vê de relance quem está trabalhando, quem terminou e quem precisa de voc
 
 ## Recursos
 
-- **Salas.** Organize as mesas em salas, por exemplo uma por cliente ou time. Cada sala tem o próprio formato (de 2 a 8 mesas por fileira) e o próprio piso, e a aba da sala avisa quando algum agente de lá precisa de você.
+- **Salas.** Organize as mesas em salas, por exemplo uma por cliente ou time. Cada sala tem o próprio formato (de 2 a 8 mesas por fileira) o próprio piso e a própria cor de parede, e a aba da sala avisa quando algum agente de lá precisa de você.
 - **Áreas especiais.** Cada sala tem uma coluna lateral com **copa**, **sala de reunião** e **área de descanso** (você escolhe quais). Os agentes ociosos circulam entre elas: tomam café, "conversam" em reunião, sentam no sofá, cochilam no puff e jogam fliperama.
 - **Zoom e navegação.** Use os botões ou Ctrl + roda do mouse para dar zoom, e arraste o escritório com o mouse quando ele for maior que a tela.
 - **Escritório animado.** Os personagens andam pelo escritório. Sentam e digitam na mesa quando trabalham, vão tomar café no lounge quando estão ociosos, e o monitor de cada mesa mostra o status. As janelas mudam de cor conforme a hora do dia e o relógio da parede marca a hora real.
@@ -68,7 +68,7 @@ No Windows, você também pode dar dois cliques em **`iniciar.bat`**. Ele instal
 
 1. **Entre na sua conta.** O login fica salvo por 30 dias.
 1. **Contrate agentes** no botão **+ Contratar**: escolha nome, cargo, as cores do personagem e, se quiser, o **modelo** (Opus, Sonnet, Haiku) e o **esforço**. "Padrão do PC" usa a configuração do Claude Code do computador que executa.
-2. **Crie salas, se quiser,** pela aba **+ Sala**. Clique na aba da sala atual (⚙) para mudar o nome, as mesas por fileira, as áreas especiais e o piso.
+2. **Crie salas, se quiser,** pela aba **+ Sala**. Clique na aba da sala atual (⚙) para mudar o nome, as mesas por fileira, as áreas especiais, o piso e a parede. O botão **🎨 Decorar** deixa colocar quadros, bandeiras, plantas, tapetes, estantes, abajures e impressoras onde quiser (🧽 apaga).
 3. **Crie uma mesa** no botão **+ Mesa** ou clicando na mesa tracejada. Dê um nome, escolha a **pasta do projeto** com o botão "Escolher…" e o agente que vai sentar nela.
 4. **Clique na mesa ou no personagem** para abrir a janela de conversa e peça algo, por exemplo: *"Analisa a estrutura do projeto e me diz o que falta para o MVP"*.
 5. **Acompanhe pelos balões.** Quando o balão ficar amarelo, clique nele para responder.
@@ -211,7 +211,7 @@ O hub escuta só em `127.0.0.1:4321` (variáveis `PORT` e `HUB_HOST`). As rotas 
 | `GET /api/events` | Stream SSE. Evento padrão = estado completo; evento `chat` = nova mensagem `{ projectId, entry }` |
 | `POST /api/report` | Atualiza um agente: `{ agent, status, message?, project? }`. `agent` e `project` aceitam id ou nome |
 | `POST /api/hook` | Recebe eventos do `hub-hook.js` |
-| `POST /api/rooms` · `PATCH /api/rooms/:id` · `DELETE /api/rooms/:id` | CRUD de salas: `{ name, cols (2–8), areas: ["copa", "reuniao", "descanso"], floor: "madeira" | "carpete" | "piso" | "escuro" }`. Ao remover uma sala, as mesas dela vão para outra |
+| `POST /api/rooms` · `PATCH /api/rooms/:id` · `DELETE /api/rooms/:id` | CRUD de salas: `{ name, cols (2–8), areas: ["copa", "reuniao", "descanso"], floor: "madeira" | "carpete" | "piso" | "escuro", wall: "cinza" | "azul" | "verde" | "vinho" | "bege", decor: [{ type, x, y }] (em tiles, até 80 itens) }`. Ao remover uma sala, as mesas dela vão para outra |
 | `POST /api/projects` · `PATCH /api/projects/:id` · `DELETE /api/projects/:id` | CRUD de mesas: `{ name, description, color, folder, agentId, roomId }`. `folder` é a pasta **neste PC**; se a mesa já tem repositório e a pasta é de outro, responde 409 `repo_mismatch` (reenvie com `forceFolder: true` para confirmar) |
 | `POST /api/agents` · `PATCH /api/agents/:id` · `DELETE /api/agents/:id` | CRUD de agentes: `{ name, role, shirt, hair, skin, status, message }` |
 | `GET /api/projects/:id/chat` | Conversa salva da mesa: `{ sessionId, entries, memory, lastCommit, … }` |

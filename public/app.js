@@ -82,6 +82,7 @@ function computeWorld() {
 
   return {
     cols, rows, W, H, L, top, bottom, mid, spots, blocks, floor: room?.floor || 'madeira',
+    wall: room?.wall || 'cinza',
     trunkX: (loungeX - 0.4) * T,
     door: { x: (loungeX - 0.4) * T, y: bottom + 0.6 * T },
   };
@@ -330,12 +331,14 @@ function drawRoom(now) {
       }
     }
   }
+  for (const d of roomDecor()) if (DECOR_META[d.type]?.layer === 'tapete' && decorFits(d)) DECOR_DRAW[d.type](d.x * T, d.y * T, now);
   // paredes
-  rect(0, 0, W * T, top, '#5b6178');
-  rect(0, top - 4, W * T, 4, '#3d4256');
-  rect(0, 0, T, H * T, '#3d4256');
-  rect((W - 1) * T, 0, T, H * T, '#3d4256');
-  rect(0, bottom, W * T, T, '#3d4256');
+  const [wallMain, wallTrim] = WALLS[world.wall] || WALLS.cinza;
+  rect(0, 0, W * T, top, wallMain);
+  rect(0, top - 4, W * T, 4, wallTrim);
+  rect(0, 0, T, H * T, wallTrim);
+  rect((W - 1) * T, 0, T, H * T, wallTrim);
+  rect(0, bottom, W * T, T, wallTrim);
   rect(0, 0, W * T, 3, '#2b2f3e');
 
   // janelas
@@ -360,11 +363,86 @@ function drawRoom(now) {
   hand(((d.getHours() % 12) + d.getMinutes() / 60) * (Math.PI / 6), 5, 2);
   hand(d.getMinutes() * (Math.PI / 30), 7, 1);
 
+  for (const d of roomDecor()) if (DECOR_META[d.type]?.layer === 'parede' && decorFits(d)) DECOR_DRAW[d.type](d.x * T, 0, now);
+
   // porta
   rect(world.door.x - 12, bottom, 24, T, '#2b2f3e');
   rect(world.door.x - 10, bottom + 2, 20, T - 2, '#7a5a3a');
 
   drawAreas(now);
+}
+
+// ---------- Decoração (itens que o usuário posiciona; tamanhos em tiles) ----------
+// layer: 'parede' (fixo no topo), 'tapete' (por baixo das mesas) ou 'piso' (móveis)
+const DECOR_META = {
+  quadro: { name: '🖼️ Quadro', w: 2, h: 1, layer: 'parede' },
+  bandeira: { name: '🚩 Bandeira', w: 1, h: 1, layer: 'parede' },
+  planta: { name: '🪴 Planta', w: 1, h: 1, layer: 'piso' },
+  tapete: { name: '🟫 Tapete', w: 2, h: 2, layer: 'tapete' },
+  estante: { name: '📚 Estante', w: 2, h: 1, layer: 'piso' },
+  abajur: { name: '💡 Abajur', w: 1, h: 1, layer: 'piso' },
+  impressora: { name: '🖨️ Impressora', w: 1, h: 1, layer: 'piso' },
+};
+const WALLS = { // [parede, rodapé/lateral]
+  cinza: ['#5b6178', '#3d4256'], azul: ['#4a6a94', '#2f4766'], verde: ['#4f7a63', '#33543f'],
+  vinho: ['#7a4455', '#55303c'], bege: ['#a89a82', '#7d715d'],
+};
+const WALL_NAMES = { cinza: 'Cinza', azul: 'Azul', verde: 'Verde', vinho: 'Vinho', bege: 'Bege' };
+
+const DECOR_DRAW = {
+  quadro(x) {
+    rect(x + 2, 10, 28, 20, '#2b2f3e');
+    rect(x + 4, 12, 24, 16, '#e8d9a8');
+    rect(x + 4, 22, 24, 6, '#3f9b54');
+    rect(x + 18, 17, 6, 6, '#f2a93b');
+  },
+  bandeira(x) {
+    rect(x + 4, 4, 8, 27, '#e5534b');
+    rect(x + 4, 12, 8, 3, '#fff');
+    rect(x + 4, 31, 3, 3, '#e5534b');
+    rect(x + 9, 31, 3, 3, '#e5534b');
+  },
+  planta(x, y) { plant(x + 8, y + 15); },
+  tapete(x, y) {
+    rect(x + 1, y + 1, 30, 30, '#7a3b4a');
+    rect(x + 4, y + 4, 24, 24, '#a24d60');
+    rect(x + 8, y + 8, 16, 16, '#7a3b4a');
+  },
+  estante(x, y) {
+    rect(x + 1, y - 6, 30, 22, '#6b4429');
+    rect(x + 3, y - 4, 26, 8, '#3a2616');
+    rect(x + 3, y + 5, 26, 8, '#3a2616');
+    const cores = ['#e5534b', '#4f8cff', '#f2a93b', '#3fbf7f', '#b072f5'];
+    for (let i = 0; i < 6; i++) {
+      rect(x + 4 + i * 4, y - 3, 3, 7, cores[i % 5]);
+      rect(x + 4 + i * 4, y + 6, 3, 7, cores[(i + 2) % 5]);
+    }
+  },
+  abajur(x, y, now) {
+    ctx.globalAlpha = 0.14 + 0.02 * Math.sin(now / 700);
+    ctx.fillStyle = '#ffe9a8';
+    ctx.beginPath(); ctx.arc(x + 8, y + 6, 13, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 1;
+    rect(x + 6, y + 14, 4, 2, '#333');
+    rect(x + 7, y + 7, 2, 7, '#555');
+    rect(x + 4, y + 3, 8, 5, '#f2d16b');
+  },
+  impressora(x, y, now) {
+    rect(x + 2, y + 6, 12, 8, '#d0d0d8');
+    rect(x + 3, y + 3, 10, 4, '#f5f5f5');
+    rect(x + 3, y + 12, 10, 2, '#8a8a96');
+    rect(x + 11, y + 8, 2, 2, now % 1000 < 500 ? '#3fbf7f' : '#1c5a3a');
+  },
+};
+
+const roomDecor = () => currentRoom()?.decor || [];
+// item dentro dos limites da sala (a sala pode ter encolhido depois de posicioná-lo)
+function decorFits(d) {
+  const m = DECOR_META[d.type];
+  if (!m) return false;
+  const maxX = world.L / T;
+  if (m.layer === 'parede') return d.x >= 1 && d.x + m.w <= maxX;
+  return d.x >= 1 && d.x + m.w <= maxX && d.y >= WALL_H && d.y + m.h <= world.H - 1;
 }
 
 function plant(x, y) {
@@ -619,6 +697,9 @@ function draw(now) {
   drawRoom(now);
   const slots = roomProjects().length + 1;
   for (let i = 0; i < slots; i++) drawDesk(i, now);
+  const furniture = roomDecor().filter((d) => DECOR_META[d.type]?.layer === 'piso' && decorFits(d)).sort((p, q) => p.y - q.y);
+  for (const d of furniture) DECOR_DRAW[d.type](d.x * T, d.y * T, now);
+  if (decorMode && decorHover) drawDecorCursor();
 
   const ordered = visibleAgents().map((a) => [a, runtime.get(a.id)]).sort((p, q) => p[1].y - q[1].y);
   for (const [a, rt] of ordered) {
@@ -773,6 +854,7 @@ function hitTest(ev) {
 
 canvas.addEventListener('mousemove', (ev) => {
   if (drag?.moved) return;
+  if (decorMode) { decorHover = decorTile(ev); canvas.style.cursor = 'crosshair'; tooltip.hidden = true; return; }
   hover = hitTest(ev);
   canvas.style.cursor = hover ? 'pointer' : 'default';
   if (!hover || hover.kind === 'slot') { tooltip.hidden = true; return; }
@@ -791,10 +873,11 @@ canvas.addEventListener('mousemove', (ev) => {
   tooltip.style.top = ev.clientY - wr.top + wrap.scrollTop + 14 + 'px';
   tooltip.hidden = false;
 });
-canvas.addEventListener('mouseleave', () => { hover = null; tooltip.hidden = true; });
+canvas.addEventListener('mouseleave', () => { hover = null; decorHover = null; tooltip.hidden = true; });
 
 canvas.addEventListener('click', (ev) => {
   if (suppressClick) { suppressClick = false; return; } // foi um arrasto, não um clique
+  if (decorMode) return placeDecor(decorTile(ev));
   const hit = hitTest(ev);
   if (!hit) return;
   if (hit.kind === 'slot') return openProjectDialog();
@@ -804,6 +887,71 @@ canvas.addEventListener('click', (ev) => {
   if (desk) openProjectWindow(desk.project.id);
   else openAgentDialog(a);
 });
+
+// ---------- Modo decorar ----------
+let decorMode = false;
+let decorTool = 'planta'; // tipo de item, ou 'apagar'
+let decorHover = null; // { tx, ty } sob o ponteiro
+
+function decorTile(ev) {
+  const r = canvas.getBoundingClientRect();
+  return { tx: Math.floor((ev.clientX - r.left) / SCALE / T), ty: Math.floor((ev.clientY - r.top) / SCALE / T) };
+}
+
+// itens do mesmo tipo de camada que ocupam o mesmo espaço (um tapete pode ficar sob um móvel)
+const decorBox = (d) => ({ x: d.x, y: d.y, w: DECOR_META[d.type].w, h: DECOR_META[d.type].h });
+const overlap = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+
+function placeDecor(t) {
+  const room = currentRoom();
+  if (!t || !room) return;
+  let list = (room.decor || []).filter((d) => DECOR_META[d.type]);
+  if (decorTool === 'apagar') {
+    const hit = list.filter((d) => overlap(decorBox(d), { x: t.tx, y: t.ty, w: 1, h: 1 }));
+    if (!hit.length) return;
+    // com tapete embaixo de um móvel, apaga primeiro o de cima
+    const top = hit.find((d) => DECOR_META[d.type].layer !== 'tapete') || hit[0];
+    list = list.filter((d) => d !== top);
+  } else {
+    const m = DECOR_META[decorTool];
+    const item = { type: decorTool, x: t.tx, y: m.layer === 'parede' ? 0 : t.ty };
+    if (!decorFits(item)) return;
+    list = list.filter((d) => DECOR_META[d.type].layer !== m.layer || !overlap(decorBox(d), decorBox(item)));
+    list.push(item);
+  }
+  room.decor = list; // aparece na hora; o hub confirma em seguida
+  api('PATCH', `/api/rooms/${room.id}`, { decor: list }).catch(() => {});
+}
+
+function drawDecorCursor() {
+  const { tx, ty } = decorHover;
+  const m = DECOR_META[decorTool] || { w: 1, h: 1, layer: 'piso' };
+  const item = { type: decorTool, x: tx, y: m.layer === 'parede' ? 0 : ty };
+  const ok = decorTool === 'apagar' || decorFits(item);
+  ctx.strokeStyle = ok ? '#ffffff' : '#e5534b';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(item.x * T + 0.5, item.y * T + 0.5, m.w * T - 1, m.h * T - 1);
+}
+
+function setDecorMode(on) {
+  decorMode = on;
+  decorHover = null;
+  document.getElementById('btn-decor').classList.toggle('active', on);
+  const bar = document.getElementById('decor-bar');
+  bar.hidden = !on;
+  canvas.style.cursor = '';
+  if (on) renderDecorBar();
+}
+
+function renderDecorBar() {
+  const bar = document.getElementById('decor-bar');
+  bar.innerHTML = Object.entries(DECOR_META).map(([k, m]) =>
+    `<button data-tool="${k}" class="${decorTool === k ? 'active' : ''}">${m.name}</button>`).join('') +
+    `<button data-tool="apagar" class="${decorTool === 'apagar' ? 'active' : ''}">🧽 Apagar</button>` +
+    '<span class="muted">Clique no escritório para colocar. A cor da parede e o piso ficam em ⚙ da sala.</span>';
+  bar.querySelectorAll('[data-tool]').forEach((b) => (b.onclick = () => { decorTool = b.dataset.tool; renderDecorBar(); }));
+}
+document.getElementById('btn-decor').onclick = () => setDecorMode(!decorMode);
 
 // ---------- API ----------
 // quiet: não mostra alerta (quem chamou trata o erro, ex.: e.code === 'repo_mismatch')
@@ -2120,6 +2268,8 @@ function openRoomDialog(r) {
     </fieldset>
     <label>Piso<select name="floor">${Object.entries(FLOOR_NAMES).map(([k, v]) =>
       `<option value="${k}" ${k === (r?.floor || 'carpete') ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+    <label>Parede<select name="wall">${Object.entries(WALL_NAMES).map(([k, v]) =>
+      `<option value="${k}" ${k === (r?.wall || 'cinza') ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
     ${r ? '' : '<p class="muted">As mesas podem ser movidas entre salas em ⚙ Mesa.</p>'}
   `, async (d) => {
     d.areas = [...form.querySelectorAll('input[name=areas]:checked')].map((i) => i.value);

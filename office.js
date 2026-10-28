@@ -12,12 +12,16 @@ const { mask } = require('./secrets');
 const STATUSES = ['trabalhando', 'ocioso', 'bloqueado', 'concluido'];
 const FLOORS = ['madeira', 'carpete', 'piso', 'escuro'];
 const AREAS = ['copa', 'reuniao', 'descanso']; // blocos da coluna lateral de cada sala
+const WALLS = ['cinza', 'azul', 'verde', 'vinho', 'bege'];
+// itens de decoração que o usuário posiciona (quadro e bandeira ficam na parede, o resto no piso)
+const DECOR = ['quadro', 'bandeira', 'planta', 'tapete', 'estante', 'abajur', 'impressora'];
+const MAX_DECOR = 80;
 const MAX_LOG = 300;
 const GRACE_MS = 90 * 1000; // quanto o hub espera um PC que caiu voltar antes de abandonar as tarefas
 
 // escritório de exemplo para contas novas
 const SEED = {
-  rooms: [{ id: 'r1', name: 'Escritório', cols: 4, floor: 'madeira', areas: [...AREAS] }],
+  rooms: [{ id: 'r1', name: 'Escritório', cols: 4, floor: 'madeira', wall: 'cinza', decor: [], areas: [...AREAS] }],
   projects: [
     { id: 'p1', roomId: 'r1', name: 'Meu primeiro projeto', description: 'Clique na mesa e escolha a pasta em ⚙ Mesa', color: '#4f8cff', agentId: 'a1', folders: {} },
   ],
@@ -65,7 +69,7 @@ class Office {
     }
     // dados de versões sem salas: tudo vai para uma sala "Escritório"
     if (!s.rooms?.length) s.rooms = [{ id: 'r1', name: 'Escritório', cols: 4, floor: 'madeira' }];
-    for (const r of s.rooms) r.areas ??= [...AREAS];
+    for (const r of s.rooms) { r.areas ??= [...AREAS]; r.wall ??= 'cinza'; r.decor ??= []; }
     for (const p of s.projects) if (!s.rooms.some((r) => r.id === p.roomId)) p.roomId = s.rooms[0].id;
     for (const p of s.projects) {
       p.folders ??= {};
@@ -467,4 +471,4 @@ class Office {
   }
 }
 
-module.exports = { Office, HttpError, STATUSES, FLOORS, AREAS };
+module.exports = { Office, HttpError, STATUSES, FLOORS, AREAS, WALLS, DECOR, MAX_DECOR };
