@@ -8,6 +8,8 @@ const WALL_H = 3; // parede do topo, em tiles
 const DESK_X0 = 1;
 const LOUNGE_W = 7;
 const SPEED = 48; // px de mundo por segundo
+const RUN_SPEED = 130; // indo para a mesa trabalhar
+const IDLE_GRACE = 4000; // ms ocioso antes de largar a mesa
 
 const STATUS = {
   trabalhando: { label: 'Trabalhando', color: '#3fbf7f' },
@@ -227,7 +229,14 @@ function update(dt, now) {
     const desk = deskOf(a.id);
     let target, key;
 
-    if (desk && a.status !== 'ocioso') {
+    // um "ocioso" passageiro (troca de status no meio de um pedido) não tira o agente da mesa:
+    // só sai depois de alguns segundos ocioso de verdade
+    if (a.status !== 'ocioso') rt.idleSince = null;
+    else rt.idleSince ??= now;
+    const atDesk = rt.targetKey?.startsWith('desk');
+    const goIdle = a.status === 'ocioso' && !(atDesk && now - rt.idleSince < IDLE_GRACE);
+
+    if (desk && !goIdle) {
       target = desk.cell.seat;
       key = 'desk:' + desk.project.id + ':' + roomProjects().indexOf(desk.project) + ':' + world.cols;
       rt.spot = null;
@@ -246,7 +255,10 @@ function update(dt, now) {
     }
 
     rt.moving = false;
-    let budget = SPEED * dt;
+    // quem foi chamado ao trabalho vai correndo para a mesa: o balão de "pensando" já está na tela
+    // e o passeio de volta, na velocidade normal, parecia o agente enrolando antes de começar
+    const running = key.startsWith('desk');
+    let budget = (running ? RUN_SPEED : SPEED) * dt;
     while (budget > 0 && rt.path.length) {
       const p = rt.path[0];
       const dx = p.x - rt.x, dy = p.y - rt.y;
@@ -256,7 +268,7 @@ function update(dt, now) {
       rt.x += (dx / d) * step;
       rt.y += (dy / d) * step;
       budget -= step;
-      rt.walk += step;
+      rt.walk += running ? step * 0.5 : step; // correndo, as pernas não trocam rápido demais
       rt.moving = true;
       rt.facing = Math.abs(dy) > Math.abs(dx) ? (dy < 0 ? 'up' : 'down') : dx < 0 ? 'left' : 'right';
     }

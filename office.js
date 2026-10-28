@@ -332,6 +332,9 @@ class Office {
     if (this.chats.hasSession(ev.session_id)) return { ignored: 'sessão do hub' };
     const project = this.projectForPath(ev.cwd, envId);
     if (!project) return { ignored: 'nenhuma mesa com essa pasta' };
+    // pedido do hub em andamento nesta mesa: o runner já informa o status. O hook da sessão dele
+    // (que chega antes de o hub saber o id) mandaria "ocioso" e o agente largaria a mesa pensando
+    if (this.live[project.id]) return { ignored: 'mesa rodando pelo hub' };
     const agent = this.state.agents.find((a) => a.id === project.agentId);
     if (!agent) {
       this.addLog(null, project.id, `Atividade do Claude em "${project.name}", mas a mesa está vaga`);
