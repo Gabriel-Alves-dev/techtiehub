@@ -355,7 +355,7 @@ function drawRoom(now) {
       const cx0 = Math.max(0, pos), cx1 = Math.min(3 * T, pos + cw);
       if (cx1 > cx0) { rect(x + cx0, 0.9 * T, cx1 - cx0, 3, '#ffffffcc'); rect(x + cx0 + 2, 0.9 * T - 2, Math.max(0, Math.min(cx1, pos + cw - 2) - cx0 - 2), 2, '#ffffffcc'); }
       // feixe de luz no piso
-      ctx.globalAlpha = 0.05; ctx.fillStyle = '#fff';
+      ctx.globalAlpha = 0.03; ctx.fillStyle = '#fff';
       ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x + 3 * T, top); ctx.lineTo(x + 5 * T, top + 6 * T); ctx.lineTo(x + 2 * T, top + 6 * T); ctx.fill();
       ctx.globalAlpha = 1;
     } else if (hour >= 19 || hour < 5) {
@@ -458,7 +458,11 @@ function decorFits(d) {
   const m = DECOR_META[d.type];
   if (!m) return false;
   const maxX = world.L / T;
-  if (m.layer === 'parede') return d.x >= 1 && d.x + m.w <= maxX;
+  if (m.layer === 'parede') {
+    // as janelas ficam nos tiles [2+5k, 5+5k): quadros e bandeiras só nos vãos entre elas
+    for (let wx = 2; wx + 3 < maxX; wx += 5) if (d.x < wx + 3 && wx < d.x + m.w) return false;
+    return d.x >= 1 && d.x + m.w <= maxX;
+  }
   return d.x >= 1 && d.x + m.w <= maxX && d.y >= WALL_H && d.y + m.h <= world.H - 1;
 }
 
@@ -641,7 +645,11 @@ function drawDesk(i, now) {
 }
 
 // estilo do cabelo derivado do id: o mesmo agente tem sempre o mesmo visual
-const hairStyle = (a) => [...String(a.id)].reduce((h, c) => h + c.charCodeAt(0), 0) % 3; // 0 curto, 1 longo, 2 coque
+const HAIR_STYLES = ['curto', 'longo', 'coque'];
+const hairStyle = (a) => {
+  const i = HAIR_STYLES.indexOf(a.hairStyle);
+  return i >= 0 ? i : [...String(a.id)].reduce((h, c) => h + c.charCodeAt(0), 0) % 3; // sem escolha: pelo id
+};
 
 function drawAgent(a, rt, now) {
   const x = Math.round(rt.x);
@@ -694,6 +702,18 @@ function drawAgent(a, rt, now) {
     if (a.status === 'bloqueado') { rect(x - 3 + eo, hy + 3, 2, 1, hair); rect(x + 1 + eo, hy + 3, 2, 1, hair); rect(x - 1 + eo, hy + 7, 2, 1, '#8a3b32'); }
     else if (a.status === 'concluido') { rect(x - 2 + eo, hy + 6, 4, 1, '#a5553f'); rect(x - 2 + eo, hy + 5, 1, 1, '#a5553f'); rect(x + 1 + eo, hy + 5, 1, 1, '#a5553f'); }
     else rect(x - 1 + eo, hy + 7, 2, 1, '#a5553f');
+  }
+
+  // acessórios (de costas só aparece o que fica por fora da cabeça)
+  if (a.accessory === 'oculos' && !back) {
+    const eo = rt.facing === 'left' ? -1 : rt.facing === 'right' ? 1 : 0;
+    rect(x - 3 + eo, hy + 3, 3, 3, '#1a1a1acc'); rect(x + eo, hy + 3, 3, 3, '#1a1a1acc'); rect(x - 1 + eo, hy + 4, 2, 1, '#1a1a1a');
+  } else if (a.accessory === 'fone') {
+    rect(x - 5, hy - 2, 10, 2, '#2d3142'); // arco
+    rect(x - 6, hy + 1, 2, 5, '#e5534b'); rect(x + 4, hy + 1, 2, 5, '#e5534b'); // conchas
+  } else if (a.accessory === 'bone') {
+    rect(x - 5, hy - 3, 10, 4, '#e5534b');
+    if (!back) rect(x - 5 + (rt.facing === 'left' ? -2 : 0), hy + 1, rt.facing === 'left' ? 7 : 12, 1, '#b33a33'); // aba
   }
 
   // digitando: mãos alternando sobre o teclado
@@ -2424,6 +2444,9 @@ function prettyModel(id) {
   return m ? `${m[1][0].toUpperCase()}${m[1].slice(1)} ${m[2]}${m[3] ? '.' + m[3] : ''}` : id || '';
 }
 
+const HAIR_NAMES = { '': 'Automático', curto: 'Curto', longo: 'Longo', coque: 'Coque' };
+const ACCESSORY_NAMES = { '': 'Nenhum', oculos: 'Óculos', fone: 'Fone de ouvido', bone: 'Boné' };
+
 function openAgentDialog(a) {
   const shirt = a?.shirt || PALETTE[state.agents.length % PALETTE.length];
   openDialog(`
@@ -2434,6 +2457,12 @@ function openAgentDialog(a) {
       <label>Camisa<input type="color" name="shirt" value="${esc(shirt)}" /></label>
       <label>Cabelo<input type="color" name="hair" value="${esc(a?.hair || '#3b2416')}" /></label>
       <label>Pele<input type="color" name="skin" value="${esc(a?.skin || '#f1c7a0')}" /></label>
+    </div>
+    <div class="colors">
+      <label>Estilo do cabelo<select name="hairStyle">${Object.entries(HAIR_NAMES).map(([k, v]) =>
+        `<option value="${k}" ${k === (a?.hairStyle || '') ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+      <label>Acessório<select name="accessory">${Object.entries(ACCESSORY_NAMES).map(([k, v]) =>
+        `<option value="${k}" ${k === (a?.accessory || '') ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
     </div>
     <div class="colors">
       <label>Modelo<select name="model">${Object.entries(MODEL_NAMES).map(([k, v]) =>

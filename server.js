@@ -392,7 +392,7 @@ function pick(obj, fields) {
 
 const FIELDS = {
   projects: ['name', 'description', 'color', 'agentId', 'roomId', 'permissionMode', 'role'], // pasta: tratada à parte (uma por PC)
-  agents: ['name', 'role', 'shirt', 'hair', 'skin', 'status', 'message', 'model', 'effort'],
+  agents: ['name', 'role', 'shirt', 'hair', 'skin', 'hairStyle', 'accessory', 'status', 'message', 'model', 'effort'],
   rooms: ['name', 'cols', 'floor', 'wall', 'decor', 'areas'],
 };
 
@@ -920,6 +920,9 @@ async function officeApi(req, res, url, o, user) {
     // papel da mesa: '' = projeto; 'secretaria' = recebe a memória do escritório e delega para as outras
     if (body.role !== undefined && !['', 'secretaria'].includes(body.role)) body.role = '';
     if (body.effort !== undefined && !['', 'low', 'medium', 'high', 'xhigh', 'max'].includes(body.effort)) body.effort = '';
+    // aparência do agente: '' = automático (cabelo) / nenhum (acessório)
+    if (body.hairStyle !== undefined && !['', 'curto', 'longo', 'coque'].includes(body.hairStyle)) body.hairStyle = '';
+    if (body.accessory !== undefined && !['', 'oculos', 'fone', 'bone'].includes(body.accessory)) body.accessory = '';
     if (body.wall !== undefined && !WALLS.includes(body.wall)) body.wall = 'cinza';
     if (body.decor !== undefined) {
       // posições em tiles; itens inválidos são descartados em vez de recusar a lista toda

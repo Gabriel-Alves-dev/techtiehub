@@ -108,6 +108,7 @@ São os **únicos** dados fora do `Office`. Sempre filtrados pela equipe de quem
       "name": "Bia",
       "role": "Designer",
       "shirt": "#3fbf7f", "hair": "#c0392b", "skin": "#f6d5b8", // aparência
+      "hairStyle": "longo", "accessory": "oculos", // "" = cabelo pelo id / sem acessório
       "status": "trabalhando",          // trabalhando | ocioso | bloqueado | concluido
       "message": "Editando app.js"      // texto do balão / última ação
     }

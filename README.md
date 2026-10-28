@@ -67,7 +67,7 @@ No Windows, você também pode dar dois cliques em **`iniciar.bat`**. Ele instal
 ### Primeiros passos
 
 1. **Entre na sua conta.** O login fica salvo por 30 dias.
-1. **Contrate agentes** no botão **+ Contratar**: escolha nome, cargo, as cores do personagem e, se quiser, o **modelo** (Opus, Sonnet, Haiku) e o **esforço**. "Padrão do PC" usa a configuração do Claude Code do computador que executa.
+1. **Contrate agentes** no botão **+ Contratar**: escolha nome, cargo, as cores, o estilo do cabelo (curto, longo ou coque), um acessório (óculos, fone ou boné) e, se quiser, o **modelo** (Opus, Sonnet, Haiku) e o **esforço**. "Padrão do PC" usa a configuração do Claude Code do computador que executa.
 2. **Crie salas, se quiser,** pela aba **+ Sala**. Clique na aba da sala atual (⚙) para mudar o nome, as mesas por fileira, as áreas especiais, o piso e a parede. O botão **🎨 Decorar** deixa colocar quadros, bandeiras, plantas, tapetes, estantes, abajures e impressoras onde quiser (🧽 apaga).
 3. **Crie uma mesa** no botão **+ Mesa** ou clicando na mesa tracejada. Dê um nome, escolha a **pasta do projeto** com o botão "Escolher…" e o agente que vai sentar nela.
 4. **Clique na mesa ou no personagem** para abrir a janela de conversa e peça algo, por exemplo: *"Analisa a estrutura do projeto e me diz o que falta para o MVP"*.
