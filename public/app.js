@@ -274,6 +274,7 @@ function update(dt, now) {
       rt.facing = Math.abs(dy) > Math.abs(dx) ? (dy < 0 ? 'up' : 'down') : dx < 0 ? 'left' : 'right';
     }
     const arrived = !rt.path.length;
+    rt.sit = (rt.sit || 0) + (((arrived && key.startsWith('desk')) ? 1 : 0) - (rt.sit || 0)) * Math.min(1, dt * 8);
     rt.seated = arrived && key.startsWith('desk');
     rt.atSpot = arrived && !rt.seated && rt.spot != null ? world.spots[rt.spot] : null;
     if (rt.seated) rt.facing = 'up';
@@ -347,6 +348,22 @@ function drawRoom(now) {
     rect(x - 2, 0.6 * T - 2, 3 * T + 4, 1.6 * T + 4, '#2b2f3e');
     rect(x, 0.6 * T, 3 * T, 0.8 * T, sky1);
     rect(x, 1.4 * T, 3 * T, 0.8 * T, sky2);
+    const hour = new Date().getHours();
+    if (hour >= 7 && hour < 17) {
+      // nuvem passando devagar, cortada nas bordas da janela
+      const cw = 12, pos = ((now / 700 + x * 3) % (3 * T + cw)) - cw;
+      const cx0 = Math.max(0, pos), cx1 = Math.min(3 * T, pos + cw);
+      if (cx1 > cx0) { rect(x + cx0, 0.9 * T, cx1 - cx0, 3, '#ffffffcc'); rect(x + cx0 + 2, 0.9 * T - 2, Math.max(0, Math.min(cx1, pos + cw - 2) - cx0 - 2), 2, '#ffffffcc'); }
+      // feixe de luz no piso
+      ctx.globalAlpha = 0.05; ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x + 3 * T, top); ctx.lineTo(x + 5 * T, top + 6 * T); ctx.lineTo(x + 2 * T, top + 6 * T); ctx.fill();
+      ctx.globalAlpha = 1;
+    } else if (hour >= 19 || hour < 5) {
+      for (let k = 0; k < 6; k++) {
+        const sx = x + 2 + ((k * 37 + x) % (3 * T - 4)), sy = 0.7 * T + ((k * 53) % Math.floor(1.4 * T));
+        if (Math.abs(sx - (x + 1.5 * T)) > 2 && (now / 500 + k) % 3 < 2.4) rect(sx, sy, 1, 1, '#fff');
+      }
+    }
     rect(x + 1.5 * T - 1, 0.6 * T, 2, 1.6 * T, '#2b2f3e');
   }
 
@@ -449,8 +466,9 @@ function plant(x, y) {
   rect(x - 5, y - 6, 10, 8, '#b5643c');
   rect(x - 6, y - 7, 12, 2, '#8e4a2c');
   ctx.fillStyle = '#3f9b54';
+  const sway = Math.sin(animNow / 1100 + x * 0.1) * 1.3; // balanço leve, maior nas folhas do topo
   for (const [ox, oy, r] of [[0, -14, 6], [-5, -10, 5], [5, -10, 5], [0, -19, 4]]) {
-    ctx.beginPath(); ctx.arc(x + ox, y + oy, r, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x + ox + sway * (-oy / 19), y + oy, r, 0, Math.PI * 2); ctx.fill();
   }
 }
 
@@ -470,13 +488,22 @@ function drawAreas(now) {
   });
 }
 
-function drawCopa({ y0 }, now) {
+function drawCopa({ y0 }, now, occupied) {
   const { L } = world;
   // bancada com cafeteira
   rect(L + 0.3 * T, y0, 6.4 * T, T, '#d8d2c4');
   rect(L + 0.3 * T, y0 + T, 6.4 * T, 4, '#a49d8c');
   rect(L + 1 * T, y0 - 10, 12, 16, '#2d2d2d');
   rect(L + 1 * T + 3, y0 - 6, 6, 4, now % 1000 < 500 ? '#e5534b' : '#702a26');
+  if (world.spots.some((sp) => sp.act === 'cafe' && occupied.has(sp))) {
+    // alguém tomando café: vapor sobe da cafeteira
+    for (let k = 0; k < 3; k++) {
+      const t = (now / 1100 + k / 3) % 1;
+      ctx.globalAlpha = 0.6 * (1 - t);
+      rect(L + T + 5 + Math.round(Math.sin(t * 6 + k) * 2), y0 - 12 - t * 10, 2, 2, '#fff');
+    }
+    ctx.globalAlpha = 1;
+  }
   rect(L + 2.2 * T, y0 + 2, 6, 7, '#f5f5f5');
   rect(L + 2.7 * T, y0 + 2, 6, 7, '#4f8cff');
   // galão de água
@@ -613,43 +640,67 @@ function drawDesk(i, now) {
   text(truncate(project.name.toUpperCase(), 14), c.x + 2.5 * T, c.y + 4.25 * T, 7, '#fff');
 }
 
+// estilo do cabelo derivado do id: o mesmo agente tem sempre o mesmo visual
+const hairStyle = (a) => [...String(a.id)].reduce((h, c) => h + c.charCodeAt(0), 0) % 3; // 0 curto, 1 longo, 2 coque
+
 function drawAgent(a, rt, now) {
-  const x = Math.round(rt.x), y = Math.round(rt.y);
+  const x = Math.round(rt.x);
+  const y = Math.round(rt.y) + Math.round((rt.sit || 0) * 2); // ao sentar, o corpo desce um pouco
   const step = rt.moving ? Math.floor(rt.walk / 4) % 2 : 0;
   const back = rt.facing === 'up';
+  const skin = a.skin || '#f1c7a0', shirt = a.shirt || '#4f8cff', hair = a.hair || '#3b2416';
+  // respiração: a cabeça sobe e desce 1px de tempos em tempos quando parado
+  const hb = !rt.moving && Math.floor(now / 900 + a.name.length) % 2 ? 1 : 0;
 
   ctx.fillStyle = '#0005';
-  ctx.beginPath(); ctx.ellipse(x, y, 6, 2.5, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(x, Math.round(rt.y), 6, 2.5, 0, 0, Math.PI * 2); ctx.fill();
 
-  // pernas
+  // pernas e sapatos
   rect(x - 4, y - 6, 3, 6 - (step ? 1 : 0), '#2a2f45');
   rect(x + 1, y - 6, 3, 6 - (step ? 0 : 1), '#2a2f45');
-  // corpo e braços
-  rect(x - 5, y - 12, 10, 7, a.shirt || '#4f8cff');
-  const armSwing = rt.moving ? (step ? 1 : -1) : 0;
-  rect(x - 7, y - 11 + armSwing, 2, 5, a.shirt || '#4f8cff');
-  rect(x + 5, y - 11 - armSwing, 2, 5, a.shirt || '#4f8cff');
-  rect(x - 7, y - 6 + armSwing, 2, 2, a.skin || '#f1c7a0');
-  rect(x + 5, y - 6 - armSwing, 2, 2, a.skin || '#f1c7a0');
-  // cabeça
-  rect(x - 4, y - 20, 8, 8, a.skin || '#f1c7a0');
-  const hair = a.hair || '#3b2416';
+  rect(x - 5, y - (step ? 1 : 2), 4, 2, '#15171f');
+  rect(x + 1, y - (step ? 2 : 1), 4, 2, '#15171f');
+  // corpo (com uma faixa mais escura na barra da camisa)
+  rect(x - 5, y - 12 + hb, 10, 7 - hb, shirt);
+  rect(x - 5, y - 6, 10, 1, '#0003');
+  // braços: comemorando (concluído), pedindo ajuda (bloqueado) ou balançando ao andar
+  const seatedNow = rt.seated;
+  const swing = rt.moving ? (step ? 1 : -1) : 0;
+  const cheer = seatedNow && a.status === 'concluido' && Math.floor(now / 450) % 2 === 0;
+  const wave = seatedNow && a.status === 'bloqueado';
+  const lUp = cheer || (wave && Math.floor(now / 250) % 2 === 0), rUp = cheer;
+  const arm = (ax, up, sw) => {
+    if (up) { rect(ax, y - 19 + hb, 2, 6, shirt); rect(ax, y - 21 + hb, 2, 2, skin); }
+    else { rect(ax, y - 11 + hb + sw, 2, 5, shirt); rect(ax, y - 6 + sw, 2, 2, skin); }
+  };
+  arm(x - 7, lUp, swing);
+  arm(x + 5, rUp, -swing);
+  // pescoço e cabeça
+  rect(x - 1, y - 13 + hb, 2, 2, skin);
+  const hy = y - 20 + hb;
+  rect(x - 4, hy, 8, 8, skin);
+  const style = hairStyle(a);
   if (back) {
-    rect(x - 4, y - 21, 8, 8, hair);
+    rect(x - 4, hy - 1, 8, style === 1 ? 12 : 8, hair);
+    if (style === 2) rect(x - 2, hy - 4, 4, 3, hair);
   } else {
-    rect(x - 4, y - 21, 8, 3, hair);
-    rect(x - 5, y - 20, 1, 5, hair);
-    rect(x + 4, y - 20, 1, 5, hair);
+    rect(x - 4, hy - 1, 8, 3, hair);
+    rect(x - 5, hy, 1, style === 1 ? 10 : 5, hair);
+    rect(x + 4, hy, 1, style === 1 ? 10 : 5, hair);
+    if (style === 2) rect(x - 2, hy - 4, 4, 3, hair);
     const eo = rt.facing === 'left' ? -1 : rt.facing === 'right' ? 1 : 0;
-    const blink = now % 4000 < 120;
-    if (!blink) { rect(x - 2 + eo, y - 16, 1, 2, '#1a1a1a'); rect(x + 1 + eo, y - 16, 1, 2, '#1a1a1a'); }
+    if (now % 4000 >= 120) { rect(x - 2 + eo, hy + 4, 1, 2, '#1a1a1a'); rect(x + 1 + eo, hy + 4, 1, 2, '#1a1a1a'); }
+    // sobrancelhas e boca mudam com o humor: tensos se bloqueado, sorriso se concluído
+    if (a.status === 'bloqueado') { rect(x - 3 + eo, hy + 3, 2, 1, hair); rect(x + 1 + eo, hy + 3, 2, 1, hair); rect(x - 1 + eo, hy + 7, 2, 1, '#8a3b32'); }
+    else if (a.status === 'concluido') { rect(x - 2 + eo, hy + 6, 4, 1, '#a5553f'); rect(x - 2 + eo, hy + 5, 1, 1, '#a5553f'); rect(x + 1 + eo, hy + 5, 1, 1, '#a5553f'); }
+    else rect(x - 1 + eo, hy + 7, 2, 1, '#a5553f');
   }
 
   // digitando: mãos alternando sobre o teclado
-  if (rt.seated && a.status === 'trabalhando') {
+  if (seatedNow && a.status === 'trabalhando') {
     const k = Math.floor(now / 140) % 2;
-    rect(x - 5, y - 24 - k, 3, 2, a.skin || '#f1c7a0');
-    rect(x + 2, y - 24 - (1 - k), 3, 2, a.skin || '#f1c7a0');
+    rect(x - 5, y - 24 - k, 3, 2, skin);
+    rect(x + 2, y - 24 - (1 - k), 3, 2, skin);
   }
 }
 
@@ -691,12 +742,17 @@ function drawLabels(a, rt, now, talkers) {
   else if (act === 'arcade' && phase % 3 === 0) text('🕹️', rt.x + 9, y - 6, 8, '#fff');
 }
 
+let animNow = 0; // relógio do quadro atual, para itens que se mexem (plantas)
+
 function draw(now) {
+  animNow = now;
   ctx.setTransform(SCALE, 0, 0, SCALE, 0, 0);
   ctx.imageSmoothingEnabled = false;
   drawRoom(now);
   const slots = roomProjects().length + 1;
   for (let i = 0; i < slots; i++) drawDesk(i, now);
+  const hour = new Date().getHours();
+  if (hour >= 19 || hour < 5) { ctx.globalAlpha = 0.16; rect(0, 0, world.W * T, world.H * T, '#0d1440'); ctx.globalAlpha = 1; }
   const furniture = roomDecor().filter((d) => DECOR_META[d.type]?.layer === 'piso' && decorFits(d)).sort((p, q) => p.y - q.y);
   for (const d of furniture) DECOR_DRAW[d.type](d.x * T, d.y * T, now);
   if (decorMode && decorHover) drawDecorCursor();
