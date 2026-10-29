@@ -277,7 +277,7 @@ fieldset.areas legend { padding: 0 4px; font-size: 12px; color: var(--muted); }
 .win-bar:active { cursor: grabbing; }
 .win-title { flex: 1; display: flex; align-items: center; gap: 6px; font-weight: 600; white-space: nowrap; overflow: hidden; }
 .win-btn { padding: 4px 8px; box-shadow: none; font-size: 9px; }
-.win-body { flex: 1; min-height: 0; overflow-y: auto; padding: 12px; }
+.win-body { flex: 1; min-height: 0; overflow-y: auto; overflow-wrap: anywhere; padding: 12px; }
 .win-project .win-body { display: flex; flex-direction: column; overflow: hidden; }
 
 .pw-toolbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 10px; }
@@ -522,12 +522,30 @@ button.warn { color: var(--warn); border-color: var(--warn); }
   /* botões do topo numa faixa que rola de lado */
   .actions { flex-basis: 100%; overflow-x: auto; scrollbar-width: none; }
   .actions::-webkit-scrollbar { display: none; }
-  .actions button { flex: none; padding: 8px 10px; font-size: 9px; }
+  .actions button { flex: none; padding: 8px 10px; font-size: 9px; white-space: nowrap; }
+  .actions .menu { order: -1; } /* "Mais" primeiro: o resto da faixa rola de lado */
+  .actions .menu button { padding: 8px 12px; }
   /* dentro da faixa que rola, "absolute" ficaria cortado pelo overflow: ancora na tela inteira */
   .menu-list { position: fixed; top: calc(80px + env(safe-area-inset-top)); right: 10px; left: 10px; min-width: 0; }
-  .roombar { gap: 8px; padding: 6px 10px 0; }
-  .zoom button { padding: 6px 8px; }
+  /* abas numa linha só (rola de lado); modos e zoom na linha de baixo */
+  .roombar { flex-wrap: wrap; gap: 6px 8px; padding: 6px 10px; }
+  .room-tabs { flex-basis: 100%; scrollbar-width: none; }
+  .room-tabs::-webkit-scrollbar { display: none; }
+  .room-tab { padding: 10px 12px; }
+  #btn-move, #btn-decor { margin-bottom: 0; padding: 8px 12px; font-size: 14px; white-space: nowrap; }
+  #btn-move .lbl, #btn-decor .lbl { display: none; } /* só o ícone, para caber numa linha com o zoom */
+  .zoom { margin-left: auto; padding-bottom: 0; gap: 4px; }
+  .zoom button { padding: 9px 10px; font-size: 9px; white-space: nowrap; }
+  #zoom-label { min-width: 0; }
+  .decor-bar { flex-wrap: nowrap; overflow-x: auto; padding: 8px 10px; scrollbar-width: none; }
+  .decor-bar::-webkit-scrollbar { display: none; }
+  .decor-bar button { flex: none; padding: 9px 11px; white-space: nowrap; }
+  .decor-bar .muted { flex: none; white-space: normal; min-width: 240px; }
+  /* modo mover: só uma frase e o botão, então quebra linha em vez de rolar */
+  .decor-bar.wrap { flex-wrap: wrap; overflow: visible; }
+  .decor-bar.wrap .muted { flex: 1 1 200px; min-width: 0; }
   .hint { display: none; }
+  canvas { margin: 0 auto auto; } /* encosta no topo, sem faixa vazia acima */
   /* janelas ocupam a tela inteira (a posição salva no computador é ignorada) */
   .win {
     left: 0 !important; top: 0 !important; width: 100vw !important; height: 100dvh !important;
@@ -559,5 +577,6 @@ button.warn { color: var(--warn); border-color: var(--warn); }
   .option { padding: 6px 0; font-size: 14px; }
   .option input { width: 20px; height: 20px; }
   .card { padding: 12px; }
+  dialog .row .primary { flex: 1; }
   dialog { width: 100vw; max-width: 100vw; max-height: 100dvh; margin: 0; padding: 16px; border-width: 0; overflow-y: auto; }
 }

@@ -35,6 +35,8 @@ let hover = null;
 let monitor = { hosts: [], configured: false, denied: false, at: 0 }; // resumo dos servidores (só a dona do hub)
 let moveMode = false; // modo de mover mesas
 let moving = null; // mesa sendo arrastada: { id, from, to, wx, wy }
+let movePick = null; // toque: célula da mesa escolhida, esperando o destino
+let pointerKind = 'mouse'; // último tipo de ponteiro (mouse arrasta; toque escolhe origem e destino)
 
 // preferências do navegador (sala aberta, zoom, posição das janelas)
 function load(key) {
@@ -893,6 +895,7 @@ function draw(now) {
   for (const d of furniture) DECOR_DRAW[d.type](d.x * T, d.y * T, now);
   if (decorMode && decorHover) drawDecorCursor();
   if (moving) drawMoveGhost();
+  else if (movePick != null) drawMovePick();
 
   const ordered = visibleAgents().map((a) => [a, runtime.get(a.id)]).sort((p, q) => p[1].y - q[1].y);
   for (const [a, rt] of ordered) {
@@ -922,7 +925,8 @@ function resize() {
   if (!world) return;
   const ww = world.W * T, wh = world.H * T;
   const fit = Math.floor(Math.min((wrap.clientWidth - 16) / ww, (wrap.clientHeight - 16) / wh));
-  SCALE = zoom ?? Math.max(MIN_ZOOM, Math.min(4, fit));
+  // celular: no mínimo 2x (a 1x o texto fica ilegível); o que passar da tela rola com o dedo
+  SCALE = zoom ?? Math.max(innerWidth <= 760 ? 2 : MIN_ZOOM, Math.min(4, fit));
   if (canvas.width !== ww * SCALE || canvas.height !== wh * SCALE) {
     canvas.width = ww * SCALE;
     canvas.height = wh * SCALE;
@@ -960,7 +964,8 @@ let drag = null, suppressClick = false;
 canvas.addEventListener('pointerdown', (e) => {
   if (e.button === 1) e.preventDefault();
   if (e.button > 1) return;
-  if (moveMode && startMove(e)) return;
+  pointerKind = e.pointerType || 'mouse';
+  if (moveMode && pointerKind !== 'touch' && startMove(e)) return;
   drag = { x: e.clientX, y: e.clientY, sl: wrap.scrollLeft, st: wrap.scrollTop, moved: false };
 });
 window.addEventListener('pointermove', (e) => {
@@ -1025,7 +1030,10 @@ function updateBubbles() {
     }
     // sentado: acima do monitor; andando: acima do nome
     const by = rt.seated ? rt.y - 46 : rt.y - 34;
-    el.style.transform = `translate(${Math.round(ox + rt.x * SCALE)}px, ${Math.round(oy + by * SCALE)}px) translate(-50%, -100%)`;
+    // sem sair do escritório (no celular os balões largos passavam da borda da tela)
+    const half = el.offsetWidth / 2;
+    const bx = Math.max(ox + half, Math.min(ox + canvas.width - half, ox + rt.x * SCALE));
+    el.style.transform = `translate(${Math.round(bx)}px, ${Math.round(oy + by * SCALE)}px) translate(-50%, -100%)`;
   }
   for (const [id, el] of bubbleEls) if (!seen.has(id)) { el.remove(); bubbleEls.delete(id); }
 }
@@ -1087,7 +1095,7 @@ canvas.addEventListener('mouseleave', () => { hover = null; decorHover = null; t
 canvas.addEventListener('click', (ev) => {
   if (suppressClick) { suppressClick = false; return; } // foi um arrasto, não um clique
   if (decorMode) return placeDecor(decorTile(ev));
-  if (moveMode) return;
+  if (moveMode) return tapMove(ev);
   const hit = hitTest(ev);
   if (!hit) return;
   if (hit.kind === 'rack') return openMonitorWindow(hit.host);
@@ -1106,6 +1114,21 @@ function cellAt(ev) {
   const c = Math.floor((wx / T - DESK_X0) / CELL_W), row = Math.floor((wy / T - WALL_H) / CELL_H);
   const inside = c >= 0 && c < world.cols && row >= 0 && row < world.rows;
   return { idx: inside ? row * world.cols + c : null, wx, wy };
+}
+
+// Toque: o 1º toque escolhe a mesa, o 2º escolhe o destino (arrastar com o dedo travaria a rolagem).
+function tapMove(ev) {
+  if (pointerKind !== 'touch') return; // com o mouse, quem move é o arrasto
+  const { idx } = cellAt(ev);
+  if (movePick == null) {
+    if (world.byslot.has(idx)) movePick = idx;
+    return;
+  }
+  const from = movePick;
+  movePick = null;
+  if (idx == null || idx === from) return;
+  moving = { id: world.byslot.get(from).id, from, to: idx, wx: 0, wy: 0 };
+  finishMove();
 }
 
 function startMove(e) {
@@ -1134,6 +1157,14 @@ function finishMove() {
   api('PATCH', `/api/rooms/${room.id}`, { slots: room.slots }).catch(() => {});
 }
 
+function drawMovePick() {
+  const x = (DESK_X0 + (movePick % world.cols) * CELL_W) * T, y = (WALL_H + Math.floor(movePick / world.cols) * CELL_H) * T;
+  ctx.strokeStyle = ['#ffd166', '#fff'][Math.floor(Date.now() / 350) % 2];
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x + 0.5 * T, y + 0.5 * T, 4 * T, 4.1 * T);
+  ctx.lineWidth = 1;
+}
+
 function drawMoveGhost() {
   const m = moving;
   if (m.to == null) return;
@@ -1151,13 +1182,14 @@ function setMoveMode(on) {
   if (on && decorMode) setDecorMode(false);
   moveMode = on;
   moving = null;
+  movePick = null;
   document.getElementById('btn-move').classList.toggle('active', on);
   const bar = document.getElementById('decor-bar');
   bar.hidden = !on;
-  canvas.style.touchAction = on ? 'none' : ''; // no celular, arrastar não pode rolar a página
+  bar.classList.toggle('wrap', on);
   canvas.style.cursor = '';
   if (on) {
-    bar.innerHTML = '<span class="muted">Arraste uma mesa para outra posição. Se já houver uma mesa lá, as duas trocam de lugar.</span><button id="move-done">Concluir</button>';
+    bar.innerHTML = `<span class="muted">${matchMedia('(pointer: coarse)').matches ? 'Toque numa mesa e depois no lugar de destino.' : 'Arraste uma mesa para outra posição.'} Se já houver uma mesa lá, as duas trocam de lugar.</span><button id="move-done">Concluir</button>`;
     bar.querySelector('#move-done').onclick = () => setMoveMode(false);
   }
   world = computeWorld();
@@ -1217,6 +1249,7 @@ function setDecorMode(on) {
   document.getElementById('btn-decor').classList.toggle('active', on);
   const bar = document.getElementById('decor-bar');
   bar.hidden = !on;
+  bar.classList.remove('wrap');
   canvas.style.cursor = '';
   if (on) renderDecorBar();
 }
