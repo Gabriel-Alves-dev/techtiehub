@@ -7,6 +7,8 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
+const MAX_VOICE = 6; // em malha, cada pessoa envia o áudio a todas as outras
+const VOICE_GRACE_MS = 10000; // sem conexão por tanto tempo = sai da sala de voz
 const MAX_TEXT = 2000;
 const MAX_KEPT = 500; // por conversa; as mais antigas saem
 const PAGE = 60;
@@ -28,6 +30,8 @@ class Community {
     this.db.dms ??= {};
     this.db.reads ??= {};
     this.streams = new Map(); // userId -> Set(res) das abas abertas
+    this.voice = new Map(); // teamId -> Map(userId -> nome): quem está na sala de voz (só em memória)
+    this.voiceTimers = new Map(); // userId -> timer que tira da voz quem ficou sem conexão
   }
 
   save() {
@@ -56,11 +60,55 @@ class Community {
     res.write(': ok\n\n');
     if (!this.streams.has(userId)) this.streams.set(userId, new Set());
     this.streams.get(userId).add(res);
+    clearTimeout(this.voiceTimers.get(userId)); // recarregou a página: continua na voz
     const ping = setInterval(() => res.write(': ping\n\n'), 25000);
     req.on('close', () => {
       clearInterval(ping);
-      this.streams.get(userId)?.delete(res);
+      const set = this.streams.get(userId);
+      set?.delete(res);
+      if (!set?.size) this.voiceTimers.set(userId, setTimeout(() => this.dropFromVoice(userId), VOICE_GRACE_MS));
     });
+  }
+
+  // ---------- Sala de voz da equipe ----------
+  // O áudio vai direto entre as pessoas (WebRTC); o hub só repassa a sinalização (oferta, resposta e
+  // candidatos ICE) pelo SSE. Em malha, então a sala tem limite de gente.
+  voiceMembers(user) {
+    return [...(this.voice.get(user.teamId) || [])].map(([id, name]) => ({ id, name }));
+  }
+
+  voiceBroadcast(user) {
+    this.push(this.auth.teamMembers(user).map((u) => u.id), 'voice', { members: this.voiceMembers(user) });
+  }
+
+  voiceJoin(user) {
+    const room = this.voice.get(user.teamId) ?? new Map();
+    if (!room.has(user.id) && room.size >= MAX_VOICE) throw new Error(`a sala de voz está cheia (${MAX_VOICE} pessoas)`);
+    room.set(user.id, user.name);
+    this.voice.set(user.teamId, room);
+    this.voiceBroadcast(user);
+    return this.voiceMembers(user);
+  }
+
+  voiceLeave(user) {
+    const room = this.voice.get(user.teamId);
+    if (!room?.delete(user.id)) return;
+    if (!room.size) this.voice.delete(user.teamId);
+    this.voiceBroadcast(user);
+  }
+
+  dropFromVoice(userId) {
+    this.voiceTimers.delete(userId);
+    const user = this.auth.findUser(userId);
+    if (user && !this.streams.get(userId)?.size) this.voiceLeave(user);
+  }
+
+  // repassa a sinalização para outra pessoa da mesma sala de voz
+  voiceSignal(user, to, data) {
+    const room = this.voice.get(user.teamId);
+    if (!room?.has(user.id) || !room.has(to) || to === user.id) throw new Error('essa pessoa não está na sala de voz');
+    if (!data || typeof data !== 'object') throw new Error('sinalização inválida');
+    this.push([to], 'voice-signal', { from: user.id, data });
   }
 
   push(userIds, event, data) {

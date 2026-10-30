@@ -1027,6 +1027,23 @@ async function communityApi(req, res, url, user) {
   const method = req.method;
   if (part === 'events' && method === 'GET') return community.attach(user.id, req, res);
   if (part === 'summary' && method === 'GET') return send(res, 200, community.summary(user));
+  if (part === 'voice') {
+    // sala de voz da equipe: entrar, sair e repassar a sinalização WebRTC (o áudio não passa por aqui)
+    if (!id && method === 'GET') return send(res, 200, { members: community.voiceMembers(user) });
+    if (method !== 'POST') return send(res, 404, { error: 'rota desconhecida' });
+    try {
+      if (id === 'join') return send(res, 200, { members: community.voiceJoin(user) });
+      if (id === 'leave') { community.voiceLeave(user); return send(res, 200, { ok: true }); }
+      if (id === 'signal') {
+        const body = await readBody(req, 40e3);
+        community.voiceSignal(user, String(body.to || ''), body.data);
+        return send(res, 200, { ok: true });
+      }
+    } catch (e) {
+      return send(res, 400, { error: e.message });
+    }
+    return send(res, 404, { error: 'rota desconhecida' });
+  }
   const chat = part === 'general' ? 'general' : part === 'dm' ? id : null;
   if (!chat) return send(res, 404, { error: 'rota desconhecida' });
   if (method === 'GET') {

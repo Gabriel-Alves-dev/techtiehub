@@ -2857,7 +2857,7 @@ const commUnreadTotal = () => comm.unread.general + Object.values(comm.unread.dm
 function renderCommBadge() {
   const n = commUnreadTotal();
   document.getElementById('btn-community').textContent = '💬 Comunidade' + (n ? ` (${n > 99 ? '99+' : n})` : '');
-  document.getElementById('btn-more').textContent = '☰ Mais' + (n ? ' •' : '');
+  document.getElementById('btn-more').textContent = '☰ Mais' + (n ? ' •' : '') + (voice.on ? ' 🎙️' : '');
 }
 
 async function loadCommunity() {
@@ -2874,6 +2874,8 @@ function connectCommunity() {
   comm.stream = new EventSource('/api/community/events');
   comm.stream.addEventListener('msg', (e) => onCommMessage(JSON.parse(e.data)));
   comm.stream.addEventListener('tasks', () => { const w = wins.get('tasks'); if (w) loadTasks(w); });
+  comm.stream.addEventListener('voice', (e) => onVoiceMembers(JSON.parse(e.data).members));
+  comm.stream.addEventListener('voice-signal', (e) => onVoiceSignal(JSON.parse(e.data)));
   // ao (re)conectar, recupera o que passou enquanto estava fora
   comm.stream.onopen = async () => {
     await loadCommunity();
@@ -2995,6 +2997,228 @@ function openCommunityWindow() {
 }
 
 document.getElementById('btn-community').onclick = () => openCommunityWindow();
+
+// ---------- Sala de voz da equipe ----------
+// WebRTC em malha: cada pessoa liga direto a cada uma das outras, então o áudio não passa pelo hub (ele só
+// repassa a sinalização pelo SSE da comunidade). Quem entra manda a oferta para quem já estava na sala.
+// Só STUN: atrás de redes muito fechadas (algumas de empresa) a ligação pode não fechar sem um servidor TURN.
+const ICE = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+const voice = {
+  on: false, joining: false, stream: null, muted: false, members: [],
+  peers: new Map(), // id -> { pc, audio, muted, state, queue }
+  levels: new Map(), // id -> { an, buf } (medidor de quem está falando)
+  speaking: new Set(), ctx: null, timer: null,
+};
+
+const voiceName = (id) => voice.members.find((m) => m.id === id)?.name || 'alguém';
+
+function renderVoiceBadge() {
+  const n = voice.members.length;
+  document.getElementById('btn-voice').textContent = '🎙️ Voz' + (voice.on ? ' (você está na sala)' : n ? ` (${n} na sala)` : '');
+  renderCommBadge(); // o "Mais" mostra 🎙️ enquanto você está na voz
+  const win = wins.get('voice');
+  if (win) renderVoiceWindow(win);
+}
+
+function voiceSend(to, data) {
+  api('POST', '/api/community/voice/signal', { to, data }, { quiet: true }).catch(() => {});
+}
+
+function voiceWatch(id, stream) {
+  try {
+    voice.ctx ??= new AudioContext();
+    const an = voice.ctx.createAnalyser();
+    an.fftSize = 512;
+    voice.ctx.createMediaStreamSource(stream).connect(an); // sem ligar na saída: o som já toca pelo <audio>
+    voice.levels.set(id, { an, buf: new Uint8Array(an.fftSize) });
+  } catch {}
+}
+
+// de tempos em tempos mede o volume de cada pessoa e marca quem está falando
+function voiceTick() {
+  if (voice.ctx?.state === 'suspended') voice.ctx.resume().catch(() => {});
+  const now = new Set();
+  for (const [id, { an, buf }] of voice.levels) {
+    if (id === me.id && voice.muted) continue;
+    if (id !== me.id && voice.peers.get(id)?.muted) continue;
+    an.getByteTimeDomainData(buf);
+    let sum = 0;
+    for (const v of buf) sum += ((v - 128) / 128) ** 2;
+    if (Math.sqrt(sum / buf.length) > 0.02) now.add(id);
+  }
+  const same = now.size === voice.speaking.size && [...now].every((id) => voice.speaking.has(id));
+  voice.speaking = now;
+  if (!same) wins.get('voice')?.body.querySelectorAll('[data-vid]').forEach((el) => el.classList.toggle('speaking', now.has(el.dataset.vid)));
+}
+
+function voicePeer(id, initiator) {
+  if (voice.peers.has(id)) return voice.peers.get(id);
+  const pc = new RTCPeerConnection(ICE);
+  const peer = { pc, audio: new Audio(), muted: false, state: 'conectando', queue: [] };
+  voice.peers.set(id, peer);
+  for (const t of voice.stream.getTracks()) pc.addTrack(t, voice.stream);
+  pc.onicecandidate = (e) => e.candidate && voiceSend(id, { candidate: e.candidate });
+  pc.ontrack = (e) => {
+    peer.audio.srcObject = e.streams[0];
+    peer.audio.muted = peer.muted;
+    peer.audio.play().catch(() => {});
+    voiceWatch(id, e.streams[0]);
+  };
+  pc.onconnectionstatechange = () => {
+    peer.state = { connected: 'conectado', failed: 'falhou', disconnected: 'instável', closed: 'fechado' }[pc.connectionState] || 'conectando';
+    const win = wins.get('voice');
+    if (win) renderVoiceWindow(win);
+  };
+  if (initiator) {
+    pc.createOffer().then((o) => pc.setLocalDescription(o)).then(() => voiceSend(id, { sdp: pc.localDescription })).catch(() => {});
+  }
+  return peer;
+}
+
+function voiceDrop(id) {
+  const peer = voice.peers.get(id);
+  if (peer) {
+    peer.pc.close();
+    peer.audio.srcObject = null;
+    voice.peers.delete(id);
+  }
+  voice.levels.delete(id);
+  voice.speaking.delete(id);
+}
+
+async function onVoiceSignal({ from, data }) {
+  if (!voice.on || !data) return;
+  // oferta nova de quem já tínhamos: a pessoa saiu e voltou, a ligação antiga não serve mais
+  if (data.sdp?.type === 'offer' && voice.peers.get(from)?.pc.remoteDescription) voiceDrop(from);
+  const peer = voicePeer(from, false);
+  const pc = peer.pc;
+  try {
+    if (data.sdp) {
+      await pc.setRemoteDescription(data.sdp);
+      for (const c of peer.queue.splice(0)) await pc.addIceCandidate(c).catch(() => {});
+      if (data.sdp.type === 'offer') {
+        await pc.setLocalDescription(await pc.createAnswer());
+        voiceSend(from, { sdp: pc.localDescription });
+      }
+    } else if (data.candidate) {
+      if (pc.remoteDescription) await pc.addIceCandidate(data.candidate).catch(() => {});
+      else peer.queue.push(data.candidate); // chegou antes da oferta
+    }
+  } catch {}
+}
+
+// A lista da sala mudou: fecha a ligação de quem saiu e liga em quem entrou antes de nós.
+function onVoiceMembers(members) {
+  voice.members = members;
+  if (voice.on) {
+    for (const id of [...voice.peers.keys()]) if (!members.some((m) => m.id === id)) voiceDrop(id);
+    // o hub nos tirou (ficamos sem conexão por um tempo): entra de novo
+    if (!members.some((m) => m.id === me.id)) joinVoice(true);
+  }
+  renderVoiceBadge();
+}
+
+async function joinVoice(rejoin = false) {
+  if (voice.joining || (voice.on && !rejoin)) return;
+  if (!navigator.mediaDevices?.getUserMedia) {
+    return alert('O navegador só libera o microfone em páginas seguras (https). Abra o hub pelo endereço com https.');
+  }
+  voice.joining = true;
+  try {
+    if (!voice.stream) {
+      try {
+        voice.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      } catch {
+        return alert('Não consegui usar o microfone. Libere a permissão do microfone para este site no navegador e tente de novo.');
+      }
+      voice.stream.getAudioTracks().forEach((t) => (t.enabled = !voice.muted));
+      voiceWatch(me.id, voice.stream);
+    }
+    const { members } = await api('POST', '/api/community/voice/join');
+    voice.on = true;
+    voice.members = members;
+    // quem já estava na sala não sabe de nós: nós mandamos a oferta
+    for (const m of members) if (m.id !== me.id) voicePeer(m.id, true);
+    clearInterval(voice.timer);
+    voice.timer = setInterval(voiceTick, 200);
+  } catch {
+    voice.on = false;
+  } finally {
+    voice.joining = false;
+    renderVoiceBadge();
+  }
+}
+
+function leaveVoice() {
+  if (!voice.on && !voice.stream) return;
+  voice.on = false;
+  clearInterval(voice.timer);
+  for (const id of [...voice.peers.keys()]) voiceDrop(id);
+  voice.stream?.getTracks().forEach((t) => t.stop());
+  voice.stream = null;
+  voice.levels.clear();
+  voice.speaking.clear();
+  api('POST', '/api/community/voice/leave', {}, { quiet: true }).catch(() => {});
+  renderVoiceBadge();
+}
+
+function toggleSelfMute() {
+  voice.muted = !voice.muted;
+  voice.stream?.getAudioTracks().forEach((t) => (t.enabled = !voice.muted));
+  renderVoiceWindow(wins.get('voice'));
+}
+
+// Silenciar uma pessoa só vale para você: ela continua falando para os outros.
+function togglePeerMute(id) {
+  const peer = voice.peers.get(id);
+  if (!peer) return;
+  peer.muted = !peer.muted;
+  peer.audio.muted = peer.muted;
+  renderVoiceWindow(wins.get('voice'));
+}
+
+window.addEventListener('pagehide', () => { if (voice.on) navigator.sendBeacon?.('/api/community/voice/leave', new Blob(['{}'], { type: 'application/json' })); });
+
+function renderVoiceWindow(win) {
+  if (!win) return;
+  const rows = voice.members.map((m) => {
+    const self = m.id === me.id;
+    const peer = voice.peers.get(m.id);
+    const muted = self ? voice.muted : peer?.muted;
+    const state = self ? 'você' : !voice.on ? '' : peer ? peer.state : 'conectando';
+    return `<div class="card voice-row ${voice.speaking.has(m.id) ? 'speaking' : ''}" data-vid="${esc(m.id)}">
+      <span class="voice-dot"></span>
+      <div class="title">${esc(m.name)} ${muted ? '<span title="Mutado">🔇</span>' : ''}</div>
+      <div class="sub">${state}</div>
+      ${voice.on ? `<button data-act="${self ? 'self' : 'peer'}" data-id="${esc(m.id)}">${self ? (voice.muted ? '🎙️ Ativar meu microfone' : '🔇 Mutar meu microfone') : (muted ? '🔈 Ouvir' : '🔇 Mutar para mim')}</button>` : ''}
+    </div>`;
+  }).join('');
+  win.body.innerHTML = `
+    <p class="muted">Sala de voz de toda a equipe, para conversar como num chat de voz. O áudio vai direto entre as pessoas, sem passar pelo hub.
+      Até 6 pessoas. Mutar alguém só vale para você.</p>
+    <div class="row">${voice.on
+      ? `<button class="danger" data-act="leave">Sair da sala</button>`
+      : `<button class="primary" data-act="join">🎙️ Entrar na sala de voz</button>`}</div>
+    <h3>Na sala (${voice.members.length})</h3>
+    ${rows || '<p class="muted">Ninguém na sala agora.</p>'}`;
+}
+
+function openVoiceWindow() {
+  const win = openWindow('voice', { w: 420, h: 520, cls: 'win-vars' }, (win) => {
+    win.titleEl.textContent = '🎙️ Sala de voz';
+    win.body.onclick = (e) => {
+      const b = e.target.closest('[data-act]');
+      if (!b) return;
+      if (b.dataset.act === 'join') joinVoice();
+      else if (b.dataset.act === 'leave') leaveVoice();
+      else if (b.dataset.act === 'self') toggleSelfMute();
+      else if (b.dataset.act === 'peer') togglePeerMute(b.dataset.id);
+    };
+  });
+  api('GET', '/api/community/voice', undefined, { quiet: true }).then((d) => onVoiceMembers(d.members)).catch(() => {});
+  renderVoiceWindow(win);
+}
+document.getElementById('btn-voice').onclick = () => openVoiceWindow();
 
 // ---------- Visita (só a dona do hub) ----------
 // Resumo só de leitura do escritório de um colega: mesas, agentes e o que estão fazendo.
