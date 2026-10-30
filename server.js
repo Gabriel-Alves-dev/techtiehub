@@ -285,9 +285,10 @@ async function connectorApi(req, res, url, op, sub) {
       o.save();
       return send(res, 200, { ok: true, mensagem: 'Recado deixado; a secretária vê no próximo pedido dela.' });
     }
-    if (sub === 'desks') return send(res, 200, o.roster().filter((d) => !d.secretaria));
+    // a secretária vê as outras secretárias também (só não vê a si mesma); mesa de projeto continua só com as mesas de projeto
+    if (sub === 'desks') return send(res, 200, o.roster().filter((d) => d.id !== me.id && (isSec || !d.secretaria)));
     if (sub === 'desk') {
-      const found = o.findDesk(body.q);
+      const found = o.findDesk(body.q, { withSecretaries: true, except: me.id });
       if (found.error) return send(res, 404, { error: found.error });
       const p = found.project;
       const chat = o.chats.get(p.id);
@@ -299,11 +300,13 @@ async function connectorApi(req, res, url, op, sub) {
       });
     }
     if (sub === 'delegate' && req.method === 'POST') {
-      const found = o.findDesk(body.mesa);
+      const found = o.findDesk(body.mesa, { withSecretaries: true, except: me.id });
       if (found.error) return send(res, 404, { error: found.error });
       const pedido = String(body.pedido || '').trim();
       if (!pedido) return send(res, 400, { error: 'o pedido está vazio' });
-      const r = await delegate(o, found.project, pedido, { from: 'secretária', preferredEnv: envId });
+      // entre secretárias, quem recebe precisa saber quem mandou (e não devolver a demanda)
+      const from = found.project.role === 'secretaria' ? `secretária ${meAgent || me.name}` : 'secretária';
+      const r = await delegate(o, found.project, pedido, { from, preferredEnv: envId });
       return send(res, 200, { mesa: found.project.name, agente: o.agentOf(found.project.id)?.name || null, ...r });
     }
     if (sub === 'reports') return send(res, 200, o.state.reports[body.dia || o.day()] || {});
@@ -444,7 +447,7 @@ function briefFor(o, project, folder) {
     // todo agente sabe onde está: a secretária recebe a visão do escritório; os outros, a da sua mesa
     office: {
       role: project.role === 'secretaria' ? 'secretaria' : 'mesa',
-      context: [project.role === 'secretaria' ? o.secretaryContext() + teamContext(o) : o.deskContext(project.id), o.varsContext(project.id)]
+      context: [project.role === 'secretaria' ? o.secretaryContext(project.id) + teamContext(o) : o.deskContext(project.id), o.varsContext(project.id)]
         .filter(Boolean).join('\n\n'),
     },
   };

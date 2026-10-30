@@ -237,11 +237,12 @@ class Office {
   }
 
   // Acha a mesa pelo nome do projeto ou do agente (sem acento/maiúscula). { project } ou { error }
-  findDesk(q) {
+  // withSecretaries: quem chama é uma secretária (exceto = a mesa dela) e pode falar com as outras secretárias
+  findDesk(q, { withSecretaries = false, except = null } = {}) {
     const norm = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
     const k = norm(q);
     if (!k) return { error: 'informe a mesa ou o agente' };
-    const cands = this.state.projects.filter((p) => p.role !== 'secretaria').map((p) => ({ p, names: [p.name, this.agentOf(p.id)?.name].filter(Boolean).map(norm) }));
+    const cands = this.state.projects.filter((p) => p.id !== except && (withSecretaries || p.role !== 'secretaria')).map((p) => ({ p, names: [p.name, this.agentOf(p.id)?.name].filter(Boolean).map(norm) }));
     for (const test of [(n) => n === k, (n) => n.startsWith(k), (n) => n.includes(k) || k.includes(n)]) {
       const hits = cands.filter((c) => c.names.some(test));
       if (hits.length === 1) return { project: hits[0].p };
@@ -254,14 +255,14 @@ class Office {
   deskContext(projectId) {
     const p = this.state.projects.find((x) => x.id === projectId);
     const a = this.agentOf(projectId);
-    const sec = this.state.projects.find((x) => x.role === 'secretaria');
-    const secName = sec ? this.agentOf(sec.id)?.name || 'a secretária' : null;
+    const secs = this.state.projects.filter((x) => x.role === 'secretaria').map((s) => this.agentOf(s.id)?.name || 'a secretária');
+    const secName = secs.length ? secs.join(' e ') : null;
     const others = this.roster().filter((d) => d.id !== projectId && !d.secretaria)
       .map((d) => `- ${d.mesa}${d.agente ? ` — ${d.agente}` : ''}${d.descricao ? ` · ${d.descricao}` : ''}`);
     return [
       '# Você trabalha no escritório Techtie Hub',
       `Você é ${a ? `${a.name}${a.role ? `, ${a.role}` : ''}` : 'o agente'}, responsável pela mesa "${p.name}"${p.description ? ` (${p.description})` : ''}. ` +
-      'O escritório tem outros agentes, cada um cuidando de um projeto' + (secName ? `, e uma secretária (${secName}) que organiza e distribui as demandas.` : '.'),
+      'O escritório tem outros agentes, cada um cuidando de um projeto' + (secName ? `, e ${secs.length > 1 ? 'secretárias' : 'uma secretária'} (${secName}) que ${secs.length > 1 ? 'organizam e distribuem' : 'organiza e distribui'} as demandas.` : '.'),
       'Ferramentas do escritório (servidor "escritorio"): enviar_relatorio, salvar_memoria_projeto, avisar_secretaria, ler_memoria_escritorio e listar_mesas. ' +
       'Quando o usuário pedir para mandar o relatório, avisar ou falar com a secretária, ou salvar algo na memória do projeto/escritório, ' +
       'use essas ferramentas: não procure arquivos ou configurações no projeto para isso.',
@@ -271,7 +272,9 @@ class Office {
   }
 
   // Contexto que vai no prompt de sistema da secretária a cada pedido (sempre atualizado).
-  secretaryContext() {
+  secretaryContext(selfId) {
+    const peers = this.roster().filter((d) => d.secretaria && d.id !== selfId)
+      .map((d) => `- **${d.mesa}**${d.agente ? ` — agente ${d.agente}` : ''}${d.descricao ? ` · ${d.descricao}` : ''} · ${d.ocupada ? 'trabalhando agora' : d.status}`);
     const desks = this.roster().filter((d) => !d.secretaria).map((d) =>
       `- **${d.mesa}**${d.agente ? ` — agente ${d.agente}` : ' — sem agente'}${d.sala ? ` · sala ${d.sala}` : ''}${d.descricao ? ` · ${d.descricao}` : ''} · ${d.ocupada ? 'trabalhando agora' : d.status}${d.naFila ? ` · ${d.naFila} na fila` : ''}`);
     const mem = this.state.officeMemory;
@@ -288,6 +291,9 @@ class Office {
       'Se não tiver certeza de qual mesa é, use as ferramentas listar_mesas e ler_mesa. Depois de delegar, diga ao usuário em uma frase para qual mesa foi.',
       `Hoje é ${this.day()}.`,
       '## Mesas do escritório', desks.join('\n') || '(nenhuma)',
+      ...(peers.length ? ['## Outras secretárias',
+        'Você pode ler (ler_mesa) e passar demandas (delegar) para elas, igual às demais mesas. Faça isso só quando o assunto for delas ' +
+        'ou o usuário pedir, e nunca devolva a demanda a quem acabou de te mandar: seria um ciclo sem fim.', peers.join('\n')] : []),
       '## Memória do escritório', mem.general?.trim() || '(sem notas gerais)', ...blocks,
       '## Relatórios de hoje', reports.join('\n\n') || '(nenhum relatório enviado hoje)',
       '## Recados das mesas (hoje)', this.state.inbox.filter((m) => this.day(m.at) === this.day())
