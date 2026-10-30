@@ -79,8 +79,8 @@ No Windows, você também pode dar dois cliques em **`iniciar.bat`**. Ele instal
 |---|---|
 | **Trabalhando** | Sentado digitando, código passando no monitor, balão com a ação atual |
 | **Bloqueado** | Monitor vermelho, balão amarelo pulando: tem pergunta ou pedido de permissão |
-| **Concluído** | Monitor azul com ✓, balão "Pronto!" |
-| **Ocioso** | Levanta e vai para as áreas da sala: café ☕, reunião 💬, sofá, puff 💤 ou fliperama 🕹️ |
+| **Concluído** | Monitor azul com ✓, balão "Pronto!". Depois de um tempo sentado, o agente pode levantar, dar uma volta ou ir a uma área, e volta à cadeira |
+| **Ocioso** | Sem nada a fazer, alterna entre ficar sentado, dar uma volta pelo corredor e ir às áreas da sala: café ☕, reunião 💬, sofá, puff 💤 ou fliperama 🕹️. Ao receber um pedido, corre de volta para a mesa |
 
 ### Conversando com os agentes
 

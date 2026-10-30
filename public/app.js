@@ -256,6 +256,24 @@ function pickSpot(agentId) {
   return pool[Math.floor(Math.random() * pool.length)];
 }
 
+// Próximo plano de quem está livre. Depois de passear, é mais provável voltar para a cadeira.
+function pickPlan(prev) {
+  const w = prev === 'sit' || prev == null ? { sit: 15, spot: 50, stroll: 35 } : { sit: 55, spot: 20, stroll: 25 };
+  let r = Math.random() * (w.sit + w.spot + w.stroll);
+  for (const k of ['sit', 'spot', 'stroll']) { if ((r -= w[k]) < 0) return k; }
+  return 'sit';
+}
+
+// Ponto de um corredor horizontal (de qualquer fileira) para andar sem ir a lugar nenhum.
+function strollPoint(rt) {
+  for (let n = 0; n < 8; n++) {
+    const row = Math.floor(Math.random() * world.rows);
+    const p = { x: (DESK_X0 + 0.5) * T + Math.random() * (world.L - (DESK_X0 + 2) * T), y: (WALL_H + row * CELL_H + 4.45) * T };
+    if (Math.hypot(p.x - rt.x, p.y - rt.y) > 3 * T) return p;
+  }
+  return { x: world.trunkX - T, y: (WALL_H + 4.45) * T };
+}
+
 function switchRoom(id) {
   if (id === currentRoom()?.id) return;
   roomId = id;
@@ -282,10 +300,42 @@ function update(dt, now) {
     const atDesk = rt.targetKey?.startsWith('desk');
     const goIdle = a.status === 'ocioso' && !(atDesk && now - rt.idleSince < IDLE_GRACE);
 
-    if (desk && !goIdle) {
+    // livre = sem nada a fazer: concluído (esperando você) ou ocioso de verdade. Trabalhando e bloqueado
+    // ficam na mesa. Quem está livre alterna entre sentar, ir a uma área e dar uma volta pelo corredor.
+    const free = !!desk && (a.status === 'concluido' || goIdle);
+    const deskKey = desk && 'desk:' + desk.project.id + ':' + world.slotOf.get(desk.project.id) + ':' + world.cols;
+    if (desk && !free) {
+      rt.plan = null;
       target = desk.cell.seat;
-      key = 'desk:' + desk.project.id + ':' + world.slotOf.get(desk.project.id) + ':' + world.cols;
+      key = deskKey;
       rt.spot = null;
+    } else if (desk) {
+      if (!rt.plan) {
+        // acabou de ficar livre: concluído fica um pouco sentado antes do primeiro passeio
+        rt.plan = a.status === 'concluido' ? 'sit' : pickPlan(null);
+        rt.planAt = now + (rt.plan === 'sit' ? 6000 + Math.random() * 9000 : 0);
+        rt.spot = null;
+      } else if (now > rt.planAt) {
+        rt.plan = pickPlan(rt.plan);
+        rt.planAt = now + (rt.plan === 'sit' ? 8000 + Math.random() * 14000 : rt.plan === 'spot' ? 10000 + Math.random() * 15000 : 14000);
+        rt.spot = null;
+        rt.stroll = null;
+      }
+      if (rt.plan === 'spot') {
+        rt.spot ??= pickSpot(a.id);
+        target = world.spots[rt.spot];
+        key = 'spot:' + rt.spot + ':' + world.H + ':' + world.W;
+      } else if (rt.plan === 'stroll') {
+        rt.stroll ??= strollPoint(rt);
+        target = rt.stroll;
+        key = 'stroll:' + Math.round(rt.stroll.x) + ':' + Math.round(rt.stroll.y) + ':' + world.W;
+        // chegou: olha em volta um instante e segue para o próximo plano
+        if (!rt.path.length && key === rt.targetKey && !rt.strollEnd) { rt.strollEnd = true; rt.planAt = Math.min(rt.planAt, now + 2000 + Math.random() * 3000); }
+      } else {
+        target = desk.cell.seat;
+        key = deskKey;
+      }
+      if (rt.plan !== 'stroll') rt.strollEnd = false;
     } else {
       if (rt.spot == null || now > rt.wanderAt) {
         rt.spot = pickSpot(a.id);
@@ -303,7 +353,7 @@ function update(dt, now) {
     rt.moving = false;
     // quem foi chamado ao trabalho vai correndo para a mesa: o balão de "pensando" já está na tela
     // e o passeio de volta, na velocidade normal, parecia o agente enrolando antes de começar
-    const running = key.startsWith('desk');
+    const running = key.startsWith('desk') && !free;
     let budget = (running ? RUN_SPEED : SPEED) * dt;
     while (budget > 0 && rt.path.length) {
       const p = rt.path[0];
