@@ -258,7 +258,7 @@ function pickSpot(agentId) {
 
 // Próximo plano de quem está livre. Depois de passear, é mais provável voltar para a cadeira.
 function pickPlan(prev) {
-  const w = prev === 'sit' || prev == null ? { sit: 15, spot: 50, stroll: 35 } : { sit: 55, spot: 20, stroll: 25 };
+  const w = prev === 'sit' || prev == null ? { sit: 10, spot: 55, stroll: 35 } : { sit: 75, spot: 12, stroll: 13 };
   let r = Math.random() * (w.sit + w.spot + w.stroll);
   for (const k of ['sit', 'spot', 'stroll']) { if ((r -= w[k]) < 0) return k; }
   return 'sit';
@@ -313,11 +313,11 @@ function update(dt, now) {
       if (!rt.plan) {
         // acabou de ficar livre: concluído fica um pouco sentado antes do primeiro passeio
         rt.plan = a.status === 'concluido' ? 'sit' : pickPlan(null);
-        rt.planAt = now + (rt.plan === 'sit' ? 6000 + Math.random() * 9000 : 0);
+        rt.planAt = now + (rt.plan === 'sit' ? 15000 + Math.random() * 20000 : 0);
         rt.spot = null;
       } else if (now > rt.planAt) {
         rt.plan = pickPlan(rt.plan);
-        rt.planAt = now + (rt.plan === 'sit' ? 8000 + Math.random() * 14000 : rt.plan === 'spot' ? 10000 + Math.random() * 15000 : 14000);
+        rt.planAt = now + (rt.plan === 'sit' ? 30000 + Math.random() * 40000 : rt.plan === 'spot' ? 8000 + Math.random() * 10000 : 10000);
         rt.spot = null;
         rt.stroll = null;
       }
