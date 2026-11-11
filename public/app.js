@@ -231,12 +231,57 @@ function syncRuntime(atSeats) {
 
 let clockOffset = 0; // relógio do navegador − relógio do hub
 
+// ---------- Avisos: telefone tocando e reunião de delegação ----------
+const prevRing = new Set(); // mesas que já estavam esperando você
+const prevMsg = new Map(); // agentId -> última mensagem de status
+let lastDelegationAt = 0; // quando uma demanda foi passada a uma mesa (a secretária livre vai à reunião)
+let soundOn = load('hub.sound') !== false;
+let audioCtx = null;
+
+// dois toques curtos, como um telefone antigo
+function ringPhone() {
+  if (!soundOn) return;
+  try {
+    audioCtx ??= new AudioContext();
+    if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+    const t0 = audioCtx.currentTime;
+    [0, 0.18, 0.5, 0.68].forEach((d, i) => {
+      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      o.type = 'square';
+      o.frequency.value = i % 2 ? 880 : 660;
+      g.gain.setValueAtTime(0.0001, t0 + d);
+      g.gain.exponentialRampToValueAtTime(0.05, t0 + d + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + d + 0.15);
+      o.connect(g).connect(audioCtx.destination);
+      o.start(t0 + d);
+      o.stop(t0 + d + 0.16);
+    });
+  } catch {}
+}
+
+// Chamado a cada estado novo: toca quando uma mesa passa a esperar você e anota quando uma demanda foi delegada.
+function trackAlerts(first) {
+  let fresh = false;
+  for (const p of state.projects) {
+    const a = state.agents.find((x) => x.id === p.agentId);
+    const ring = !!(state.live?.[p.id]?.pending || a?.status === 'bloqueado');
+    if (ring && !prevRing.has(p.id)) fresh = true;
+    if (ring) prevRing.add(p.id); else prevRing.delete(p.id);
+  }
+  for (const a of state.agents) {
+    if (!first && a.status === 'trabalhando' && /^📨 Demanda/.test(a.message || '') && prevMsg.get(a.id) !== a.message) lastDelegationAt = Date.now();
+    prevMsg.set(a.id, a.message);
+  }
+  if (fresh && !first) ringPhone();
+}
+
 function applyState(next) {
   const firstLoad = !world;
   state = next;
   if (state.now) clockOffset = Date.now() - state.now;
   if (!state.rooms.some((r) => r.id === roomId)) roomId = state.rooms[0]?.id;
   resolveEnv();
+  trackAlerts(firstLoad);
   world = computeWorld();
   syncRuntime(firstLoad);
   if (selected && !state.projects.some((p) => p.id === selected.id)) selected = null;
@@ -248,6 +293,13 @@ function applyState(next) {
 }
 
 // ---------- Simulação ----------
+function pickMeetingSpot(agentId) {
+  const taken = new Set();
+  for (const [id, rt] of runtime) if (id !== agentId && rt.spot != null) taken.add(rt.spot);
+  const free = world.spots.map((s, i) => (s.act === 'reuniao' && !taken.has(i) ? i : -1)).filter((i) => i >= 0);
+  return free.length ? free[Math.floor(Math.random() * free.length)] : null;
+}
+
 function pickSpot(agentId) {
   const taken = new Set();
   for (const [id, rt] of runtime) if (id !== agentId && rt.spot != null) taken.add(rt.spot);
@@ -312,17 +364,22 @@ function update(dt, now) {
     } else if (desk) {
       if (!rt.plan) {
         // acabou de ficar livre: concluído fica um pouco sentado antes do primeiro passeio
-        rt.plan = a.status === 'concluido' ? 'sit' : pickPlan(null);
-        rt.planAt = now + (rt.plan === 'sit' ? 15000 + Math.random() * 20000 : 0);
+        // secretária que acabou de passar uma demanda: vai à sala de reunião um instante (quem recebe fica na
+        // mesa trabalhando, para não parecer que enrola antes de começar)
+        const meet = desk.project.role === 'secretaria' && now - lastDelegationAt < 90000;
+        rt.plan = meet ? 'spot' : a.status === 'concluido' ? 'sit' : pickPlan(null);
+        rt.wantMeeting = meet;
+        rt.planAt = now + (meet ? 15000 : rt.plan === 'sit' ? 15000 + Math.random() * 20000 : 0);
         rt.spot = null;
       } else if (now > rt.planAt) {
         rt.plan = pickPlan(rt.plan);
         rt.planAt = now + (rt.plan === 'sit' ? 30000 + Math.random() * 40000 : rt.plan === 'spot' ? 8000 + Math.random() * 10000 : 10000);
         rt.spot = null;
         rt.stroll = null;
+        rt.wantMeeting = false;
       }
       if (rt.plan === 'spot') {
-        rt.spot ??= pickSpot(a.id);
+        rt.spot ??= (rt.wantMeeting && pickMeetingSpot(a.id)) ?? pickSpot(a.id);
         target = world.spots[rt.spot];
         key = 'spot:' + rt.spot + ':' + world.H + ':' + world.W;
       } else if (rt.plan === 'stroll') {
@@ -381,6 +438,22 @@ function update(dt, now) {
 // ---------- Desenho ----------
 const rect = (x, y, w, h, c) => { ctx.fillStyle = c; ctx.fillRect(Math.round(x), Math.round(y), w, h); };
 
+// sombra suave no chão (elipse escura translúcida): dá volume aos móveis e peso aos personagens
+function shadow(x, y, w, h, a = 0.28) {
+  ctx.globalAlpha = a;
+  ctx.fillStyle = '#000';
+  ctx.beginPath(); ctx.ellipse(x, y, w / 2, h / 2, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
+// faixa com degradê (sombra encostada nas paredes, luz que cai)
+function fade(x, y, w, h, vertical, from, to) {
+  const g = vertical ? ctx.createLinearGradient(0, y, 0, y + h) : ctx.createLinearGradient(x, 0, x + w, 0);
+  g.addColorStop(0, from); g.addColorStop(1, to);
+  ctx.fillStyle = g;
+  ctx.fillRect(x, y, w, h);
+}
+
 function text(str, wx, wy, px, color, align = 'center') {
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -436,6 +509,14 @@ function drawRoom(now) {
   rect((W - 1) * T, 0, T, H * T, wallTrim);
   rect(0, bottom, W * T, T, wallTrim);
   rect(0, 0, W * T, 3, '#2b2f3e');
+  // profundidade: a parede escurece perto do piso e projeta sombra nele; as laterais também
+  fade(T, 0, (W - 2) * T, top - 4, true, 'rgba(255,255,255,.07)', 'rgba(0,0,0,.28)');
+  rect(T, top - 5, (W - 2) * T, 1, '#ffffff26');
+  fade(T, top, (W - 2) * T, 16, true, 'rgba(0,0,0,.4)', 'rgba(0,0,0,0)');
+  fade(T, top, 12, bottom - top, false, 'rgba(0,0,0,.3)', 'rgba(0,0,0,0)');
+  fade((W - 1) * T - 12, top, 12, bottom - top, false, 'rgba(0,0,0,0)', 'rgba(0,0,0,.3)');
+  fade(T, bottom - 10, (W - 2) * T, 10, true, 'rgba(0,0,0,0)', 'rgba(0,0,0,.3)');
+  rect(0, bottom, W * T, 2, '#ffffff1a');
 
   // janelas
   const [sky1, sky2] = skyColor();
@@ -474,6 +555,21 @@ function drawRoom(now) {
   };
   hand(((d.getHours() % 12) + d.getMinutes() / 60) * (Math.PI / 6), 5, 2);
   hand(d.getMinutes() * (Math.PI / 30), 7, 1);
+
+  // TV na parede do lounge: quantos agentes em cada situação, com as mesmas cores dos monitores
+  if (!world.server) {
+    const tvx = L + 0.25 * T, tvy = 0.5 * T, tvw = 2.45 * T, tvh = 1.6 * T;
+    rect(tvx - 2, tvy - 2, tvw + 4, tvh + 4, '#0d0f17');
+    rect(tvx, tvy, tvw, tvh, '#101a2c');
+    rect(tvx, tvy, tvw, 1, '#ffffff22');
+    const agents = visibleAgents();
+    ['trabalhando', 'bloqueado', 'concluido', 'ocioso'].forEach((st, i) => {
+      const gx = tvx + 8 + (i % 2) * (tvw / 2), gy = tvy + 8 + Math.floor(i / 2) * 11;
+      rect(gx - 3, gy - 2, 4, 4, STATUS[st].color);
+      text(String(agents.filter((x) => x.status === st).length), gx + 8, gy, 7, '#fff');
+    });
+    rect(tvx + tvw / 2 - 4, tvy + tvh + 2, 8, 2, '#0d0f17');
+  }
 
   for (const d of roomDecor()) if (DECOR_META[d.type]?.layer === 'parede' && decorFits(d)) DECOR_DRAW[d.type](d.x * T, 0, now);
 
@@ -562,6 +658,7 @@ function decorFits(d) {
 }
 
 function plant(x, y) {
+  shadow(x, y + 2, 16, 5, 0.3);
   rect(x - 5, y - 6, 10, 8, '#b5643c');
   rect(x - 6, y - 7, 12, 2, '#8e4a2c');
   ctx.fillStyle = '#3f9b54';
@@ -609,6 +706,7 @@ function drawCopa({ y0 }, now, occupied) {
   rect(L + 5.6 * T, y0 - 14, 12, 12, '#8fd3ff');
   rect(L + 5.6 * T, y0 - 2, 12, 14, '#e8eaf2');
   // mesinha
+  shadow(L + 3.5 * T, y0 + 3.7 * T + 7, 36, 9, 0.28);
   ctx.fillStyle = '#7a5a3a';
   ctx.beginPath(); ctx.ellipse(L + 3.5 * T, y0 + 3.7 * T, 16, 8, 0, 0, Math.PI * 2); ctx.fill();
   rect(L + 3.5 * T - 3, y0 + 3.7 * T - 4, 6, 5, '#f5f5f5');
@@ -631,6 +729,7 @@ function drawMeeting({ y0, y1 }, now, occupied) {
     rect(s.x - 6, s.y - 8, 12, 6, '#3a3f55');
   }
   // mesa
+  shadow(L + 3.5 * T, y0 + 3.95 * T, 4.8 * T, 8, 0.3);
   rect(L + 1.3 * T, y0 + 2.5 * T, 4.4 * T, 1.4 * T, '#6b4429');
   rect(L + 1.3 * T + 2, y0 + 2.5 * T + 2, 4.4 * T - 4, 1.4 * T - 6, '#8a5a3b');
   rect(L + 2.2 * T, y0 + 2.9 * T, 6, 8, '#f5f5f5');
@@ -648,6 +747,7 @@ function drawRest({ y0 }, now, occupied) {
   rect(L + 1.2 * T, y0 + 3.3 * T, 3.4 * T, 2 * T, '#5a3e7a');
   rect(L + 1.2 * T + 3, y0 + 3.3 * T + 3, 3.4 * T - 6, 2 * T - 6, '#6b4f8f');
   // sofá encostado na divisória (quem senta fica de frente)
+  shadow(L + 3.5 * T, y0 + 2.75 * T, 5.4 * T, 7, 0.3);
   rect(L + 1 * T, y0 + 0.9 * T, 5 * T, 0.7 * T, '#a5311f');
   rect(L + 1 * T, y0 + 1.5 * T, 5 * T, 1.1 * T, '#c0392b');
   rect(L + 1 * T, y0 + 2.4 * T, 5 * T, 0.3 * T, '#8e2a20');
@@ -659,6 +759,7 @@ function drawRest({ y0 }, now, occupied) {
   // fliperama: a tela pisca quando tem alguém jogando
   const ax = L + 5.4 * T, ay = y0 + 3 * T;
   const playing = world.spots.some((s) => s.act === 'arcade' && occupied.has(s));
+  shadow(ax + 8, ay + 31, 24, 6, 0.32);
   rect(ax, ay, 16, 30, '#2b2f6e');
   rect(ax, ay, 16, 4, '#e5534b');
   rect(ax + 3, ay + 7, 10, 8, playing ? ['#3fbf7f', '#f2a93b', '#4f8cff', '#e5534b'][Math.floor(now / 180) % 4] : '#111');
@@ -769,6 +870,8 @@ function drawDesk(i, now) {
 
   // mesa
   const dx = c.x + T, dy = c.y + 0.9 * T;
+  shadow(dx + 1.5 * T, dy + 1.45 * T, 3.5 * T, 9, 0.32);
+  shadow(c.seat.x, c.seat.y + 1, 18, 6, 0.3);
   rect(dx, dy, 3 * T, 0.9 * T, '#8a5a3b');
   rect(dx, dy, 3 * T, 2, '#a8714c');
   rect(dx, dy + 0.9 * T, 3 * T, 0.4 * T, '#6b4429');
@@ -801,6 +904,23 @@ function drawDesk(i, now) {
     rect(mx + 2, my + 2, 4, 2, '#33354a');
   }
 
+  // luz da tela sobre a mesa (verde trabalhando, vermelha bloqueado, azul concluído)
+  if (present && (st === 'trabalhando' || st === 'bloqueado' || st === 'concluido')) {
+    ctx.globalAlpha = 0.13;
+    ctx.fillStyle = st === 'trabalhando' ? '#3fbf7f' : st === 'bloqueado' ? '#e5534b' : '#4f8cff';
+    ctx.beginPath(); ctx.ellipse(c.x + 2.5 * T, dy + 0.35 * T, 24, 9, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  // telefone: treme, pisca e toca quando o agente espera você (pergunta, permissão ou bloqueio)
+  const ringing = !!(state.live?.[project.id]?.pending || st === 'bloqueado');
+  const phx = c.x + 1.15 * T + (ringing ? Math.round(Math.sin(now / 45)) : 0), phy = dy + 0.3 * T;
+  rect(phx, phy + 2, 9, 5, '#2b2f3e');
+  rect(phx + 1, phy, 7, 3, ringing && now % 400 < 200 ? '#e5534b' : '#4a5070');
+  if (ringing && now % 400 < 200) {
+    for (const [ox, oy] of [[-3, -2], [10, -2], [-4, -5], [11, -5]]) rect(phx + ox, phy + oy, 2, 1, '#ffd166');
+  }
+
   // teclado e caneca
   rect(c.x + 2 * T, dy + 0.5 * T, T, 4, '#d0d0d8');
   rect(c.x + 3.4 * T, dy + 0.25 * T, 5, 5, project.color || '#fff');
@@ -828,8 +948,7 @@ function drawAgent(a, rt, now) {
   // respiração: a cabeça sobe e desce 1px de tempos em tempos quando parado
   const hb = !rt.moving && Math.floor(now / 900 + a.name.length) % 2 ? 1 : 0;
 
-  ctx.fillStyle = '#0005';
-  ctx.beginPath(); ctx.ellipse(x, Math.round(rt.y), 6, 2.5, 0, 0, Math.PI * 2); ctx.fill();
+  shadow(x, Math.round(rt.y), 15, 5.5, 0.34);
 
   // pernas e sapatos
   rect(x - 4, y - 6, 3, 6 - (step ? 1 : 0), '#2a2f45');
@@ -839,6 +958,7 @@ function drawAgent(a, rt, now) {
   // corpo (com uma faixa mais escura na barra da camisa)
   rect(x - 5, y - 12 + hb, 10, 7 - hb, shirt);
   rect(x - 5, y - 6, 10, 1, '#0003');
+  rect(x + 2, y - 12 + hb, 3, 7 - hb, '#0000002e'); // lado do corpo longe da luz
   // braços: comemorando (concluído), pedindo ajuda (bloqueado) ou balançando ao andar
   const seatedNow = rt.seated;
   const swing = rt.moving ? (step ? 1 : -1) : 0;
@@ -855,6 +975,7 @@ function drawAgent(a, rt, now) {
   rect(x - 1, y - 13 + hb, 2, 2, skin);
   const hy = y - 20 + hb;
   rect(x - 4, hy, 8, 8, skin);
+  rect(x + 2, hy + 1, 2, 7, '#0000001c'); // sombra do rosto
   const style = hairStyle(a);
   if (back) {
     rect(x - 4, hy - 1, 8, style === 1 ? 12 : 8, hair);
@@ -952,6 +1073,12 @@ function draw(now) {
     drawAgent(a, rt, now);
     if (rt.seated || rt.atSpot?.chair === 'bottom') drawChairBack(rt);
   }
+  // vinheta: bordas um pouco mais escuras, o centro mais claro (sensação de ambiente iluminado)
+  const vw = world.W * T, vh = world.H * T;
+  const vg = ctx.createRadialGradient(vw / 2, vh / 2, Math.min(vw, vh) * 0.3, vw / 2, vh / 2, Math.max(vw, vh) * 0.72);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,.34)');
+  ctx.fillStyle = vg;
+  ctx.fillRect(0, 0, vw, vh);
   const talkers = ordered.filter(([, rt]) => rt.atSpot?.act === 'reuniao').map(([a]) => a.id);
   for (const [a, rt] of ordered) drawLabels(a, rt, now, talkers);
 }
@@ -2833,6 +2960,19 @@ document.getElementById('btn-new-project').onclick = () => openProjectDialog();
 document.getElementById('btn-new-agent').onclick = () => openAgentDialog();
 document.getElementById('btn-team').onclick = () => openTeamWindow();
 document.getElementById('btn-log').onclick = () => openLogWindow();
+
+// Parar todas as mesas que estão rodando (cada uma sem perder o que já foi feito, como o ⏹ da mesa)
+document.getElementById('btn-stopall').onclick = async () => {
+  const running = state.projects.filter((p) => state.live?.[p.id]);
+  if (!running.length) return alert('Nenhuma mesa está rodando agora.');
+  if (!confirm(`Parar ${running.length} mesa${running.length > 1 ? 's' : ''} que está${running.length > 1 ? 'ão' : ''} rodando?\n\n${running.map((p) => '• ' + p.name).join('\n')}`)) return;
+  await Promise.all(running.map((p) => api('POST', `/api/projects/${p.id}/stop`, {}, { quiet: true }).catch(() => {})));
+};
+
+const soundBtn = document.getElementById('btn-sound');
+const renderSound = () => (soundBtn.textContent = soundOn ? '🔔 Som do telefone: ligado' : '🔕 Som do telefone: desligado');
+soundBtn.onclick = () => { soundOn = !soundOn; store('hub.sound', soundOn); renderSound(); if (soundOn) ringPhone(); };
+renderSound();
 document.getElementById('btn-env').onclick = () => openEnvWindow();
 document.getElementById('btn-account').onclick = () => openAccountWindow();
 document.getElementById('btn-mcp').onclick = () => openMcpWindow();
