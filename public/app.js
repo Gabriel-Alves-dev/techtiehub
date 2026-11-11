@@ -19,7 +19,8 @@ const STATUS = {
 };
 
 const canvas = document.getElementById('office');
-const ctx = canvas.getContext('2d');
+const mainCtx = canvas.getContext('2d');
+let ctx = mainCtx; // na vista inclinada, a cena plana é desenhada num canvas auxiliar (troca de ctx)
 const wrap = document.getElementById('office-wrap');
 const tooltip = document.getElementById('tooltip');
 
@@ -1053,8 +1054,94 @@ function drawLabels(a, rt, now, talkers) {
 
 let animNow = 0; // relógio do quadro atual, para itens que se mexem (plantas)
 
+// ---------- Vista inclinada (protótipo) ----------
+// O mundo continua plano (toda a lógica usa as mesmas coordenadas). Só o desenho muda: a cena plana vai para um
+// canvas auxiliar e é fatiada em linhas que encolhem com a distância (o fundo da sala fica mais estreito e mais
+// baixo), e os personagens são desenhados em pé por cima, ampliados conforme a profundidade.
+const TILT_K = 0.8; // altura da sala inclinada em relação à plana
+let tilt = load('hub.tilt') === true;
+const tiltF = (t) => 0.78 + 0.22 * t; // escala horizontal: 78% no fundo, 100% na frente
+const tiltY = (t) => (TILT_K * (0.78 * t + 0.11 * t * t)) / 0.89; // integral de tiltF, normalizada (0..TILT_K)
+let tiltBuf = null;
+
+// ponto do mundo -> posição na vista (em unidades de mundo), com a escala local f
+function projPt(x, y) {
+  if (!tilt || !world) return { x, y, f: 1 };
+  const W = world.W * T, H = world.H * T, t = Math.max(0, Math.min(1, y / H)), f = tiltF(t);
+  return { x: W / 2 + (x - W / 2) * f, y: tiltY(t) * H, f };
+}
+
+// posição na vista -> ponto do mundo (para cliques)
+function unprojPt(X, Y) {
+  if (!tilt || !world) return { x: X, y: Y };
+  const W = world.W * T, H = world.H * T;
+  const u = Math.max(0, Math.min(TILT_K, Y / H)) * 0.89 / TILT_K;
+  const t = (-0.78 + Math.sqrt(0.78 * 0.78 + 0.44 * u)) / 0.22;
+  return { x: W / 2 + (X - W / 2) / tiltF(t), y: t * H };
+}
+
+function drawScene(now) {
+  drawRoom(now);
+  if (world.server) drawRacks(now);
+  else for (let i = 0; i < world.rows * world.cols; i++) drawDesk(i, now);
+  const hour = new Date().getHours();
+  if (hour >= 19 || hour < 5) { ctx.globalAlpha = 0.16; rect(0, 0, world.W * T, world.H * T, '#0d1440'); ctx.globalAlpha = 1; }
+  const furniture = roomDecor().filter((d) => DECOR_META[d.type]?.layer === 'piso' && decorFits(d)).sort((p, q) => p.y - q.y);
+  for (const d of furniture) DECOR_DRAW[d.type](d.x * T, d.y * T, now);
+}
+
+function drawTilt(now) {
+  const fw = world.W * T * SCALE, fh = world.H * T * SCALE;
+  if (!tiltBuf) tiltBuf = document.createElement('canvas');
+  if (tiltBuf.width !== fw || tiltBuf.height !== fh) { tiltBuf.width = fw; tiltBuf.height = fh; }
+  const bctx = tiltBuf.getContext('2d');
+  ctx = bctx; // as funções de desenho usam o ctx global
+  try {
+    bctx.setTransform(SCALE, 0, 0, SCALE, 0, 0);
+    bctx.imageSmoothingEnabled = false;
+    drawScene(now);
+  } finally { ctx = mainCtx; }
+
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  ctx.fillStyle = '#0d0f16';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  // fatias de 2 px: cada uma encolhe horizontalmente (f) e verticalmente (f * TILT_K)
+  const H = world.H * T, BAND = 2;
+  for (let sy = 0; sy < fh; sy += BAND) {
+    const t = (sy + BAND / 2) / fh, f = tiltF(t);
+    const y0 = tiltY(sy / fh) * H * SCALE, y1 = tiltY(Math.min(1, (sy + BAND) / fh)) * H * SCALE;
+    ctx.drawImage(tiltBuf, 0, sy, fw, BAND, (fw - fw * f) / 2, y0, fw * f, Math.max(1, Math.ceil(y1 - y0) + 1));
+  }
+
+  // personagens em pé, na escala da profundidade onde estão
+  const ordered = visibleAgents().map((a) => [a, runtime.get(a.id)]).sort((p, q) => p[1].y - q[1].y);
+  for (const [a, rt] of ordered) {
+    const q = projPt(rt.x, rt.y), k = SCALE * q.f;
+    ctx.setTransform(k, 0, 0, k, q.x * SCALE - rt.x * k, q.y * SCALE - rt.y * k);
+    drawAgent(a, rt, now);
+    if (rt.seated || rt.atSpot?.chair === 'bottom') drawChairBack(rt);
+  }
+  ctx.setTransform(SCALE, 0, 0, SCALE, 0, 0);
+  const talkers = ordered.filter(([, rt]) => rt.atSpot?.act === 'reuniao').map(([a]) => a.id);
+  for (const [a, rt] of ordered) {
+    const q = projPt(rt.x, rt.y);
+    drawLabels(a, { ...rt, x: q.x, y: q.y }, now, talkers);
+  }
+}
+
+function setTilt(on) {
+  if (on && moveMode) setMoveMode(false);
+  if (on && decorMode) setDecorMode(false);
+  tilt = on;
+  store('hub.tilt', on);
+  document.getElementById('btn-tilt').classList.toggle('active', on);
+  resize();
+}
+
 function draw(now) {
   animNow = now;
+  if (tilt) return drawTilt(now);
   ctx.setTransform(SCALE, 0, 0, SCALE, 0, 0);
   ctx.imageSmoothingEnabled = false;
   drawRoom(now);
@@ -1101,12 +1188,13 @@ const MIN_ZOOM = 1, MAX_ZOOM = 6;
 function resize() {
   if (!world) return;
   const ww = world.W * T, wh = world.H * T;
-  const fit = Math.floor(Math.min((wrap.clientWidth - 16) / ww, (wrap.clientHeight - 16) / wh));
+  const ch = tilt ? Math.round(wh * TILT_K) : wh; // altura do canvas (a vista inclinada é mais baixa)
+  const fit = Math.floor(Math.min((wrap.clientWidth - 16) / ww, (wrap.clientHeight - 16) / ch));
   // celular: no mínimo 2x (a 1x o texto fica ilegível); o que passar da tela rola com o dedo
   SCALE = zoom ?? Math.max(innerWidth <= 760 ? 2 : MIN_ZOOM, Math.min(4, fit));
-  if (canvas.width !== ww * SCALE || canvas.height !== wh * SCALE) {
+  if (canvas.width !== ww * SCALE || canvas.height !== ch * SCALE) {
     canvas.width = ww * SCALE;
-    canvas.height = wh * SCALE;
+    canvas.height = ch * SCALE;
   }
   document.getElementById('zoom-label').textContent = zoom == null ? 'Auto' : SCALE * 25 + '%';
 }
@@ -1130,6 +1218,8 @@ function setZoom(next, cx, cy) {
 document.getElementById('zoom-in').onclick = () => setZoom(SCALE + 1);
 document.getElementById('zoom-out').onclick = () => setZoom(SCALE - 1);
 document.getElementById('zoom-fit').onclick = () => setZoom(null);
+document.getElementById('btn-tilt').onclick = () => setTilt(!tilt);
+document.getElementById('btn-tilt').classList.toggle('active', tilt);
 wrap.addEventListener('wheel', (e) => {
   if (!e.ctrlKey) return; // roda sozinha rola; Ctrl+roda dá zoom
   e.preventDefault();
@@ -1206,10 +1296,11 @@ function updateBubbles() {
       el.innerHTML = `<span class="b-inner ${b.cls}">${esc(b.text)}${b.cls === 'working' ? '<span class="dots"><i></i><i></i><i></i></span>' : ''}</span>`;
     }
     // sentado: acima do monitor; andando: acima do nome
-    const by = rt.seated ? rt.y - 46 : rt.y - 34;
+    const q = projPt(rt.x, rt.y);
+    const by = q.y + (rt.seated ? -46 : -34) * q.f;
     // sem sair do escritório (no celular os balões largos passavam da borda da tela)
     const half = el.offsetWidth / 2;
-    const bx = Math.max(ox + half, Math.min(ox + canvas.width - half, ox + rt.x * SCALE));
+    const bx = Math.max(ox + half, Math.min(ox + canvas.width - half, ox + q.x * SCALE));
     el.style.transform = `translate(${Math.round(bx)}px, ${Math.round(oy + by * SCALE)}px) translate(-50%, -100%)`;
   }
   for (const [id, el] of bubbleEls) if (!seen.has(id)) { el.remove(); bubbleEls.delete(id); }
@@ -1218,7 +1309,7 @@ function updateBubbles() {
 // ---------- Interação no canvas ----------
 function hitTest(ev) {
   const r = canvas.getBoundingClientRect();
-  const wx = (ev.clientX - r.left) / SCALE, wy = (ev.clientY - r.top) / SCALE;
+  const { x: wx, y: wy } = unprojPt((ev.clientX - r.left) / SCALE, (ev.clientY - r.top) / SCALE);
   const ordered = visibleAgents().map((a) => [a, runtime.get(a.id)]).sort((p, q) => q[1].y - p[1].y);
   for (const [a, rt] of ordered) {
     if (wx > rt.x - 8 && wx < rt.x + 8 && wy > rt.y - 24 && wy < rt.y + 2) return { kind: 'agent', id: a.id };
@@ -1357,6 +1448,7 @@ function drawMoveGhost() {
 
 function setMoveMode(on) {
   if (on && decorMode) setDecorMode(false);
+  if (on && tilt) setTilt(false); // arrastar e decorar usam a vista plana
   moveMode = on;
   moving = null;
   movePick = null;
@@ -1421,6 +1513,7 @@ function drawDecorCursor() {
 
 function setDecorMode(on) {
   if (on && moveMode) setMoveMode(false);
+  if (on && tilt) setTilt(false);
   decorMode = on;
   decorHover = null;
   document.getElementById('btn-decor').classList.toggle('active', on);
@@ -1761,7 +1854,8 @@ function deskAnchor(projectId) {
   if (i == null) return null;
   const c = cellOf(i);
   const r = canvas.getBoundingClientRect();
-  return { x: r.left + (c.x + 4.5 * T) * SCALE, y: r.top + (c.y + 2.5 * T) * SCALE };
+  const q = projPt(c.x + 4.5 * T, c.y + 2.5 * T);
+  return { x: r.left + q.x * SCALE, y: r.top + q.y * SCALE };
 }
 
 function openProjectWindow(projectId) {
