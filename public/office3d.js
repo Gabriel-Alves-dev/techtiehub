@@ -99,7 +99,36 @@ function add(parent, geo, material, x = 0, y = 0, z = 0, { cast = true, receive 
   parent.add(m);
   return m;
 }
-const box = (p, w, h, d, c, x, y, z, o) => add(p, new THREE.BoxGeometry(w, h, d), typeof c === 'string' ? mat(c) : c, x, y, z, o);
+// caixa com as quinas arredondadas (um retângulo extrudado com chanfro): pega a luz nas bordas, como móvel de verdade.
+// Peças finas demais (tapetes, ponteiros) continuam retas. As geometrias são reaproveitadas entre peças iguais.
+const rbCache = new Map();
+function roundedBoxGeo(w, h, d, r) {
+  const key = [w, h, d, r].join(',');
+  if (rbCache.has(key)) return rbCache.get(key);
+  const iw = w - 2 * r, ih = h - 2 * r, id = d - 2 * r;
+  const sh = new THREE.Shape();
+  sh.moveTo(-iw / 2, -ih / 2); sh.lineTo(iw / 2, -ih / 2); sh.lineTo(iw / 2, ih / 2); sh.lineTo(-iw / 2, ih / 2); sh.closePath();
+  const geo = new THREE.ExtrudeGeometry(sh, { depth: id, bevelEnabled: true, bevelThickness: r, bevelSize: r, bevelSegments: 2, curveSegments: 1 });
+  geo.translate(0, 0, -id / 2);
+  rbCache.set(key, geo);
+  return geo;
+}
+const box = (p, w, h, d, c, x, y, z, o) => {
+  const m = Math.min(w, h, d);
+  const geo = m >= 0.06 ? roundedBoxGeo(w, h, d, Math.min(0.03, m * 0.3)) : new THREE.BoxGeometry(w, h, d);
+  return add(p, geo, typeof c === 'string' ? mat(c) : c, x, y, z, o);
+};
+
+// reflexo diagonal por cima de telas e vidros
+let glossTexture = null;
+function glossPlane(w, h) {
+  glossTexture ??= canvasTex(128, 128, (g, cw, ch) => {
+    const gr = g.createLinearGradient(0, 0, cw, ch);
+    gr.addColorStop(0, 'rgba(255,255,255,.30)'); gr.addColorStop(0.42, 'rgba(255,255,255,.07)'); gr.addColorStop(0.5, 'rgba(255,255,255,0)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = gr; g.fillRect(0, 0, cw, ch);
+  });
+  return new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ map: glossTexture, transparent: true, depthWrite: false, toneMapped: false }));
+}
 const cyl = (p, r1, r2, h, c, x, y, z, seg = 20) => add(p, new THREE.CylinderGeometry(r1, r2, h, seg), typeof c === 'string' ? mat(c) : c, x, y, z);
 const sph = (p, r, c, x, y, z, seg = 16) => add(p, new THREE.SphereGeometry(r, seg, seg - 4), typeof c === 'string' ? mat(c) : c, x, y, z);
 const caps = (p, r, len, c, x, y, z) => add(p, new THREE.CapsuleGeometry(r, len, 6, 12), typeof c === 'string' ? mat(c) : c, x, y, z);
@@ -181,6 +210,8 @@ function buildAgent(a) {
   box(body, 0.3, 0.05, 0.18, '#0003', 0, 0.02, 0).visible = false;
   const neck = cyl(body, 0.07, 0.07, 0.08, skin, 0, 0.6, 0, 10);
   neck.castShadow = false;
+  const collar = add(body, new THREE.TorusGeometry(0.085, 0.028, 8, 18), shirt, 0, 0.575, 0, { cast: false }); collar.rotation.x = Math.PI / 2;
+  cyl(body, 0.174, 0.174, 0.035, '#1c1c24', 0, 0.1, 0, 20).castShadow = false; // cinto
 
   const head = new THREE.Group(); head.position.y = 0.83; body.add(head);
   const skull = sph(head, 0.21, skin, 0, 0, 0, 24); skull.scale.set(1, 1.04, 1);
@@ -197,9 +228,21 @@ function buildAgent(a) {
     caps(head, 0.06, 0.18, hair, 0.2, -0.1, -0.02);
   }
   if (style === 'coque') sph(head, 0.1, hair, 0, 0.24, -0.1);
-  // rosto
-  for (const x of [-0.078, 0.078]) { const e = sph(head, 0.03, '#1a1a1a', x, 0.02, 0.195, 10); e.scale.set(1, 1.3, 0.6); e.castShadow = false; }
-  const mouth = box(head, 0.07, 0.014, 0.02, '#a5553f', 0, -0.085, 0.2, { cast: false });
+  // rosto: olhos com branco, pupila e brilho (piscam), sobrancelhas e boca que mudam com o humor, bochechas
+  const eyes = [];
+  for (const x of [-0.078, 0.078]) {
+    const eye = new THREE.Group(); eye.position.set(x, 0.02, 0.185); head.add(eye);
+    const wh = sph(eye, 0.04, '#ffffff', 0, 0, 0, 14); wh.scale.set(1, 1.2, 0.5); wh.castShadow = false;
+    const pu = sph(eye, 0.024, '#1a1a1a', 0, -0.002, 0.016, 12); pu.scale.set(1, 1.1, 0.6); pu.castShadow = false;
+    const hl = sph(eye, 0.008, '#ffffff', 0.008, 0.01, 0.026, 6); hl.castShadow = false;
+    eyes.push(eye);
+  }
+  const brows = [-1, 1].map((side) => box(head, 0.075, 0.016, 0.02, hair, side * 0.078, 0.095, 0.2, { cast: false }));
+  const lip = '#a5553f';
+  const mN = box(head, 0.07, 0.014, 0.02, lip, 0, -0.085, 0.2, { cast: false });
+  const mS = add(head, new THREE.TorusGeometry(0.05, 0.012, 6, 14, Math.PI), mat(lip), 0, -0.05, 0.198, { cast: false }); mS.rotation.z = Math.PI; mS.visible = false;
+  const mF = add(head, new THREE.TorusGeometry(0.04, 0.012, 6, 14, Math.PI), mat(lip), 0, -0.12, 0.198, { cast: false }); mF.visible = false;
+  for (const x of [-0.125, 0.125]) { const ch = sph(head, 0.04, mat('#ff8f8f', { transparent: true, opacity: 0.32 }), x, -0.04, 0.165, 8); ch.scale.set(1, 0.6, 0.3); ch.castShadow = false; }
   for (const x of [-0.19, 0.19]) { const ear = sph(head, 0.04, skin, x, 0, 0, 8); ear.castShadow = false; }
 
   if (a.accessory === 'oculos') {
@@ -207,7 +250,6 @@ function buildAgent(a) {
     box(head, 0.06, 0.012, 0.012, '#1a1a1a', 0, 0.04, 0.205, { cast: false });
   } else if (a.accessory === 'fone') {
     const arc = add(head, new THREE.TorusGeometry(0.235, 0.02, 8, 24, Math.PI), mat('#2d3142'), 0, 0.0, 0);
-    arc.rotation.z = 0; arc.rotation.y = Math.PI / 2; arc.rotation.x = 0;
     for (const x of [-0.235, 0.235]) { const c = cyl(head, 0.075, 0.075, 0.07, '#e5534b', x, 0, 0, 16); c.rotation.z = Math.PI / 2; }
   } else if (a.accessory === 'bone') {
     cap(0.235, 0.015, 0, -0.18, mat('#e5534b'));
@@ -241,7 +283,7 @@ function buildAgent(a) {
   hit.userData = { kind: 'agent', id: a.id };
 
   root.scale.setScalar(1.25);
-  root.userData = { body, head, L, R, LL, RL, sitk: 0, moveK: 0, rot: 0, hit, mouth };
+  root.userData = { body, head, L, R, LL, RL, sitk: 0, moveK: 0, rot: 0, hit, eyes, brows, mN, mS, mF };
   return root;
 }
 
@@ -407,6 +449,7 @@ export function create3D({ canvas, wrap, onDrag }) {
       box(g, 3.2, 1.8, 0.12, '#1d2030', x + 1.5, 2.05, zMin + 0.05, { cast: false });
       const pane = new THREE.Mesh(new THREE.PlaneGeometry(1.45, 1.55), gm); pane.position.set(x + 0.77, 2.05, zMin + 0.12); g.add(pane);
       const pane2 = new THREE.Mesh(new THREE.PlaneGeometry(1.45, 1.55), gm); pane2.position.set(x + 2.23, 2.05, zMin + 0.12); g.add(pane2);
+      for (const px of [x + 0.77, x + 2.23]) { const gl = glossPlane(1.45, 1.55); gl.position.set(px, 2.05, zMin + 0.125); g.add(gl); }
     }
 
     // relógio e TV na parede do lounge
@@ -418,6 +461,7 @@ export function create3D({ canvas, wrap, onDrag }) {
     const tvMat = new THREE.MeshBasicMaterial({ color: '#fff' });
     box(g, 2.5, 1.5, 0.1, '#0d0f17', Lt + 1.5, 2.25, zMin + 0.07, { cast: false });
     const tv = new THREE.Mesh(new THREE.PlaneGeometry(2.3, 1.3), tvMat); tv.position.set(Lt + 1.5, 2.25, zMin + 0.13); g.add(tv);
+    const tvGloss = glossPlane(2.3, 1.3); tvGloss.position.set(Lt + 1.5, 2.25, zMin + 0.135); g.add(tvGloss);
     state.tv = { mat: tvMat, key: '' };
 
     // áreas do lounge
@@ -503,6 +547,7 @@ export function create3D({ canvas, wrap, onDrag }) {
       const cv = document.createElement('canvas'); cv.width = 192; cv.height = 112;
       const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 4;
       const screen = new THREE.Mesh(new THREE.PlaneGeometry(1.3, 0.76), new THREE.MeshBasicMaterial({ map: tex, toneMapped: false })); screen.position.set(0, 0.72, 0.035); mon.add(screen);
+      const sgl = glossPlane(1.3, 0.76); sgl.position.set(0, 0.72, 0.038); mon.add(sgl);
       const glow = new THREE.Mesh(new THREE.PlaneGeometry(2.2, 1.1), new THREE.MeshBasicMaterial({ color: '#3fbf7f', transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending }));
       glow.rotation.x = -Math.PI / 2; glow.position.set(cx + 2.5, DESK_Y + 0.045, cy + 1.45); dg.add(glow);
       // teclado, mouse, caneca, telefone
@@ -517,7 +562,7 @@ export function create3D({ canvas, wrap, onDrag }) {
       const chair = makeChair(); chair.position.set(d.seat.x / T, 0, d.seat.y / T - 0.6); dg.add(chair);
       // nome do projeto, escrito no tapete
       const label = new THREE.Mesh(new THREE.PlaneGeometry(3.4, 0.55), new THREE.MeshBasicMaterial({ map: textPlane(d.name.toUpperCase().slice(0, 18), { w: 640, h: 104, px: 50, color: '#ffffff' }), transparent: true, depthWrite: false }));
-      label.rotation.x = -Math.PI / 2; label.position.set(cx + 2.5, 0.03, cy + 4.25); dg.add(label);
+      label.rotation.x = -Math.PI / 2; label.position.set(cx + 2.5, 0.035, cy + 4.5); label.renderOrder = 1; dg.add(label);
       // clique
       const hit = new THREE.Mesh(new THREE.BoxGeometry(4, 1.6, 4), new THREE.MeshBasicMaterial({ visible: false })); hit.position.set(cx + 2.5, 0.8, cy + 2.5); hit.userData = { kind: 'project', id: d.id }; dg.add(hit); hitList.push(hit);
       state.desks.set(d.id, { cv, tex, screen, glow, phone, pled, outline: ol, key: '', col, ring: false });
@@ -547,6 +592,30 @@ export function create3D({ canvas, wrap, onDrag }) {
         box(o, 0.9, 0.55, 0.7, '#6b4429', d.x + 0.5, 0.275, d.y + 0.5);
         box(o, 0.8, 0.3, 0.55, '#d0d0d8', d.x + 0.5, 0.7, d.y + 0.5); box(o, 0.6, 0.03, 0.4, '#f5f5f5', d.x + 0.5, 0.87, d.y + 0.5);
         box(o, 0.08, 0.04, 0.03, '#3fbf7f', d.x + 0.8, 0.8, d.y + 0.79, { cast: false });
+      }
+    }
+
+    // chão vazio abaixo das mesas: tapete, estante, plantas e uma mesinha, para a sala não parecer inacabada.
+    // Só entra onde não há mesa nem decoração do usuário (a lista do usuário tem prioridade).
+    const rowsUsed = Math.max(1, ...s.desks.map((d) => Math.floor((d.y / T - WALL_H) / 5) + 1));
+    const z0 = WALL_H + rowsUsed * 5, freeD = zMax - z0;
+    if (freeD >= 4) {
+      const userAt = (x, z, r) => s.decor.some((d) => Math.abs(d.x + 1 - x) < r + 1 && Math.abs((d.type === 'quadro' || d.type === 'bandeira' ? zMin : d.y + 1) - z) < r + 1);
+      const cxm = (1 + Lt) / 2, czm = z0 + freeD / 2;
+      const rw = Math.min(Lt - 5, 12), rd = Math.min(freeD - 1.8, 5);
+      // o tapete é plano (itens do usuário ficam por cima); mesinha e pufes só entram se o centro estiver livre
+      if (!s.decor.some((d) => d.type === 'tapete' && Math.abs(d.x + 1 - cxm) < rw / 2 && Math.abs(d.y + 1 - czm) < rd / 2)) {
+        box(g, rw, 0.02, rd, '#2f3f63', cxm, 0.014, czm, { cast: false });
+        box(g, rw - 0.5, 0.022, rd - 0.5, '#3d5280', cxm, 0.015, czm, { cast: false });
+        box(g, rw - 1.1, 0.024, rd - 1.1, '#33466f', cxm, 0.016, czm, { cast: false });
+      }
+      if (!userAt(cxm, czm, 2.2)) {
+        cyl(g, 0.8, 0.8, 0.06, '#7a5a3a', cxm, 0.5, czm); cyl(g, 0.07, 0.07, 0.45, '#4a3320', cxm, 0.25, czm); cyl(g, 0.4, 0.4, 0.04, '#4a3320', cxm, 0.03, czm);
+        for (const [dx, dz, c] of [[-1.5, 0.3, '#f2a93b'], [1.5, -0.2, '#3fbf7f']]) { const pf = sph(g, 0.45, c, cxm + dx, 0.24, czm + dz, 20); pf.scale.set(1, 0.6, 1); }
+      }
+      if (!userAt(1.5, z0 + 1.6, 1)) { const bc = makeBookcase(); bc.position.set(1.4, 0, z0 + 1.6); bc.rotation.y = Math.PI / 2; g.add(bc); }
+      for (const [px, pz] of [[1.8, zMax - 0.9], [Lt - 0.9, zMax - 0.9], [Lt - 0.9, z0 + 0.7], [1.8, z0 + 4]]) {
+        if (pz > z0 + 0.4 && pz < zMax - 0.3 && !userAt(px, pz, 0.6)) { const pl = makePlant(); pl.position.set(px, 0, pz); g.add(pl); state.plants.push(pl.userData.sway); }
       }
     }
 
@@ -613,7 +682,7 @@ export function create3D({ canvas, wrap, onDrag }) {
       g.fillStyle = '#fff'; g.textAlign = 'left'; g.fillText(a.name, x0 + 26, h / 2 + 2);
     });
     const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
-    sp.scale.set(1.5, 0.34, 1); sp.renderOrder = 9;
+    sp.scale.set(1.15, 0.26, 1); sp.renderOrder = 9;
     agentSprites.set(a.id, { sprite: sp, key });
     return sp;
   }
@@ -645,12 +714,14 @@ export function create3D({ canvas, wrap, onDrag }) {
     if (state.tv.key !== tk) {
       state.tv.key = tk;
       state.tv.mat.map?.dispose();
-      state.tv.mat.map = canvasTex(256, 140, (g, w, hh) => {
-        g.fillStyle = '#101a2c'; g.fillRect(0, 0, w, hh);
+      state.tv.mat.map = canvasTex(512, 280, (g, w, hh) => {
+        g.fillStyle = '#0f1828'; g.fillRect(0, 0, w, hh);
+        g.fillStyle = '#ffffff14'; g.fillRect(w / 2 - 1, 16, 2, hh - 32); g.fillRect(16, hh / 2 - 1, w - 32, 2);
         s.counts.forEach((n, i) => {
-          const x = 30 + (i % 2) * 120, y = 38 + Math.floor(i / 2) * 56;
-          g.fillStyle = s.statusColors[i]; g.beginPath(); g.arc(x, y, 12, 0, 7); g.fill();
-          g.fillStyle = '#fff'; g.font = '700 42px Inter, sans-serif'; g.textAlign = 'left'; g.textBaseline = 'middle'; g.fillText(String(n), x + 24, y + 2);
+          const cx = (i % 2) * (w / 2), cy = Math.floor(i / 2) * (hh / 2);
+          g.fillStyle = s.statusColors[i]; g.beginPath(); g.arc(cx + 52, cy + 56, 18, 0, 7); g.fill();
+          g.fillStyle = '#fff'; g.font = '700 96px Inter, sans-serif'; g.textAlign = 'left'; g.textBaseline = 'middle'; g.fillText(String(n), cx + 84, cy + 62);
+          g.fillStyle = '#c3d0ea'; g.font = '700 25px Inter, sans-serif'; g.fillText((s.statusLabels?.[i] || '').toUpperCase(), cx + 26, cy + 116);
         });
       });
       state.tv.mat.needsUpdate = true;
@@ -730,17 +801,33 @@ export function create3D({ canvas, wrap, onDrag }) {
     u.L.sh.rotation.z = cheer || wave ? 0.2 : 0; u.R.sh.rotation.z = cheer ? -0.2 : 0;
     // respiração e humor
     u.head.position.y = 0.83 + Math.sin(now / 520 + a.name.length) * 0.006;
-    u.mouth.scale.set(a.status === 'concluido' ? 1.5 : 1, a.status === 'bloqueado' ? 0.6 : 1, 1);
-    u.mouth.rotation.z = a.status === 'bloqueado' ? 0.0 : 0;
+    // expressão: concluído e ocioso sorriem, bloqueado fica preocupado (sobrancelhas inclinadas, boca para baixo), trabalhando se concentra
+    const mood = a.status;
+    u.mN.visible = mood === 'trabalhando'; u.mS.visible = mood === 'concluido' || mood === 'ocioso'; u.mF.visible = mood === 'bloqueado';
+    const bz = mood === 'bloqueado' ? 0.4 : mood === 'trabalhando' ? -0.12 : 0;
+    u.brows[0].rotation.z = bz; u.brows[1].rotation.z = -bz;
+    const by = 0.095 + (mood === 'concluido' ? 0.012 : mood === 'bloqueado' ? 0.016 : 0);
+    u.brows[0].position.y = by; u.brows[1].position.y = by;
+    const blink = ((now + a.name.length * 733) % 4200) < 130;
+    u.eyes[0].scale.y = u.eyes[1].scale.y = blink ? 0.08 : 1;
+    // cabeça: olha para o teclado ao digitar, olha em volta quando está parado
+    const look = !rt.moving && !typing ? Math.sin(now / 2100 + a.name.length * 1.7) * 0.25 : 0;
+    const hk = Math.min(1, dt * 6);
+    u.head.rotation.y += (look - u.head.rotation.y) * hk;
+    u.head.rotation.x += ((typing ? 0.2 : mood === 'bloqueado' ? -0.08 : 0) - u.head.rotation.x) * hk;
+    u.head.rotation.z += ((cheer ? 0.09 : 0) - u.head.rotation.z) * hk;
     // nome e emoji da atividade
-    u.name.position.set(0, HIP_STAND + 1.15 + (hipSit - HIP_STAND) * sk * 0.9, 0);
+    // etiqueta no chão, na frente do personagem (no mundo: 0,4 para o lado da câmera); assim não cobre monitor nem balão
+    const th = u.rot, off = 0.34;
+    u.name.position.set(-off * Math.sin(th), 0.1, off * Math.cos(th));
     const em = a.emoji;
     if (em !== u.emojiKey) {
       if (u.emoji) { g.remove(u.emoji); u.emoji.material.dispose(); u.emoji = null; }
       if (em) { u.emoji = emojiSprite(em); g.add(u.emoji); }
       u.emojiKey = em;
     }
-    if (u.emoji) u.emoji.position.set(0.5, HIP_STAND + 1.15 + (hipSit - HIP_STAND) * sk * 0.9 + 0.25 + Math.sin(now / 400) * 0.03, 0);
+    const headTop = HIP_STAND + 1.15 + (hipSit - HIP_STAND) * sk * 0.9;
+    if (u.emoji) u.emoji.position.set(0.5, headTop + 0.25 + Math.sin(now / 400) * 0.03, 0);
   }
 
   // ---------- clique e posição na tela ----------

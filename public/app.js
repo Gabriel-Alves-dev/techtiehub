@@ -1135,6 +1135,7 @@ function snapshot3D(now) {
     night: h >= 19 || h < 5, sky: skyColor(),
     counts: ['trabalhando', 'bloqueado', 'concluido', 'ocioso'].map((st) => vis.filter((a) => a.status === st).length),
     statusColors: ['trabalhando', 'bloqueado', 'concluido', 'ocioso'].map((st) => STATUS[st].color),
+    statusLabels: ['trabalhando', 'bloqueado', 'concluido', 'ocioso'].map((st) => STATUS[st].label),
     coffee: vis.some((a) => runtime.get(a.id)?.atSpot?.act === 'cafe'),
     arcade: vis.some((a) => runtime.get(a.id)?.atSpot?.act === 'arcade'),
     agents: vis.map((a) => {
