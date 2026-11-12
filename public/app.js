@@ -380,7 +380,7 @@ function update(dt, now) {
         rt.wantMeeting = false;
       }
       if (rt.plan === 'spot') {
-        rt.spot ??= (rt.wantMeeting && pickMeetingSpot(a.id)) ?? pickSpot(a.id);
+        rt.spot ??= (rt.wantMeeting ? pickMeetingSpot(a.id) : null) ?? pickSpot(a.id); // sem reunião: null, e aí sim cai no sorteio comum
         target = world.spots[rt.spot];
         key = 'spot:' + rt.spot + ':' + world.H + ':' + world.W;
       } else if (rt.plan === 'stroll') {
@@ -1176,9 +1176,15 @@ function frame(now) {
   const dt = Math.min(0.1, (now - last) / 1000);
   last = now;
   if (world) {
-    update(dt, Date.now());
-    draw(Date.now());
-    updateBubbles();
+    // um erro num quadro não pode matar o laço (o canvas ficaria em branco até recarregar a página)
+    try {
+      update(dt, Date.now());
+      draw(Date.now());
+      updateBubbles();
+    } catch (e) {
+      ctx = mainCtx;
+      if (!frame.warned) { frame.warned = true; console.error('erro no desenho do escritório:', e); }
+    }
   }
   requestAnimationFrame(frame);
 }
