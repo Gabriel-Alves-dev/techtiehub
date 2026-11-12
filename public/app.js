@@ -19,6 +19,7 @@ const STATUS = {
 };
 
 const canvas = document.getElementById('office');
+const canvas3d = document.getElementById('office3d'); // vista 3D (Three.js), só usada quando ligada
 const mainCtx = canvas.getContext('2d');
 let ctx = mainCtx; // na vista inclinada, a cena plana é desenhada num canvas auxiliar (troca de ctx)
 const wrap = document.getElementById('office-wrap');
@@ -1054,94 +1055,104 @@ function drawLabels(a, rt, now, talkers) {
 
 let animNow = 0; // relógio do quadro atual, para itens que se mexem (plantas)
 
-// ---------- Vista inclinada (protótipo) ----------
-// O mundo continua plano (toda a lógica usa as mesmas coordenadas). Só o desenho muda: a cena plana vai para um
-// canvas auxiliar e é fatiada em linhas que encolhem com a distância (o fundo da sala fica mais estreito e mais
-// baixo), e os personagens são desenhados em pé por cima, ampliados conforme a profundidade.
-const TILT_K = 0.8; // altura da sala inclinada em relação à plana
-let tilt = load('hub.tilt') === true;
-const tiltF = (t) => 0.78 + 0.22 * t; // escala horizontal: 78% no fundo, 100% na frente
-const tiltY = (t) => (TILT_K * (0.78 * t + 0.11 * t * t)) / 0.89; // integral de tiltF, normalizada (0..TILT_K)
-let tiltBuf = null;
+// ---------- Vista 3D (Three.js) ----------
+// O módulo office3d.js (e o Three.js, em public/vendor/) só é baixado quando a vista 3D é ligada. A lógica continua
+// aqui (posições, status, caminhos); a cada quadro mandamos um "retrato" da cena e o módulo só desenha.
+let view3d = load('hub.view3d') === true;
+let v3 = null, v3loading = false, using3dNow = false;
 
-// ponto do mundo -> posição na vista (em unidades de mundo), com a escala local f
-function projPt(x, y) {
-  if (!tilt || !world) return { x, y, f: 1 };
-  const W = world.W * T, H = world.H * T, t = Math.max(0, Math.min(1, y / H)), f = tiltF(t);
-  return { x: W / 2 + (x - W / 2) * f, y: tiltY(t) * H, f };
-}
-
-// posição na vista -> ponto do mundo (para cliques)
-function unprojPt(X, Y) {
-  if (!tilt || !world) return { x: X, y: Y };
-  const W = world.W * T, H = world.H * T;
-  const u = Math.max(0, Math.min(TILT_K, Y / H)) * 0.89 / TILT_K;
-  const t = (-0.78 + Math.sqrt(0.78 * 0.78 + 0.44 * u)) / 0.22;
-  return { x: W / 2 + (X - W / 2) / tiltF(t), y: t * H };
-}
-
-function drawScene(now) {
-  drawRoom(now);
-  if (world.server) drawRacks(now);
-  else for (let i = 0; i < world.rows * world.cols; i++) drawDesk(i, now);
-  const hour = new Date().getHours();
-  if (hour >= 19 || hour < 5) { ctx.globalAlpha = 0.16; rect(0, 0, world.W * T, world.H * T, '#0d1440'); ctx.globalAlpha = 1; }
-  const furniture = roomDecor().filter((d) => DECOR_META[d.type]?.layer === 'piso' && decorFits(d)).sort((p, q) => p.y - q.y);
-  for (const d of furniture) DECOR_DRAW[d.type](d.x * T, d.y * T, now);
-}
-
-function drawTilt(now) {
-  const fw = world.W * T * SCALE, fh = world.H * T * SCALE;
-  if (!tiltBuf) tiltBuf = document.createElement('canvas');
-  if (tiltBuf.width !== fw || tiltBuf.height !== fh) { tiltBuf.width = fw; tiltBuf.height = fh; }
-  const bctx = tiltBuf.getContext('2d');
-  ctx = bctx; // as funções de desenho usam o ctx global
+async function ensureV3() {
+  if (v3 || v3loading) return;
+  v3loading = true;
   try {
-    bctx.setTransform(SCALE, 0, 0, SCALE, 0, 0);
-    bctx.imageSmoothingEnabled = false;
-    drawScene(now);
-  } finally { ctx = mainCtx; }
-
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.imageSmoothingEnabled = false;
-  ctx.fillStyle = '#0d0f16';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  // fatias de 2 px: cada uma encolhe horizontalmente (f) e verticalmente (f * TILT_K)
-  const H = world.H * T, BAND = 2;
-  for (let sy = 0; sy < fh; sy += BAND) {
-    const t = (sy + BAND / 2) / fh, f = tiltF(t);
-    const y0 = tiltY(sy / fh) * H * SCALE, y1 = tiltY(Math.min(1, (sy + BAND) / fh)) * H * SCALE;
-    ctx.drawImage(tiltBuf, 0, sy, fw, BAND, (fw - fw * f) / 2, y0, fw * f, Math.max(1, Math.ceil(y1 - y0) + 1));
-  }
-
-  // personagens em pé, na escala da profundidade onde estão
-  const ordered = visibleAgents().map((a) => [a, runtime.get(a.id)]).sort((p, q) => p[1].y - q[1].y);
-  for (const [a, rt] of ordered) {
-    const q = projPt(rt.x, rt.y), k = SCALE * q.f;
-    ctx.setTransform(k, 0, 0, k, q.x * SCALE - rt.x * k, q.y * SCALE - rt.y * k);
-    drawAgent(a, rt, now);
-    if (rt.seated || rt.atSpot?.chair === 'bottom') drawChairBack(rt);
-  }
-  ctx.setTransform(SCALE, 0, 0, SCALE, 0, 0);
-  const talkers = ordered.filter(([, rt]) => rt.atSpot?.act === 'reuniao').map(([a]) => a.id);
-  for (const [a, rt] of ordered) {
-    const q = projPt(rt.x, rt.y);
-    drawLabels(a, { ...rt, x: q.x, y: q.y }, now, talkers);
-  }
+    const m = await import('./office3d.js');
+    v3 = m.create3D({ canvas: canvas3d, wrap, onDrag: () => { suppressClick = true; } });
+  } catch (e) {
+    console.error('3D indisponível:', e);
+    view3d = false;
+    store('hub.view3d', false);
+    document.getElementById('btn-3d').classList.remove('active');
+    alert('Não consegui iniciar a vista 3D neste navegador (o WebGL pode estar desligado). Voltando para a vista 2D.');
+  } finally { v3loading = false; }
 }
 
-function setTilt(on) {
-  if (on && moveMode) setMoveMode(false);
+function setView3d(on) {
+  if (on && moveMode) setMoveMode(false); // mover mesas e decorar usam a vista plana
   if (on && decorMode) setDecorMode(false);
-  tilt = on;
-  store('hub.tilt', on);
-  document.getElementById('btn-tilt').classList.toggle('active', on);
-  resize();
+  view3d = on;
+  store('hub.view3d', on);
+  document.getElementById('btn-3d').classList.toggle('active', on);
+  if (on) ensureV3();
+}
+
+// mostra o canvas certo: salas de servidores continuam em 2D
+function syncView() {
+  const want = view3d && !!v3 && !world.server;
+  if (want === using3dNow) return;
+  using3dNow = want;
+  canvas.hidden = want;
+  canvas3d.hidden = !want;
+  if (want) v3.resize(); else resize();
+}
+
+// emoji sobre a cabeça conforme o que o agente faz na área (mesma lógica do 2D)
+function activityEmoji(a, rt, now, talkers) {
+  const act = rt.atSpot?.act, phase = Math.floor(now / 2500);
+  if (act === 'cafe' && phase % 3 === 0) return '☕';
+  if (act === 'reuniao') {
+    const i = talkers.indexOf(a.id);
+    const speaking = talkers.length > 1 ? phase % talkers.length === i : phase % 2 === 0;
+    return speaking ? (talkers.length > 1 ? TALK[(phase + i) % TALK.length] : '📝') : null;
+  }
+  if (act === 'puff') return '💤';
+  if (act === 'sofa' && phase % 4 === 1) return '📱';
+  if (act === 'arcade' && phase % 3 === 0) return '🕹️';
+  return null;
+}
+
+function snapshot3D(now) {
+  const vis = visibleAgents();
+  const desks = [];
+  for (let i = 0; i < world.rows * world.cols; i++) {
+    const p = world.byslot.get(i), c = cellOf(i);
+    if (!p) { if (i === world.newSlot) desks.push({ empty: true, isNew: true, x: c.x, y: c.y }); continue; }
+    const ag = state.agents.find((x) => x.id === p.agentId), rt = ag && runtime.get(ag.id);
+    desks.push({
+      id: p.id, name: p.name, color: p.color, x: c.x, y: c.y, seat: c.seat,
+      status: ag?.status || 'ocioso', seated: !!rt?.seated,
+      ringing: !!(state.live?.[p.id]?.pending || ag?.status === 'bloqueado'),
+      selected: selected?.kind === 'project' && selected.id === p.id,
+      hover: hover?.kind === 'project' && hover.id === p.id,
+    });
+  }
+  const talkers = vis.filter((a) => runtime.get(a.id)?.atSpot?.act === 'reuniao').map((a) => a.id);
+  const h = new Date().getHours();
+  return {
+    W: world.W, H: world.H, L: world.L, floor: world.floor,
+    floorColors: FLOORS[world.floor] || FLOORS.madeira, wallColors: WALLS[world.wall] || WALLS.cinza,
+    blocks: world.blocks, spots: world.spots, desks,
+    decor: roomDecor().filter(decorFits),
+    night: h >= 19 || h < 5, sky: skyColor(),
+    counts: ['trabalhando', 'bloqueado', 'concluido', 'ocioso'].map((st) => vis.filter((a) => a.status === st).length),
+    statusColors: ['trabalhando', 'bloqueado', 'concluido', 'ocioso'].map((st) => STATUS[st].color),
+    coffee: vis.some((a) => runtime.get(a.id)?.atSpot?.act === 'cafe'),
+    arcade: vis.some((a) => runtime.get(a.id)?.atSpot?.act === 'arcade'),
+    agents: vis.map((a) => {
+      const rt = runtime.get(a.id);
+      return {
+        id: a.id, name: a.name, shirt: a.shirt, hair: a.hair, skin: a.skin, hairStyle: a.hairStyle, accessory: a.accessory,
+        status: a.status, statusColor: (STATUS[a.status] || STATUS.ocioso).color,
+        sig: [a.shirt, a.hair, a.skin, a.hairStyle, a.accessory].join('|'),
+        emoji: activityEmoji(a, rt, now, talkers), rt,
+      };
+    }),
+  };
 }
 
 function draw(now) {
   animNow = now;
-  if (tilt) return drawTilt(now);
+  syncView();
+  if (using3dNow) return v3.render(snapshot3D(now), now);
   ctx.setTransform(SCALE, 0, 0, SCALE, 0, 0);
   ctx.imageSmoothingEnabled = false;
   drawRoom(now);
@@ -1194,7 +1205,7 @@ const MIN_ZOOM = 1, MAX_ZOOM = 6;
 function resize() {
   if (!world) return;
   const ww = world.W * T, wh = world.H * T;
-  const ch = tilt ? Math.round(wh * TILT_K) : wh; // altura do canvas (a vista inclinada é mais baixa)
+  const ch = wh;
   const fit = Math.floor(Math.min((wrap.clientWidth - 16) / ww, (wrap.clientHeight - 16) / ch));
   // celular: no mínimo 2x (a 1x o texto fica ilegível); o que passar da tela rola com o dedo
   SCALE = zoom ?? Math.max(innerWidth <= 760 ? 2 : MIN_ZOOM, Math.min(4, fit));
@@ -1221,11 +1232,12 @@ function setZoom(next, cx, cy) {
   wrap.scrollTop += after.top + wy * SCALE - cy;
 }
 
-document.getElementById('zoom-in').onclick = () => setZoom(SCALE + 1);
-document.getElementById('zoom-out').onclick = () => setZoom(SCALE - 1);
-document.getElementById('zoom-fit').onclick = () => setZoom(null);
-document.getElementById('btn-tilt').onclick = () => setTilt(!tilt);
-document.getElementById('btn-tilt').classList.toggle('active', tilt);
+document.getElementById('zoom-in').onclick = () => (using3dNow ? v3.zoomBy(0.8) : setZoom(SCALE + 1));
+document.getElementById('zoom-out').onclick = () => (using3dNow ? v3.zoomBy(1.25) : setZoom(SCALE - 1));
+document.getElementById('zoom-fit').onclick = () => (using3dNow ? v3.resetCamera() : setZoom(null));
+document.getElementById('btn-3d').onclick = () => setView3d(!view3d);
+document.getElementById('btn-3d').classList.toggle('active', view3d);
+if (view3d) ensureV3();
 wrap.addEventListener('wheel', (e) => {
   if (!e.ctrlKey) return; // roda sozinha rola; Ctrl+roda dá zoom
   e.preventDefault();
@@ -1301,21 +1313,30 @@ function updateBubbles() {
       el.dataset.key = key;
       el.innerHTML = `<span class="b-inner ${b.cls}">${esc(b.text)}${b.cls === 'working' ? '<span class="dots"><i></i><i></i><i></i></span>' : ''}</span>`;
     }
-    // sentado: acima do monitor; andando: acima do nome
-    const q = projPt(rt.x, rt.y);
-    const by = q.y + (rt.seated ? -46 : -34) * q.f;
     // sem sair do escritório (no celular os balões largos passavam da borda da tela)
     const half = el.offsetWidth / 2;
-    const bx = Math.max(ox + half, Math.min(ox + canvas.width - half, ox + q.x * SCALE));
-    el.style.transform = `translate(${Math.round(bx)}px, ${Math.round(oy + by * SCALE)}px) translate(-50%, -100%)`;
+    let bx, byPx;
+    if (using3dNow) {
+      // 3D: ancora no ponto acima da cabeça, projetado na tela
+      const q = v3.screenPos(rt.x, rt.y - (rt.seated ? 0.6 * T : 0), rt.seated ? 2.2 : 2.45);
+      bx = Math.max(half, Math.min(canvas3d.clientWidth - half, q.x));
+      byPx = q.y;
+    } else {
+      // sentado: acima do monitor; andando: acima do nome
+      const by = rt.seated ? rt.y - 46 : rt.y - 34;
+      bx = Math.max(ox + half, Math.min(ox + canvas.width - half, ox + rt.x * SCALE));
+      byPx = oy + by * SCALE;
+    }
+    el.style.transform = `translate(${Math.round(bx)}px, ${Math.round(byPx)}px) translate(-50%, -100%)`;
   }
   for (const [id, el] of bubbleEls) if (!seen.has(id)) { el.remove(); bubbleEls.delete(id); }
 }
 
 // ---------- Interação no canvas ----------
 function hitTest(ev) {
+  if (using3dNow) return v3.pick(ev);
   const r = canvas.getBoundingClientRect();
-  const { x: wx, y: wy } = unprojPt((ev.clientX - r.left) / SCALE, (ev.clientY - r.top) / SCALE);
+  const wx = (ev.clientX - r.left) / SCALE, wy = (ev.clientY - r.top) / SCALE;
   const ordered = visibleAgents().map((a) => [a, runtime.get(a.id)]).sort((p, q) => q[1].y - p[1].y);
   for (const [a, rt] of ordered) {
     if (wx > rt.x - 8 && wx < rt.x + 8 && wy > rt.y - 24 && wy < rt.y + 2) return { kind: 'agent', id: a.id };
@@ -1339,12 +1360,12 @@ function hitTest(ev) {
   return null;
 }
 
-canvas.addEventListener('mousemove', (ev) => {
+const onCanvasMove = (ev) => {
   if (drag?.moved) return;
   if (moveMode) { canvas.style.cursor = world.byslot.has(cellAt(ev).idx) ? 'grab' : 'default'; tooltip.hidden = true; return; }
   if (decorMode) { decorHover = decorTile(ev); canvas.style.cursor = 'crosshair'; tooltip.hidden = true; return; }
   hover = hitTest(ev);
-  canvas.style.cursor = hover ? 'pointer' : 'default';
+  (using3dNow ? canvas3d : canvas).style.cursor = hover ? 'pointer' : 'default';
   if (!hover || hover.kind === 'slot') { tooltip.hidden = true; return; }
   let html;
   if (hover.kind === 'rack') {
@@ -1363,10 +1384,14 @@ canvas.addEventListener('mousemove', (ev) => {
   tooltip.style.left = ev.clientX - wr.left + wrap.scrollLeft + 14 + 'px';
   tooltip.style.top = ev.clientY - wr.top + wrap.scrollTop + 14 + 'px';
   tooltip.hidden = false;
-});
-canvas.addEventListener('mouseleave', () => { hover = null; decorHover = null; tooltip.hidden = true; });
+};
+const onCanvasLeave = () => { hover = null; decorHover = null; tooltip.hidden = true; };
+canvas.addEventListener('mousemove', onCanvasMove);
+canvas3d.addEventListener('mousemove', onCanvasMove);
+canvas.addEventListener('mouseleave', onCanvasLeave);
+canvas3d.addEventListener('mouseleave', onCanvasLeave);
 
-canvas.addEventListener('click', (ev) => {
+const onCanvasClick = (ev) => {
   if (suppressClick) { suppressClick = false; return; } // foi um arrasto, não um clique
   if (decorMode) return placeDecor(decorTile(ev));
   if (moveMode) return tapMove(ev);
@@ -1379,7 +1404,9 @@ canvas.addEventListener('click', (ev) => {
   const desk = deskOf(a.id);
   if (desk) openProjectWindow(desk.project.id);
   else openAgentDialog(a);
-});
+};
+canvas.addEventListener('click', onCanvasClick);
+canvas3d.addEventListener('click', onCanvasClick);
 
 // ---------- Modo mover mesas ----------
 function cellAt(ev) {
@@ -1454,7 +1481,7 @@ function drawMoveGhost() {
 
 function setMoveMode(on) {
   if (on && decorMode) setDecorMode(false);
-  if (on && tilt) setTilt(false); // arrastar e decorar usam a vista plana
+  if (on && view3d) setView3d(false); // arrastar e decorar usam a vista plana
   moveMode = on;
   moving = null;
   movePick = null;
@@ -1519,7 +1546,7 @@ function drawDecorCursor() {
 
 function setDecorMode(on) {
   if (on && moveMode) setMoveMode(false);
-  if (on && tilt) setTilt(false);
+  if (on && view3d) setView3d(false);
   decorMode = on;
   decorHover = null;
   document.getElementById('btn-decor').classList.toggle('active', on);
@@ -1859,9 +1886,13 @@ function deskAnchor(projectId) {
   const i = world?.slotOf.get(projectId);
   if (i == null) return null;
   const c = cellOf(i);
+  if (using3dNow) {
+    const q = v3.screenPos(c.x + 4.5 * T, c.y + 2.5 * T, 1);
+    const r3 = canvas3d.getBoundingClientRect();
+    return { x: r3.left + q.x, y: r3.top + q.y };
+  }
   const r = canvas.getBoundingClientRect();
-  const q = projPt(c.x + 4.5 * T, c.y + 2.5 * T);
-  return { x: r.left + q.x * SCALE, y: r.top + q.y * SCALE };
+  return { x: r.left + (c.x + 4.5 * T) * SCALE, y: r.top + (c.y + 2.5 * T) * SCALE };
 }
 
 function openProjectWindow(projectId) {

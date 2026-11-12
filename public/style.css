@@ -131,8 +131,8 @@ main { flex: 1; display: flex; min-height: 0; }
   background: #ffd166;
   animation: bob 0.9s ease-in-out infinite;
 }
-#btn-decor, #btn-move, #btn-tilt { margin-bottom: 6px; padding: 6px 10px; box-shadow: none; }
-#btn-tilt.active, #btn-move.active, #btn-decor.active, .decor-bar button.active { border-color: var(--accent); background: var(--panel-2); color: var(--text); }
+#btn-decor, #btn-move, #btn-3d { margin-bottom: 6px; padding: 6px 10px; box-shadow: none; }
+#btn-3d.active, #btn-move.active, #btn-decor.active, .decor-bar button.active { border-color: var(--accent); background: var(--panel-2); color: var(--text); }
 .decor-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 20px; background: var(--bg); border-bottom: 2px solid var(--line); }
 .decor-bar button { padding: 5px 9px; font: 600 12px Inter, sans-serif; box-shadow: none; }
 .decor-bar .muted { font-size: 12px; margin-left: 6px; }
@@ -150,6 +150,9 @@ main { flex: 1; display: flex; min-height: 0; }
 
 /* margin:auto centraliza sem cortar a borda esquerda quando o escritório é maior que a tela */
 canvas { margin: auto; image-rendering: pixelated; cursor: pointer; }
+/* vista 3D: preenche a área do escritório (suave, sem pixelado) */
+#office3d { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; image-rendering: auto; display: block; }
+#office3d[hidden] { display: none; }
 
 input[type='range'] { padding: 0; accent-color: var(--accent); }
 
@@ -540,8 +543,8 @@ button.warn { color: var(--warn); border-color: var(--warn); }
   .room-tabs { flex-basis: 100%; scrollbar-width: none; }
   .room-tabs::-webkit-scrollbar { display: none; }
   .room-tab { padding: 10px 12px; }
-  #btn-tilt, #btn-move, #btn-decor { margin-bottom: 0; padding: 8px 12px; font-size: 14px; white-space: nowrap; }
-  #btn-tilt .lbl, #btn-move .lbl, #btn-decor .lbl { display: none; } /* só o ícone, para caber numa linha com o zoom */
+  #btn-3d, #btn-move, #btn-decor { margin-bottom: 0; padding: 8px 12px; font-size: 14px; white-space: nowrap; }
+  #btn-3d .lbl, #btn-move .lbl, #btn-decor .lbl { display: none; } /* só o ícone, para caber numa linha com o zoom */
   .zoom { margin-left: auto; padding-bottom: 0; gap: 4px; }
   .zoom button { padding: 9px 10px; font-size: 9px; white-space: nowrap; }
   #zoom-label { min-width: 0; }

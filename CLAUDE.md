@@ -21,6 +21,7 @@ Leia `docs/ARQUITETURA.md` antes de mudanças estruturais.
 - **Pacote do conector** (`GET /api/connector-download`, `zip.js`, `pacote/`, `preparar.js`): se um arquivo novo passar a ser usado pelo conector, inclua-o em `FILES` no `connector-files.js` (vale para o pacote e para a atualização automática). Os `.bat` precisam ser só ASCII e todo comando deve usar caminho completo ou o PATH (há PCs com `NoDefaultCurrentDirectoryInExePath`). PowerShell 5.1: desfaça arrays de JSON com `ForEach-Object { $_ }`.
 - `git.js`: HEAD, remote e comparação de commits das pastas dos projetos.
 - `public/app.js`: canvas do escritório, balões HTML, janelas flutuantes e diálogos. JS puro, sem build.
+- `public/office3d.js` + `public/vendor/three.module.min.js`: vista 3D opcional (botão 🧊). O Three.js é **um arquivo único de terceiros (r170, MIT) servido como estático**, sem npm e sem build; o módulo só é baixado ao ligar o 3D (`import()` em `app.js`). Ele só desenha: o `app.js` manda um retrato da cena a cada quadro (`snapshot3D`), e posições, status e caminhos continuam na lógica 2D. Para atualizar o Three.js, troque o arquivo por outro build de arquivo único (a partir da r171 ele se divide em dois arquivos).
 - `hub-hook.js` / `instalar-hook.js`: integração com o Claude Code do VS Code via hooks.
 - `Dockerfile` / `docs/DEPLOY-COOLIFY.md`: o hub em servidor (Coolify, `hub.techtie.digital`). **O hub não pode depender de pacotes npm**: a imagem não roda `npm install`. Só o conector carrega o SDK do Claude (import dinâmico em `runner.js`).
 - `data/`: dados locais do usuário. **Nunca versionar** (está no `.gitignore`).
@@ -29,7 +30,7 @@ Leia `docs/ARQUITETURA.md` antes de mudanças estruturais.
 ## Convenções
 
 - **Textos de interface, comentários e documentação em português do Brasil.**
-- **Sem dependências novas sem necessidade.** Hoje só existe `@anthropic-ai/claude-agent-sdk`. Servidor com `http` nativo, front em JS puro, sem bundler.
+- **Sem dependências novas sem necessidade.** Hoje só existe `@anthropic-ai/claude-agent-sdk` (npm, só no conector) e o Three.js em `public/vendor/` (arquivo estático, só no navegador). Servidor com `http` nativo, front em JS puro, sem bundler.
 - **Toda mudança de estado no servidor termina em `save()`.** Ela salva e transmite o estado por SSE.
 - **A janela da mesa no front é atualizada por partes**, nunca recriada inteira, para não apagar o que o usuário digita.
 - **Segurança:**
