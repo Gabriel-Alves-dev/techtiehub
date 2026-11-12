@@ -327,9 +327,12 @@ export function create3D({ canvas, wrap, onDrag }) {
   const state = { key: '', room: null, desks: new Map(), agents: new Map(), plants: [], arcade: null, steam: null, lamp: null, clock: null, tv: null, glass: [], glassKey: '', lastNow: 0, lastFrame: 0 };
 
   // câmera orbital: azimute e elevação em torno do centro da sala
-  const cam = { az: 0, el: 0.95, zoom: 1, cx: 0, cz: 0, bx: 0, bz: 0, R: 10, depth: 10, width: 20, dist: 20, zMin: 3, zMax: 20, W: 20, Lt: 15 };
-  const camRange = { az: [-0.9, 0.9], el: [0.45, 1.35], zoom: [0.45, 2.2] };
+  const cam = { az: 0, azT: 0, el: 0.95, zoom: 1, cx: 0, cz: 0, bx: 0, bz: 0, R: 10, depth: 10, width: 20, dist: 20, zMin: 3, zMax: 20, W: 20, Lt: 15 };
+  const camRange = { el: [0.45, 1.35], zoom: [0.45, 2.2] };
   function placeCamera() {
+    cam.az += (cam.azT - cam.az) * 0.14; // gira suave até o ângulo pedido (botão Virar)
+    const upside = Math.cos(cam.az) < 0; // visto de frente, os textos do chão giram junto para continuarem legíveis
+    for (const f of state.flat || []) f.rotation.z = upside ? Math.PI : 0;
     // distância que enquadra a sala inteira (largura e profundidade) para a proporção atual da tela
     const tv = Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2), th = tv * camera.aspect;
     const fitH = (cam.depth * Math.sin(cam.el) + WALL_UP * Math.cos(cam.el)) / (2 * tv);
@@ -382,7 +385,7 @@ export function create3D({ canvas, wrap, onDrag }) {
       onDrag?.();
       if (p.right) pan(dx, dy); // botão direito ou Shift: desloca; botão esquerdo: gira
       else {
-        cam.az = clamp(cam.az - dx * 0.006, camRange.az);
+        cam.az -= dx * 0.006; cam.azT = cam.az; // gira livre, 360°
         cam.el = clamp(cam.el + dy * 0.006, camRange.el);
       }
     }
@@ -395,7 +398,7 @@ export function create3D({ canvas, wrap, onDrag }) {
   // tela vertical (celular): a sala é larga demais, então começa aproximada, olhando as mesas do topo
   function resetCamera() {
     const portrait = camera.aspect < 0.9;
-    cam.az = 0; cam.el = portrait ? 0.9 : 0.95;
+    cam.az = 0; cam.azT = 0; cam.el = portrait ? 0.9 : 0.95;
     cam.zoom = portrait ? 0.58 : 1;
     cam.cx = portrait ? (1 + cam.Lt) / 2 + 0.5 : cam.bx; // vertical: começa nas mesas (o lounge fica à direita, é só deslocar)
     cam.cz = portrait ? cam.zMin + cam.depth * 0.42 : cam.bz;
@@ -414,7 +417,7 @@ export function create3D({ canvas, wrap, onDrag }) {
   function build(s) {
     disposeGroup(staticGroup);
     hitList.length = 0;
-    state.desks.clear(); state.plants = []; state.glass = []; state.arcade = null; state.steam = null; state.clock = null; state.tv = null; state.glassKey = '';
+    state.desks.clear(); state.flat = []; state.plants = []; state.glass = []; state.arcade = null; state.steam = null; state.clock = null; state.tv = null; state.glassKey = '';
     const g = staticGroup;
     const { W, H, L } = s;
     const Wt = W, Ht = H, Lt = L / T, wTiles = W - 2, zMin = WALL_H, zMax = H - 1;
@@ -523,7 +526,7 @@ export function create3D({ canvas, wrap, onDrag }) {
           const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineDashedMaterial({ color: '#ffffff', dashSize: 0.25, gapSize: 0.18, transparent: true, opacity: 0.55 }));
           line.computeLineDistances(); dg.add(line);
           const pl = new THREE.Mesh(new THREE.PlaneGeometry(3.2, 0.6), new THREE.MeshBasicMaterial({ map: textPlane('+ NOVA MESA', { w: 512, h: 96, px: 50, color: '#ffffffcc' }), transparent: true, depthWrite: false }));
-          pl.rotation.x = -Math.PI / 2; pl.position.set(cx + 2.5, 0.03, cy + 2.4); dg.add(pl);
+          pl.rotation.x = -Math.PI / 2; pl.position.set(cx + 2.5, 0.03, cy + 2.4); dg.add(pl); state.flat.push(pl);
           const hit = new THREE.Mesh(new THREE.BoxGeometry(4, 1, 3.8), new THREE.MeshBasicMaterial({ visible: false })); hit.position.set(cx + 2.5, 0.5, cy + 2.4); hit.userData = { kind: 'slot' }; dg.add(hit); hitList.push(hit);
         }
         continue;
@@ -562,7 +565,7 @@ export function create3D({ canvas, wrap, onDrag }) {
       const chair = makeChair(); chair.position.set(d.seat.x / T, 0, d.seat.y / T - 0.6); dg.add(chair);
       // nome do projeto, escrito no tapete
       const label = new THREE.Mesh(new THREE.PlaneGeometry(3.4, 0.55), new THREE.MeshBasicMaterial({ map: textPlane(d.name.toUpperCase().slice(0, 18), { w: 640, h: 104, px: 50, color: '#ffffff' }), transparent: true, depthWrite: false }));
-      label.rotation.x = -Math.PI / 2; label.position.set(cx + 2.5, 0.035, cy + 4.5); label.renderOrder = 1; dg.add(label);
+      label.rotation.x = -Math.PI / 2; label.position.set(cx + 2.5, 0.035, cy + 4.5); label.renderOrder = 1; dg.add(label); state.flat.push(label);
       // clique
       const hit = new THREE.Mesh(new THREE.BoxGeometry(4, 1.6, 4), new THREE.MeshBasicMaterial({ visible: false })); hit.position.set(cx + 2.5, 0.8, cy + 2.5); hit.userData = { kind: 'project', id: d.id }; dg.add(hit); hitList.push(hit);
       state.desks.set(d.id, { cv, tex, screen, glow, phone, pled, outline: ol, key: '', col, ring: false });
@@ -659,7 +662,7 @@ export function create3D({ canvas, wrap, onDrag }) {
     } else if (st === 'bloqueado' && present) {
       g.fillStyle = frame ? '#7a1f1a' : '#4a1512'; g.fillRect(0, 0, w, h);
       g.fillStyle = '#fff'; g.font = '700 70px Inter, sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('!', w / 2, h / 2 + 4);
-    } else if (st === 'concluido' && present) {
+    } else if (st === 'concluido') { // a tela de pronto continua acesa mesmo com o agente longe da mesa
       g.fillStyle = '#1a3a7a'; g.fillRect(0, 0, w, h);
       g.fillStyle = '#fff'; g.font = '700 70px Inter, sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('✓', w / 2, h / 2 + 4);
     } else {
@@ -732,7 +735,7 @@ export function create3D({ canvas, wrap, onDrag }) {
       const d = state.desks.get(dk.id);
       if (!d) return;
       drawScreen(d, dk.status, dk.seated, now, i);
-      const on = dk.seated && ['trabalhando', 'bloqueado', 'concluido'].includes(dk.status);
+      const on = (dk.seated && ['trabalhando', 'bloqueado'].includes(dk.status)) || dk.status === 'concluido';
       d.glow.material.opacity = on ? 0.22 : 0;
       d.glow.material.color.set(dk.status === 'trabalhando' ? '#3fbf7f' : dk.status === 'bloqueado' ? '#e5534b' : '#4f8cff');
       d.phone.position.x = d.phone.userData.bx + (dk.ringing ? Math.sin(now / 45) * 0.012 : 0);
@@ -787,7 +790,7 @@ export function create3D({ canvas, wrap, onDrag }) {
 
     const ph = rt.walk * 0.28, sw = Math.sin(ph) * 0.7 * u.moveK * (1 - sk);
     const typing = rt.seated && a.status === 'trabalhando';
-    const cheer = rt.seated && a.status === 'concluido' && Math.floor(now / 450) % 2 === 0;
+    const cheer = false; // concluído não levanta os braços: fica sentado em repouso, com a tela de "pronto" acesa
     const wave = rt.seated && a.status === 'bloqueado';
     // pernas: andando balançam; sentado a coxa vai à frente e a canela desce
     u.LL.hp.rotation.x = sw - 1.5 * sk; u.RL.hp.rotation.x = -sw - 1.5 * sk;
@@ -851,6 +854,8 @@ export function create3D({ canvas, wrap, onDrag }) {
 
   return {
     cam, render, pick, screenPos, resize, resetCamera,
+    // alterna entre a vista de trás das mesas e a de frente (vendo o rosto de quem está sentado)
+    flip: () => { cam.azT = (Math.round(cam.azT / Math.PI) + 1) * Math.PI; },
     zoomBy: (f) => { cam.zoom = clamp(cam.zoom * f, camRange.zoom); },
     dispose: () => renderer.dispose(),
   };

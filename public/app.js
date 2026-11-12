@@ -898,7 +898,7 @@ function drawDesk(i, now) {
   } else if (st === 'bloqueado' && present) {
     rect(mx, my, mw, mh, now % 1000 < 500 ? '#7a1f1a' : '#4a1512');
     text('!', mx + mw / 2, my + mh / 2 + 0.5, 10, '#fff');
-  } else if (st === 'concluido' && present) {
+  } else if (st === 'concluido') { // a tela de pronto fica acesa mesmo com o agente longe da mesa
     rect(mx, my, mw, mh, '#1a3a7a');
     text('✓', mx + mw / 2, my + mh / 2 + 0.5, 10, '#fff');
   } else {
@@ -964,7 +964,7 @@ function drawAgent(a, rt, now) {
   // braços: comemorando (concluído), pedindo ajuda (bloqueado) ou balançando ao andar
   const seatedNow = rt.seated;
   const swing = rt.moving ? (step ? 1 : -1) : 0;
-  const cheer = seatedNow && a.status === 'concluido' && Math.floor(now / 450) % 2 === 0;
+  const cheer = false; // concluído fica sentado em repouso (sem braços para cima)
   const wave = seatedNow && a.status === 'bloqueado';
   const lUp = cheer || (wave && Math.floor(now / 250) % 2 === 0), rUp = cheer;
   const arm = (ax, up, sw) => {
@@ -1092,6 +1092,7 @@ function syncView() {
   using3dNow = want;
   canvas.hidden = want;
   canvas3d.hidden = !want;
+  document.getElementById('btn-flip').hidden = !want;
   if (want) v3.resize(); else resize();
 }
 
@@ -1236,6 +1237,7 @@ function setZoom(next, cx, cy) {
 document.getElementById('zoom-in').onclick = () => (using3dNow ? v3.zoomBy(0.8) : setZoom(SCALE + 1));
 document.getElementById('zoom-out').onclick = () => (using3dNow ? v3.zoomBy(1.25) : setZoom(SCALE - 1));
 document.getElementById('zoom-fit').onclick = () => (using3dNow ? v3.resetCamera() : setZoom(null));
+document.getElementById('btn-flip').onclick = () => v3?.flip();
 document.getElementById('btn-3d').onclick = () => setView3d(!view3d);
 document.getElementById('btn-3d').classList.toggle('active', view3d);
 if (view3d) ensureV3();
