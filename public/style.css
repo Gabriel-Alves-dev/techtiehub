@@ -244,6 +244,7 @@ fieldset.areas legend { padding: 0 4px; font-size: 12px; color: var(--muted); }
 }
 .b-inner.urgent { background: #ffd166; animation: bob 0.9s ease-in-out infinite; }
 .b-inner.done { background: #bff3d4; }
+.b-inner.compact { padding: 2px 7px; font-size: 11px; }
 .b-inner.working { background: #fff; }
 @keyframes bob {
   0%, 100% { translate: 0 0; }

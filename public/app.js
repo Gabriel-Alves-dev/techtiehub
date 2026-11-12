@@ -1288,7 +1288,11 @@ function bubbleFor(a) {
   if (pend) return { cls: 'urgent', text: '✋ Posso? ' + truncate(pend.summary, 30) };
   if (a.status === 'bloqueado') return { cls: 'urgent', text: '✋ ' + truncate(a.message || 'Preciso de você', 34) };
   if (a.status === 'trabalhando') return { cls: 'working', text: truncate(a.message || 'Trabalhando', 34) };
-  if (a.status === 'concluido') return { cls: 'done', text: '✓ Pronto!' };
+  if (a.status === 'concluido') {
+    // com muitos concluídos ao mesmo tempo, o texto vira só o ✓ (senão os balões cobrem a sala toda)
+    const many = visibleAgents().filter((x) => x.status === 'concluido').length >= 4;
+    return { cls: 'done' + (many ? ' compact' : ''), text: many ? '✓' : '✓ Pronto!' };
+  }
   return null;
 }
 
