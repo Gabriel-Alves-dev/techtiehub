@@ -200,90 +200,147 @@ function makeFrameTexture() {
 }
 
 // ---------- personagem ----------
+// ---------- personagens: estilo "desenho animado" ----------
+// Material toon (luz em 3 degraus) + contorno escuro por "casco invertido" (a malha de novo, um pouco maior, só com as costas
+// visíveis). Técnica clássica de cel shading; referência: MeshToonMaterial e OutlineEffect do próprio Three.js.
+let toonGrad = null;
+const toonCache = new Map();
+const OUTLINE = new THREE.MeshBasicMaterial({ color: '#1b1424', side: THREE.BackSide });
+function toon(color, o = {}) {
+  toonGrad ??= (() => {
+    const t = new THREE.DataTexture(new Uint8Array([110, 190, 255]), 3, 1, THREE.RedFormat);
+    t.minFilter = t.magFilter = THREE.NearestFilter; t.needsUpdate = true;
+    return t;
+  })();
+  const key = color + JSON.stringify(o);
+  if (!toonCache.has(key)) toonCache.set(key, new THREE.MeshToonMaterial({ color, gradientMap: toonGrad, ...o }));
+  return toonCache.get(key);
+}
+function shade(hex, k) { // clareia (k > 0) ou escurece (k < 0) uma cor
+  const c = new THREE.Color(hex);
+  return '#' + (k > 0 ? c.lerp(new THREE.Color('#fff'), k) : c.multiplyScalar(1 + k)).getHexString();
+}
+const hash = (id, m) => [...String(id)].reduce((h, c) => (h * m + c.charCodeAt(0)) % 9973, 7);
+
 function buildAgent(a) {
   const root = new THREE.Group();
   const body = new THREE.Group(); root.add(body);
-  const skin = mat(a.skin || '#f1c7a0'), shirt = mat(a.shirt || '#4f8cff'), hair = mat(a.hair || '#3b2416');
-  const pants = mat('#2a2f45'), shoe = mat('#15171f');
+  const outlined = new Set();
+  const tm = (c, o) => { const m = toon(c, o); outlined.add(m); return m; };
+  const skinC = a.skin || '#f1c7a0', shirtC = a.shirt || '#4f8cff', hairC = a.hair || '#3b2416';
+  const skin = tm(skinC), shirt = tm(shirtC), hair = tm(hairC), pants = tm('#2f3550'), shoe = tm('#f4f1ea'), sole = tm('#2a2f3e');
+  const outfit = hash(a.id, 31) % 3; // 0 camiseta, 1 moletom com capuz, 2 colete por cima de camisa
 
-  caps(body, 0.17, 0.24, shirt, 0, 0.29, 0); // tronco
-  box(body, 0.3, 0.05, 0.18, '#0003', 0, 0.02, 0).visible = false;
-  const neck = cyl(body, 0.07, 0.07, 0.08, skin, 0, 0.6, 0, 10);
-  neck.castShadow = false;
-  const collar = add(body, new THREE.TorusGeometry(0.085, 0.028, 8, 18), shirt, 0, 0.575, 0, { cast: false }); collar.rotation.x = Math.PI / 2;
-  cyl(body, 0.174, 0.174, 0.035, '#1c1c24', 0, 0.1, 0, 20).castShadow = false; // cinto
-
-  const head = new THREE.Group(); head.position.y = 0.83; body.add(head);
-  const skull = sph(head, 0.21, skin, 0, 0, 0, 24); skull.scale.set(1, 1.04, 1);
-  const cap = (r, y = 0, z = 0, rx = -0.32, mat_ = hair) => {
-    const m = add(head, new THREE.SphereGeometry(r, 24, 14, 0, Math.PI * 2, 0, Math.PI * 0.56), mat_, 0, y, z);
-    m.rotation.x = rx;
-    return m;
-  };
-  const style = a.hairStyle || ['curto', 'longo', 'coque'][[...String(a.id)].reduce((s, c) => s + c.charCodeAt(0), 0) % 3];
-  cap(0.225);
-  if (style === 'longo') {
-    caps(head, 0.17, 0.2, hair, 0, -0.14, -0.1);
-    caps(head, 0.06, 0.18, hair, -0.2, -0.1, -0.02);
-    caps(head, 0.06, 0.18, hair, 0.2, -0.1, -0.02);
+  // tronco arredondado, um pouco mais largo nos ombros
+  const torso = caps(body, 0.17, 0.2, shirt, 0, 0.3, 0); torso.scale.set(1.08, 1, 0.92);
+  const hips = sph(body, 0.17, pants, 0, 0.1, 0, 14); hips.scale.set(1.05, 0.62, 0.9);
+  const belt = cyl(body, 0.178, 0.178, 0.03, '#1c1c24', 0, 0.135, 0, 20); belt.castShadow = false;
+  const neck = cyl(body, 0.065, 0.075, 0.09, skin, 0, 0.62, 0, 10); neck.castShadow = false;
+  if (outfit === 1) { // moletom: capuz nas costas e bolso na frente
+    const hood = add(body, new THREE.TorusGeometry(0.1, 0.045, 8, 16, Math.PI * 1.5), shirt, 0, 0.6, -0.05, { cast: false }); hood.rotation.x = Math.PI / 2 - 0.5; hood.rotation.z = Math.PI * 0.75;
+    box(body, 0.22, 0.09, 0.05, shade(shirtC, -0.16), 0, 0.22, 0.17, { cast: false });
+  } else if (outfit === 2) { // colete: gola branca e frente escura
+    box(body, 0.2, 0.34, 0.05, shade(shirtC, -0.3), 0, 0.33, 0.158, { cast: false });
+    const col = add(body, new THREE.TorusGeometry(0.09, 0.026, 8, 18), tm('#f4f1ea'), 0, 0.585, 0.01, { cast: false }); col.rotation.x = Math.PI / 2;
+  } else {
+    const col = add(body, new THREE.TorusGeometry(0.09, 0.028, 8, 18), shirt, 0, 0.585, 0, { cast: false }); col.rotation.x = Math.PI / 2;
   }
-  if (style === 'coque') sph(head, 0.1, hair, 0, 0.24, -0.1);
-  // rosto: olhos com branco, pupila e brilho (piscam), sobrancelhas e boca que mudam com o humor, bochechas
+
+  // cabeça grande (proporção chibi): o grupo é ampliado, então olhos, cabelo e acessórios acompanham
+  const HEAD_S = 1.32, headY = 0.92;
+  const head = new THREE.Group(); head.position.y = headY; head.scale.setScalar(HEAD_S); body.add(head);
+  const skull = sph(head, 0.21, skin, 0, 0, 0, 28); skull.scale.set(1, 1.02, 0.98);
+  const jaw = sph(head, 0.17, skin, 0, -0.07, 0.02, 20); jaw.scale.set(1.05, 0.8, 0.95); jaw.castShadow = false;
+  const cap = (r, y = 0, z = 0, rx = -0.32, m = hair, th = Math.PI * 0.56) => {
+    const mesh = add(head, new THREE.SphereGeometry(r, 28, 16, 0, Math.PI * 2, 0, th), m, 0, y, z);
+    mesh.rotation.x = rx;
+    return mesh;
+  };
+  const style = a.hairStyle || ['curto', 'longo', 'coque'][hash(a.id, 17) % 3];
+  cap(0.228);
+  cap(0.232, 0.012, 0.025, 0.2, hair, Math.PI * 0.27); // franja
+  for (const x of [-1, 1]) { const sb = sph(head, 0.06, hair, x * 0.205, -0.01, -0.02, 10); sb.scale.set(0.7, 1.5, 1); } // costeletas
+  if (style === 'curto') { const tf = sph(head, 0.09, hair, 0.04, 0.215, 0.02, 12); tf.scale.set(1.3, 0.8, 1); }
+  if (style === 'longo') {
+    caps(head, 0.17, 0.22, hair, 0, -0.15, -0.1);
+    for (const x of [-1, 1]) caps(head, 0.06, 0.2, hair, x * 0.205, -0.11, -0.02);
+  }
+  if (style === 'coque') { sph(head, 0.11, hair, 0, 0.255, -0.09, 16); add(head, new THREE.TorusGeometry(0.095, 0.014, 6, 16), tm(shade(hairC, 0.25)), 0, 0.2, -0.09, { cast: false }).rotation.x = Math.PI / 2; }
+
+  // rosto: olhos grandes (branco, íris, pupila e brilho; piscam), sobrancelhas e boca por humor, bochechas
   const eyes = [];
-  for (const x of [-0.078, 0.078]) {
-    const eye = new THREE.Group(); eye.position.set(x, 0.02, 0.185); head.add(eye);
-    const wh = sph(eye, 0.04, '#ffffff', 0, 0, 0, 14); wh.scale.set(1, 1.2, 0.5); wh.castShadow = false;
-    const pu = sph(eye, 0.024, '#1a1a1a', 0, -0.002, 0.016, 12); pu.scale.set(1, 1.1, 0.6); pu.castShadow = false;
-    const hl = sph(eye, 0.008, '#ffffff', 0.008, 0.01, 0.026, 6); hl.castShadow = false;
+  for (const x of [-0.088, 0.088]) {
+    const eye = new THREE.Group(); eye.position.set(x, 0.0, 0.186); head.add(eye);
+    const wh = sph(eye, 0.05, '#ffffff', 0, 0, 0, 16); wh.scale.set(1, 1.22, 0.5); wh.castShadow = false;
+    const ir = sph(eye, 0.034, shade(hairC, 0.1), 0, -0.004, 0.018, 14); ir.scale.set(1, 1.15, 0.5); ir.castShadow = false;
+    const pu = sph(eye, 0.02, '#120d18', 0, -0.004, 0.026, 10); pu.castShadow = false;
+    const hl = sph(eye, 0.011, '#ffffff', 0.011, 0.014, 0.033, 6); hl.castShadow = false;
+    const hl2 = sph(eye, 0.006, '#ffffff', -0.01, -0.014, 0.032, 6); hl2.castShadow = false;
     eyes.push(eye);
   }
-  const brows = [-1, 1].map((side) => box(head, 0.075, 0.016, 0.02, hair, side * 0.078, 0.095, 0.2, { cast: false }));
-  const lip = '#a5553f';
-  const mN = box(head, 0.07, 0.014, 0.02, lip, 0, -0.085, 0.2, { cast: false });
-  const mS = add(head, new THREE.TorusGeometry(0.05, 0.012, 6, 14, Math.PI), mat(lip), 0, -0.05, 0.198, { cast: false }); mS.rotation.z = Math.PI; mS.visible = false;
-  const mF = add(head, new THREE.TorusGeometry(0.04, 0.012, 6, 14, Math.PI), mat(lip), 0, -0.12, 0.198, { cast: false }); mF.visible = false;
-  for (const x of [-0.125, 0.125]) { const ch = sph(head, 0.04, mat('#ff8f8f', { transparent: true, opacity: 0.32 }), x, -0.04, 0.165, 8); ch.scale.set(1, 0.6, 0.3); ch.castShadow = false; }
-  for (const x of [-0.19, 0.19]) { const ear = sph(head, 0.04, skin, x, 0, 0, 8); ear.castShadow = false; }
+  const browM = tm(shade(hairC, -0.25));
+  const brows = [-1, 1].map((side) => box(head, 0.08, 0.018, 0.02, browM, side * 0.088, 0.085, 0.2, { cast: false }));
+  const lip = '#b25a48';
+  const mN = box(head, 0.06, 0.014, 0.02, lip, 0, -0.095, 0.2, { cast: false });
+  const mS = add(head, new THREE.TorusGeometry(0.048, 0.012, 6, 14, Math.PI), mat(lip), 0, -0.06, 0.198, { cast: false }); mS.rotation.z = Math.PI; mS.visible = false;
+  const mF = add(head, new THREE.TorusGeometry(0.036, 0.012, 6, 14, Math.PI), mat(lip), 0, -0.125, 0.198, { cast: false }); mF.visible = false;
+  const nose = sph(head, 0.016, shade(skinC, -0.08), 0, -0.04, 0.208, 8); nose.castShadow = false;
+  for (const x of [-0.135, 0.135]) { const ch = sph(head, 0.042, mat('#ff7f8a', { transparent: true, opacity: 0.35 }), x, -0.05, 0.168, 8); ch.scale.set(1, 0.6, 0.3); ch.castShadow = false; }
+  for (const x of [-0.205, 0.205]) { const ear = sph(head, 0.042, skin, x, -0.01, 0.0, 10); ear.castShadow = false; }
 
   if (a.accessory === 'oculos') {
-    for (const x of [-0.078, 0.078]) { const t = add(head, new THREE.TorusGeometry(0.058, 0.013, 8, 20), mat('#1a1a1a'), x, 0.03, 0.2, { cast: false }); t.rotation.y = 0; }
-    box(head, 0.06, 0.012, 0.012, '#1a1a1a', 0, 0.04, 0.205, { cast: false });
+    for (const x of [-0.088, 0.088]) add(head, new THREE.TorusGeometry(0.066, 0.012, 8, 22), tm('#1a1a1a'), x, 0.0, 0.205, { cast: false });
+    box(head, 0.05, 0.012, 0.012, '#1a1a1a', 0, 0.01, 0.21, { cast: false });
+    for (const x of [-1, 1]) box(head, 0.012, 0.012, 0.2, '#1a1a1a', x * 0.158, 0.01, 0.11, { cast: false });
   } else if (a.accessory === 'fone') {
-    const arc = add(head, new THREE.TorusGeometry(0.235, 0.02, 8, 24, Math.PI), mat('#2d3142'), 0, 0.0, 0);
-    for (const x of [-0.235, 0.235]) { const c = cyl(head, 0.075, 0.075, 0.07, '#e5534b', x, 0, 0, 16); c.rotation.z = Math.PI / 2; }
+    add(head, new THREE.TorusGeometry(0.245, 0.02, 8, 24, Math.PI), tm('#2d3142'), 0, 0.0, 0);
+    for (const x of [-0.245, 0.245]) { const c = cyl(head, 0.08, 0.08, 0.07, tm('#e5534b'), x, -0.01, 0, 16); c.rotation.z = Math.PI / 2; }
   } else if (a.accessory === 'bone') {
-    cap(0.235, 0.015, 0, -0.18, mat('#e5534b'));
-    const brim = box(head, 0.3, 0.025, 0.2, '#b33a33', 0, 0.09, 0.24); brim.rotation.x = 0.1;
+    cap(0.24, 0.015, 0, -0.18, tm('#e5534b'));
+    const brim = box(head, 0.3, 0.025, 0.2, tm('#b33a33'), 0, 0.09, 0.24); brim.rotation.x = 0.1;
+    const bt = sph(head, 0.022, '#fff', 0, 0.23, 0.0, 8); bt.castShadow = false;
   }
 
-  // braços
+  // braços: manga com punho e mão arredondada (luva)
   const mkArm = (side) => {
     const sh = new THREE.Group(); sh.position.set(side * 0.235, 0.52, 0); body.add(sh);
-    caps(sh, 0.058, 0.14, shirt, 0, -0.11, 0);
+    sph(sh, 0.075, shirt, 0, 0.0, 0, 12);
+    caps(sh, 0.06, 0.13, shirt, 0, -0.11, 0);
     const el = new THREE.Group(); el.position.y = -0.22; sh.add(el);
-    caps(el, 0.052, 0.12, shirt, 0, -0.1, 0);
-    sph(el, 0.06, skin, 0, -0.22, 0, 10);
+    caps(el, 0.053, 0.11, shirt, 0, -0.095, 0);
+    const cuff = cyl(el, 0.058, 0.058, 0.03, shade(shirtC, outfit === 1 ? -0.16 : 0.2), 0, -0.185, 0, 12); cuff.castShadow = false;
+    const hand = sph(el, 0.066, skin, 0, -0.235, 0, 12); hand.scale.set(1, 0.92, 1);
     return { sh, el };
   };
   const L = mkArm(-1), R = mkArm(1);
-  // pernas
+  // pernas: calça, tênis branco com sola e biqueira
   const mkLeg = (side) => {
     const hp = new THREE.Group(); hp.position.set(side * 0.1, 0, 0); body.add(hp);
-    caps(hp, 0.075, 0.12, pants, 0, -0.1, 0);
+    caps(hp, 0.078, 0.12, pants, 0, -0.1, 0);
     const kn = new THREE.Group(); kn.position.y = -0.22; hp.add(kn);
-    caps(kn, 0.068, 0.16, pants, 0, -0.14, 0);
-    box(kn, 0.13, 0.07, 0.24, shoe, 0, -0.29, 0.04);
+    caps(kn, 0.07, 0.15, pants, 0, -0.14, 0);
+    const sh = sph(kn, 0.1, shoe, 0, -0.285, 0.04, 14); sh.scale.set(0.95, 0.68, 1.55);
+    box(kn, 0.17, 0.035, 0.3, sole, 0, -0.325, 0.045, { cast: false });
     return { hp, kn };
   };
   const LL = mkLeg(-1), RL = mkLeg(1);
 
+  // contorno: uma cópia maior só com as costas visíveis, para cada peça de roupa, pele e cabelo
+  root.traverse((m) => {
+    if (!m.isMesh || !outlined.has(m.material)) return;
+    const o = new THREE.Mesh(m.geometry, OUTLINE);
+    o.scale.setScalar(1.075);
+    o.userData.outline = true;
+    m.add(o);
+  });
+
   // área de clique
-  const hit = new THREE.Mesh(new THREE.BoxGeometry(0.8, 1.7, 0.8), new THREE.MeshBasicMaterial({ visible: false }));
-  hit.position.y = 0.85; root.add(hit);
+  const hit = new THREE.Mesh(new THREE.BoxGeometry(0.8, 1.9, 0.8), new THREE.MeshBasicMaterial({ visible: false }));
+  hit.position.y = 0.95; root.add(hit);
   hit.userData = { kind: 'agent', id: a.id };
 
-  root.scale.setScalar(1.25);
-  root.userData = { body, head, L, R, LL, RL, sitk: 0, moveK: 0, rot: 0, hit, eyes, brows, mN, mS, mF };
+  root.scale.setScalar(1.22);
+  root.userData = { body, head, headY, L, R, LL, RL, sitk: 0, moveK: 0, rot: 0, hit, eyes, brows, mN, mS, mF };
   return root;
 }
 
@@ -786,7 +843,11 @@ export function create3D({ canvas, wrap, onDrag }) {
     g.position.set(x, 0, z);
     u.rot = lerpAngle(u.rot, rotFor(rt.facing), Math.min(1, dt * 14));
     g.rotation.y = u.rot;
-    u.body.position.y = HIP_STAND + (hipSit - HIP_STAND) * sk;
+    // andar: o corpo quica a cada passo e se inclina para a frente; parado: balança de leve (respirando)
+    const walkPh = rt.walk * 0.28;
+    u.body.position.y = HIP_STAND + (hipSit - HIP_STAND) * sk + Math.abs(Math.sin(walkPh)) * 0.045 * u.moveK * (1 - sk);
+    u.body.rotation.x = 0.1 * u.moveK * (1 - sk);
+    u.body.rotation.z = Math.sin(walkPh) * 0.04 * u.moveK * (1 - sk) + Math.sin(now / 1500 + a.name.length) * 0.012 * (1 - u.moveK);
 
     const ph = rt.walk * 0.28, sw = Math.sin(ph) * 0.7 * u.moveK * (1 - sk);
     const typing = rt.seated && a.status === 'trabalhando';
@@ -803,7 +864,7 @@ export function create3D({ canvas, wrap, onDrag }) {
     u.R.el.rotation.x = -(typing ? 0.9 + (k ? 0 : 0.12) : sk * 0.5);
     u.L.sh.rotation.z = cheer || wave ? 0.2 : 0; u.R.sh.rotation.z = cheer ? -0.2 : 0;
     // respiração e humor
-    u.head.position.y = 0.83 + Math.sin(now / 520 + a.name.length) * 0.006;
+    u.head.position.y = u.headY + Math.sin(now / 520 + a.name.length) * 0.007 + Math.abs(Math.sin(walkPh)) * 0.012 * u.moveK;
     // expressão: concluído e ocioso sorriem, bloqueado fica preocupado (sobrancelhas inclinadas, boca para baixo), trabalhando se concentra
     const mood = a.status;
     u.mN.visible = mood === 'trabalhando'; u.mS.visible = mood === 'concluido' || mood === 'ocioso'; u.mF.visible = mood === 'bloqueado';
@@ -829,7 +890,7 @@ export function create3D({ canvas, wrap, onDrag }) {
       if (em) { u.emoji = emojiSprite(em); g.add(u.emoji); }
       u.emojiKey = em;
     }
-    const headTop = HIP_STAND + 1.15 + (hipSit - HIP_STAND) * sk * 0.9;
+    const headTop = HIP_STAND + 1.3 + (hipSit - HIP_STAND) * sk * 0.9;
     if (u.emoji) u.emoji.position.set(0.5, headTop + 0.25 + Math.sin(now / 400) * 0.03, 0);
   }
 
