@@ -223,7 +223,7 @@ function syncRuntime(atSeats) {
     else if (atSeats) {
       // ocioso já aparece numa das áreas (copa, reunião, descanso)
       rt.spot = pickSpot(a.id);
-      rt.wanderAt = Date.now() + 10000 + Math.random() * 20000;
+      rt.wanderAt = Date.now() + 40000 + Math.random() * 40000;
       start = world.spots[rt.spot];
     }
     runtime.set(a.id, Object.assign(rt, { x: start.x, y: start.y }));
@@ -307,25 +307,19 @@ function pickSpot(agentId) {
   for (const [id, rt] of runtime) if (id !== agentId && rt.spot != null) taken.add(rt.spot);
   const free = world.spots.map((_, i) => i).filter((i) => !taken.has(i));
   const pool = free.length ? free : world.spots.map((_, i) => i);
-  return pool[Math.floor(Math.random() * pool.length)];
+  // a reunião só rende conversa com companhia: pesa mais quando já tem alguém lá
+  const inMeeting = [...taken].filter((i) => world.spots[i].act === 'reuniao').length;
+  const w = pool.map((i) => (world.spots[i].act === 'reuniao' ? 1 + inMeeting * 3 : 1));
+  let r = Math.random() * w.reduce((a, b) => a + b, 0);
+  for (let k = 0; k < pool.length; k++) if ((r -= w[k]) < 0) return pool[k];
+  return pool[0];
 }
 
-// Próximo plano de quem está livre. Depois de passear, é mais provável voltar para a cadeira.
+// Próximo plano de quem está livre: ou fica na mesa, ou vai a uma área (sofá, copa, reunião) e fica um bom tempo.
+// Sem passeios soltos pelo corredor: quem sai da mesa sempre tem um destino e depois volta.
 function pickPlan(prev) {
-  const w = prev === 'sit' || prev == null ? { sit: 10, spot: 55, stroll: 35 } : { sit: 75, spot: 12, stroll: 13 };
-  let r = Math.random() * (w.sit + w.spot + w.stroll);
-  for (const k of ['sit', 'spot', 'stroll']) { if ((r -= w[k]) < 0) return k; }
-  return 'sit';
-}
-
-// Ponto de um corredor horizontal (de qualquer fileira) para andar sem ir a lugar nenhum.
-function strollPoint(rt) {
-  for (let n = 0; n < 8; n++) {
-    const row = Math.floor(Math.random() * world.rows);
-    const p = { x: (DESK_X0 + 0.5) * T + Math.random() * (world.L - (DESK_X0 + 2) * T), y: (WALL_H + row * CELL_H + 4.45) * T };
-    if (Math.hypot(p.x - rt.x, p.y - rt.y) > 3 * T) return p;
-  }
-  return { x: world.trunkX - T, y: (WALL_H + 4.45) * T };
+  if (prev === 'spot') return 'sit'; // voltou de uma área: descansa na cadeira antes de sair de novo
+  return Math.random() < 0.8 ? 'spot' : 'sit';
 }
 
 function switchRoom(id) {
@@ -375,30 +369,22 @@ function update(dt, now) {
         rt.spot = null;
       } else if (now > rt.planAt) {
         rt.plan = pickPlan(rt.plan);
-        rt.planAt = now + (rt.plan === 'sit' ? 30000 + Math.random() * 40000 : rt.plan === 'spot' ? 8000 + Math.random() * 10000 : 10000);
+        rt.planAt = now + (rt.plan === 'sit' ? 40000 + Math.random() * 50000 : 45000 + Math.random() * 45000);
         rt.spot = null;
-        rt.stroll = null;
         rt.wantMeeting = false;
       }
       if (rt.plan === 'spot') {
         rt.spot ??= (rt.wantMeeting ? pickMeetingSpot(a.id) : null) ?? pickSpot(a.id); // sem reunião: null, e aí sim cai no sorteio comum
         target = world.spots[rt.spot];
         key = 'spot:' + rt.spot + ':' + world.H + ':' + world.W;
-      } else if (rt.plan === 'stroll') {
-        rt.stroll ??= strollPoint(rt);
-        target = rt.stroll;
-        key = 'stroll:' + Math.round(rt.stroll.x) + ':' + Math.round(rt.stroll.y) + ':' + world.W;
-        // chegou: olha em volta um instante e segue para o próximo plano
-        if (!rt.path.length && key === rt.targetKey && !rt.strollEnd) { rt.strollEnd = true; rt.planAt = Math.min(rt.planAt, now + 2000 + Math.random() * 3000); }
       } else {
         target = desk.cell.seat;
         key = deskKey;
       }
-      if (rt.plan !== 'stroll') rt.strollEnd = false;
     } else {
       if (rt.spot == null || now > rt.wanderAt) {
         rt.spot = pickSpot(a.id);
-        rt.wanderAt = now + 10000 + Math.random() * 20000;
+        rt.wanderAt = now + 40000 + Math.random() * 40000;
       }
       target = world.spots[rt.spot];
       key = 'spot:' + rt.spot + ':' + world.H + ':' + world.W;
@@ -1060,6 +1046,7 @@ let animNow = 0; // relógio do quadro atual, para itens que se mexem (plantas)
 // aqui (posições, status, caminhos); a cada quadro mandamos um "retrato" da cena e o módulo só desenha.
 let view3d = load('hub.view3d') === true;
 let v3 = null, v3loading = false, using3dNow = false;
+let charStyle3d = load('hub.charStyle3d') === 'classico' ? 'classico' : 'novo'; // personagens novos ou clássicos
 
 async function ensureV3() {
   if (v3 || v3loading) return;
@@ -1067,6 +1054,7 @@ async function ensureV3() {
   try {
     const m = await import('./office3d.js');
     v3 = m.create3D({ canvas: canvas3d, wrap, onDrag: () => { suppressClick = true; } });
+    v3.setCharStyle(charStyle3d);
   } catch (e) {
     console.error('3D indisponível:', e);
     view3d = false;
@@ -1093,6 +1081,7 @@ function syncView() {
   canvas.hidden = want;
   canvas3d.hidden = !want;
   document.getElementById('btn-flip').hidden = !want;
+  document.getElementById('btn-chars').hidden = !want;
   if (want) v3.resize(); else resize();
 }
 
@@ -1143,8 +1132,9 @@ function snapshot3D(now) {
       const rt = runtime.get(a.id);
       return {
         id: a.id, name: a.name, shirt: a.shirt, hair: a.hair, skin: a.skin, hairStyle: a.hairStyle, accessory: a.accessory,
+        outfit: a.outfit, second: a.second, shoe: a.shoe, pants: a.pants, skirt: a.skirt, tie: a.tie, look: a.look, // personalização explícita (opcional)
         status: a.status, statusColor: (STATUS[a.status] || STATUS.ocioso).color,
-        sig: [a.shirt, a.hair, a.skin, a.hairStyle, a.accessory].join('|'),
+        sig: [a.shirt, a.hair, a.skin, a.hairStyle, a.accessory, a.outfit, a.second, a.shoe, a.pants, a.skirt, a.tie, JSON.stringify(a.look || null)].join('|'),
         emoji: activityEmoji(a, rt, now, talkers), rt,
       };
     }),
@@ -1238,6 +1228,12 @@ document.getElementById('zoom-in').onclick = () => (using3dNow ? v3.zoomBy(0.8) 
 document.getElementById('zoom-out').onclick = () => (using3dNow ? v3.zoomBy(1.25) : setZoom(SCALE - 1));
 document.getElementById('zoom-fit').onclick = () => (using3dNow ? v3.resetCamera() : setZoom(null));
 document.getElementById('btn-flip').onclick = () => v3?.flip();
+document.getElementById('btn-chars').onclick = () => {
+  charStyle3d = charStyle3d === 'novo' ? 'classico' : 'novo';
+  store('hub.charStyle3d', charStyle3d); v3?.setCharStyle(charStyle3d);
+  document.getElementById('btn-chars').classList.toggle('active', charStyle3d === 'classico');
+};
+document.getElementById('btn-chars').classList.toggle('active', charStyle3d === 'classico');
 document.getElementById('btn-3d').onclick = () => setView3d(!view3d);
 document.getElementById('btn-3d').classList.toggle('active', view3d);
 if (view3d) ensureV3();

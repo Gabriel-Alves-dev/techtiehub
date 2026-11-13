@@ -1,6 +1,8 @@
 // Escritório em 3D (Three.js). Só desenha: a lógica (posições, status, caminhos) continua no app.js, que manda um
 // "retrato" da cena a cada quadro. 1 unidade 3D = 1 tile; o ponto (x, y) do mundo 2D vira (x / 16, altura, y / 16).
 import * as THREE from './vendor/three.module.min.js';
+import { buildCharacter, releaseCharacter, setCharQuality } from './char/character.js';
+import { animateRig } from './char/animations.js';
 
 const T = 16;
 const WALL_H = 3; // tiles de parede no topo do mapa 2D (a parede 3D começa em z = 3)
@@ -213,7 +215,7 @@ function toon(color, o = {}) {
     return t;
   })();
   const key = color + JSON.stringify(o);
-  if (!toonCache.has(key)) toonCache.set(key, new THREE.MeshToonMaterial({ color, gradientMap: toonGrad, ...o }));
+  if (!toonCache.has(key)) { const m = new THREE.MeshToonMaterial({ color, gradientMap: toonGrad, ...o }); m.userData.shared = true; toonCache.set(key, m); }
   return toonCache.get(key);
 }
 function shade(hex, k) { // clareia (k > 0) ou escurece (k < 0) uma cor
@@ -222,7 +224,7 @@ function shade(hex, k) { // clareia (k > 0) ou escurece (k < 0) uma cor
 }
 const hash = (id, m) => [...String(id)].reduce((h, c) => (h * m + c.charCodeAt(0)) % 9973, 7);
 
-function buildAgent(a) {
+function buildAgentClassic(a) {
   const root = new THREE.Group();
   const body = new THREE.Group(); root.add(body);
   const outlined = new Set();
@@ -257,25 +259,49 @@ function buildAgent(a) {
     return mesh;
   };
   const style = a.hairStyle || ['curto', 'longo', 'coque'][hash(a.id, 17) % 3];
-  cap(0.228);
-  cap(0.232, 0.012, 0.025, 0.2, hair, Math.PI * 0.27); // franja
-  for (const x of [-1, 1]) { const sb = sph(head, 0.06, hair, x * 0.205, -0.01, -0.02, 10); sb.scale.set(0.7, 1.5, 1); } // costeletas
-  if (style === 'curto') { const tf = sph(head, 0.09, hair, 0.04, 0.215, 0.02, 12); tf.scale.set(1.3, 0.8, 1); }
-  if (style === 'longo') {
-    caps(head, 0.17, 0.22, hair, 0, -0.15, -0.1);
-    for (const x of [-1, 1]) caps(head, 0.06, 0.2, hair, x * 0.205, -0.11, -0.02);
+  const hat = a.accessory === 'bone';
+  // mecha: elipsoide alongado (mais orgânico que esfera ou cápsula); tx inclina para frente/trás, tz para os lados
+  const lock = (x, y, z, rx, ry, rz, tx = 0, tz = 0) => { const l = sph(head, 1, hair, x, y, z, 12); l.scale.set(rx, ry, rz); l.rotation.set(tx, 0, tz); return l; };
+  if (!hat) { // com boné o cabelo só aparece por baixo da aba: a calota e a franja atravessariam o boné
+    cap(0.226);
+    for (let i = 0; i < 7; i++) { // franja em mechas varridas para o lado, de comprimentos diferentes
+      const t = i / 6 - 0.5, ph = t * 2.1;
+      lock(Math.sin(ph) * 0.175, 0.165 - Math.abs(t) * 0.05, Math.cos(ph) * 0.15 + 0.03, 0.06, 0.06 + (i % 2) * 0.012, 0.05, 0.55, -ph * 0.6 + 0.3);
+    }
   }
-  if (style === 'coque') { sph(head, 0.11, hair, 0, 0.255, -0.09, 16); add(head, new THREE.TorusGeometry(0.095, 0.014, 6, 16), tm(shade(hairC, 0.25)), 0, 0.2, -0.09, { cast: false }).rotation.x = Math.PI / 2; }
+  for (const x of [-1, 1]) lock(x * 0.205, hat ? -0.07 : -0.02, -0.01, 0.045, 0.1, 0.07, 0, x * 0.06); // costeletas
+  if (style === 'curto') {
+    if (!hat) for (const [x, z, r] of [[-0.07, -0.02, 0.07], [0.04, 0.03, 0.075], [0.09, -0.05, 0.06], [-0.02, -0.11, 0.07]]) lock(x, 0.205, z, r, r * 0.8, r, 0, x * 2);
+    lock(0, -0.075, -0.17, 0.15, 0.07, 0.07); // nuca
+  }
+  if (style === 'longo') {
+    const hy = hat ? -0.16 : -0.07; // sobe até a calota; com boné começa abaixo da aba
+    lock(0, hy, -0.15, hat ? 0.16 : 0.18, hat ? 0.13 : 0.2, 0.1);
+    lock(0, hy - 0.14, -0.15, 0.15, 0.13, 0.08);
+    for (const x of [-1, 1]) {
+      lock(x * 0.075, hy - 0.26, -0.14, 0.065, 0.1, 0.05, 0, x * 0.1);
+      lock(x * 0.205, hy - 0.03, -0.02, 0.055, 0.15, 0.075, 0, x * 0.05);
+    }
+  }
+  if (style === 'coque') {
+    if (hat) lock(0, -0.1, -0.17, 0.09, 0.09, 0.08);
+    else {
+      lock(0, 0.26, -0.09, 0.12, 0.1, 0.11);
+      add(head, new THREE.TorusGeometry(0.1, 0.014, 6, 16), tm(shade(hairC, 0.25)), 0, 0.2, -0.09, { cast: false }).rotation.x = Math.PI / 2;
+      lock(0, 0.03, -0.17, 0.15, 0.1, 0.07); // nuca presa
+    }
+  }
 
   // rosto: olhos grandes (branco, íris, pupila e brilho; piscam), sobrancelhas e boca por humor, bochechas
   const eyes = [];
   for (const x of [-0.088, 0.088]) {
-    const eye = new THREE.Group(); eye.position.set(x, 0.0, 0.186); head.add(eye);
-    const wh = sph(eye, 0.05, '#ffffff', 0, 0, 0, 16); wh.scale.set(1, 1.22, 0.5); wh.castShadow = false;
-    const ir = sph(eye, 0.034, shade(hairC, 0.1), 0, -0.004, 0.018, 14); ir.scale.set(1, 1.15, 0.5); ir.castShadow = false;
-    const pu = sph(eye, 0.02, '#120d18', 0, -0.004, 0.026, 10); pu.castShadow = false;
-    const hl = sph(eye, 0.011, '#ffffff', 0.011, 0.014, 0.033, 6); hl.castShadow = false;
-    const hl2 = sph(eye, 0.006, '#ffffff', -0.01, -0.014, 0.032, 6); hl2.castShadow = false;
+    // olho achatado e embutido na curva do rosto (virado para fora conforme o lado), só o brilho aparece à frente
+    const eye = new THREE.Group(); eye.position.set(x, -0.005, 0.172); eye.rotation.y = Math.sign(x) * 0.42; head.add(eye);
+    const wh = sph(eye, 0.043, '#ffffff', 0, 0, 0, 16); wh.scale.set(0.92, 1.25, 0.3); wh.castShadow = false;
+    const ir = sph(eye, 0.031, shade(hairC, 0.1), 0, -0.004, 0.006, 14); ir.scale.set(1, 1.15, 0.3); ir.castShadow = false;
+    const pu = sph(eye, 0.018, '#120d18', 0, -0.004, 0.011, 10); pu.scale.z = 0.3; pu.castShadow = false;
+    const hl = sph(eye, 0.01, '#ffffff', 0.01, 0.014, 0.017, 6); hl.scale.z = 0.4; hl.castShadow = false;
+    const hl2 = sph(eye, 0.005, '#ffffff', -0.009, -0.013, 0.016, 6); hl2.scale.z = 0.4; hl2.castShadow = false;
     eyes.push(eye);
   }
   const browM = tm(shade(hairC, -0.25));
@@ -293,10 +319,10 @@ function buildAgent(a) {
     box(head, 0.05, 0.012, 0.012, '#1a1a1a', 0, 0.01, 0.21, { cast: false });
     for (const x of [-1, 1]) box(head, 0.012, 0.012, 0.2, '#1a1a1a', x * 0.158, 0.01, 0.11, { cast: false });
   } else if (a.accessory === 'fone') {
-    add(head, new THREE.TorusGeometry(0.245, 0.02, 8, 24, Math.PI), tm('#2d3142'), 0, 0.0, 0);
-    for (const x of [-0.245, 0.245]) { const c = cyl(head, 0.08, 0.08, 0.07, tm('#e5534b'), x, -0.01, 0, 16); c.rotation.z = Math.PI / 2; }
+    add(head, new THREE.TorusGeometry(0.262, 0.02, 8, 24, Math.PI), tm('#2d3142'), 0, 0.0, 0);
+    for (const x of [-0.262, 0.262]) { const c = cyl(head, 0.08, 0.08, 0.07, tm('#e5534b'), x, -0.01, 0, 16); c.rotation.z = Math.PI / 2; }
   } else if (a.accessory === 'bone') {
-    cap(0.24, 0.015, 0, -0.18, tm('#e5534b'));
+    cap(0.245, 0.02, 0, -0.18, tm('#e5534b'));
     const brim = box(head, 0.3, 0.025, 0.2, tm('#b33a33'), 0, 0.09, 0.24); brim.rotation.x = 0.1;
     const bt = sph(head, 0.022, '#fff', 0, 0.23, 0.0, 8); bt.castShadow = false;
   }
@@ -340,7 +366,7 @@ function buildAgent(a) {
   hit.userData = { kind: 'agent', id: a.id };
 
   root.scale.setScalar(1.22);
-  root.userData = { body, head, headY, L, R, LL, RL, sitk: 0, moveK: 0, rot: 0, hit, eyes, brows, mN, mS, mF };
+  root.userData = { style: 'classico', body, head, headY, L, R, LL, RL, sitk: 0, moveK: 0, rot: 0, hit, eyes, brows, mN, mS, mF };
   return root;
 }
 
@@ -381,6 +407,24 @@ export function create3D({ canvas, wrap, onDrag }) {
   const staticGroup = new THREE.Group(); scene.add(staticGroup);
   const agentsGroup = new THREE.Group(); scene.add(agentsGroup);
   const hitList = []; // áreas de clique das mesas (as dos personagens ficam em cada personagem)
+  // estilo dos personagens: 'novo' (procedural refinado, pasta char/) ou 'classico' (o anterior, como alternativa)
+  let charStyle = 'novo';
+  setCharQuality(mobile ? 0.6 : 1); // celular: menos segmentos e mechas por personagem
+  function buildAgent(a) {
+    if (charStyle === 'novo') { try { return buildCharacter(a); } catch (e) { console.warn('Personagem novo falhou, usando o clássico:', e); } }
+    return buildAgentClassic(a);
+  }
+  // remove um personagem sem invalidar recursos compartilhados: os novos devolvem suas geometrias, o clássico é descartado
+  function freeAgent(g) {
+    const u = g.userData;
+    if (u.name) g.remove(u.name); // a etiqueta tem cache próprio (agentSprites)
+    if (u.cres) {
+      releaseCharacter(g);
+      u.hit.geometry.dispose(); u.hit.material.dispose();
+      if (u.emoji) u.emoji.material.dispose();
+      g.clear();
+    } else disposeGroup(g);
+  }
   const state = { key: '', room: null, desks: new Map(), agents: new Map(), plants: [], arcade: null, steam: null, lamp: null, clock: null, tv: null, glass: [], glassKey: '', lastNow: 0, lastFrame: 0 };
 
   // câmera orbital: azimute e elevação em torno do centro da sala
@@ -389,6 +433,7 @@ export function create3D({ canvas, wrap, onDrag }) {
   function placeCamera() {
     cam.az += (cam.azT - cam.az) * 0.14; // gira suave até o ângulo pedido (botão Virar)
     const upside = Math.cos(cam.az) < 0; // visto de frente, os textos do chão giram junto para continuarem legíveis
+    for (const o of state.backWall || []) o.visible = !upside;
     for (const f of state.flat || []) f.rotation.z = upside ? Math.PI : 0;
     // distância que enquadra a sala inteira (largura e profundidade) para a proporção atual da tela
     const tv = Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2), th = tv * camera.aspect;
@@ -465,8 +510,8 @@ export function create3D({ canvas, wrap, onDrag }) {
   function disposeGroup(g) {
     g.traverse((o) => {
       if (o.geometry) o.geometry.dispose();
-      const m = o.material; // materiais do cache e texturas de emoji são recriados na GPU se voltarem a ser usados
-      if (m) (Array.isArray(m) ? m : [m]).forEach((x) => { x.map?.dispose?.(); x.dispose?.(); });
+      const m = o.material; // materiais compartilhados (cache dos bonecos) nunca são descartados aqui
+      if (m) (Array.isArray(m) ? m : [m]).forEach((x) => { if (x.userData.shared) return; x.map?.dispose?.(); x.dispose?.(); });
     });
     g.clear();
   }
@@ -686,6 +731,13 @@ export function create3D({ canvas, wrap, onDrag }) {
     sun.position.set(cam.bx - r * 0.7, r * 1.7, cam.bz + r * 0.9);
     sun.target.position.set(cam.bx, 0, cam.bz);
     state.sunDir = sunDir;
+    // tudo o que está colado na parede do fundo (moldura, janelas, quadros, TV): some quando a câmera passa para o outro lado
+    const bb = new THREE.Box3(), bs = new THREE.Vector3(), bc = new THREE.Vector3();
+    state.backWall = g.children.filter((o) => {
+      if (!o.isMesh && !o.isGroup) return false;
+      bb.setFromObject(o); bb.getSize(bs); bb.getCenter(bc);
+      return bs.z < 0.6 && bc.z < zMin + 0.4 && bb.min.y > 0.3;
+    });
     // só volta ao enquadramento inicial se a sala mudou de tamanho (decorar ou mover mesas não perde o ângulo)
     const dims = W + 'x' + H;
     if (state.dims !== dims) { state.dims = dims; resetCamera(); }
@@ -813,8 +865,8 @@ export function create3D({ canvas, wrap, onDrag }) {
     for (const a of s.agents) {
       seen.add(a.id);
       let g = state.agents.get(a.id);
-      if (!g || g.userData.sig !== a.sig) {
-        if (g) { agentsGroup.remove(g); disposeGroup(g); }
+      if (!g || g.userData.sig !== a.sig || g.userData.style !== charStyle) {
+        if (g) { agentsGroup.remove(g); freeAgent(g); }
         g = buildAgent(a); g.userData.sig = a.sig; agentsGroup.add(g); state.agents.set(a.id, g);
         g.userData.name = nameSprite(a); g.add(g.userData.name);
       }
@@ -822,7 +874,7 @@ export function create3D({ canvas, wrap, onDrag }) {
       if (ns !== g.userData.name) { g.remove(g.userData.name); g.add(ns); g.userData.name = ns; }
       pose(g, a, now, dt);
     }
-    for (const [id, g] of state.agents) if (!seen.has(id)) { agentsGroup.remove(g); disposeGroup(g); state.agents.delete(id); }
+    for (const [id, g] of state.agents) if (!seen.has(id)) { agentsGroup.remove(g); freeAgent(g); state.agents.delete(id); }
 
     placeCamera();
     renderer.render(scene, camera);
@@ -843,43 +895,7 @@ export function create3D({ canvas, wrap, onDrag }) {
     g.position.set(x, 0, z);
     u.rot = lerpAngle(u.rot, rotFor(rt.facing), Math.min(1, dt * 14));
     g.rotation.y = u.rot;
-    // andar: o corpo quica a cada passo e se inclina para a frente; parado: balança de leve (respirando)
-    const walkPh = rt.walk * 0.28;
-    u.body.position.y = HIP_STAND + (hipSit - HIP_STAND) * sk + Math.abs(Math.sin(walkPh)) * 0.045 * u.moveK * (1 - sk);
-    u.body.rotation.x = 0.1 * u.moveK * (1 - sk);
-    u.body.rotation.z = Math.sin(walkPh) * 0.04 * u.moveK * (1 - sk) + Math.sin(now / 1500 + a.name.length) * 0.012 * (1 - u.moveK);
-
-    const ph = rt.walk * 0.28, sw = Math.sin(ph) * 0.7 * u.moveK * (1 - sk);
-    const typing = rt.seated && a.status === 'trabalhando';
-    const cheer = false; // concluído não levanta os braços: fica sentado em repouso, com a tela de "pronto" acesa
-    const wave = rt.seated && a.status === 'bloqueado';
-    // pernas: andando balançam; sentado a coxa vai à frente e a canela desce
-    u.LL.hp.rotation.x = sw - 1.5 * sk; u.RL.hp.rotation.x = -sw - 1.5 * sk;
-    u.LL.kn.rotation.x = 1.5 * sk + Math.max(0, -sw) * 0.5; u.RL.kn.rotation.x = 1.5 * sk + Math.max(0, sw) * 0.5;
-    // braços
-    const k = Math.floor(now / 140) % 2, tp = typing ? 1 : 0;
-    u.L.sh.rotation.x = -sw * 0.8 - (cheer ? 3.0 : 0) - (typing ? 0.95 : sk * 0.7) - (wave ? 2.6 + Math.sin(now / 120) * 0.2 : 0);
-    u.R.sh.rotation.x = sw * 0.8 - (cheer ? 3.0 : 0) - (typing ? 0.95 : sk * 0.7);
-    u.L.el.rotation.x = -(typing ? 0.9 + (k ? 0.12 : 0) : sk * 0.5) - (wave ? 0.2 : 0);
-    u.R.el.rotation.x = -(typing ? 0.9 + (k ? 0 : 0.12) : sk * 0.5);
-    u.L.sh.rotation.z = cheer || wave ? 0.2 : 0; u.R.sh.rotation.z = cheer ? -0.2 : 0;
-    // respiração e humor
-    u.head.position.y = u.headY + Math.sin(now / 520 + a.name.length) * 0.007 + Math.abs(Math.sin(walkPh)) * 0.012 * u.moveK;
-    // expressão: concluído e ocioso sorriem, bloqueado fica preocupado (sobrancelhas inclinadas, boca para baixo), trabalhando se concentra
-    const mood = a.status;
-    u.mN.visible = mood === 'trabalhando'; u.mS.visible = mood === 'concluido' || mood === 'ocioso'; u.mF.visible = mood === 'bloqueado';
-    const bz = mood === 'bloqueado' ? 0.4 : mood === 'trabalhando' ? -0.12 : 0;
-    u.brows[0].rotation.z = bz; u.brows[1].rotation.z = -bz;
-    const by = 0.095 + (mood === 'concluido' ? 0.012 : mood === 'bloqueado' ? 0.016 : 0);
-    u.brows[0].position.y = by; u.brows[1].position.y = by;
-    const blink = ((now + a.name.length * 733) % 4200) < 130;
-    u.eyes[0].scale.y = u.eyes[1].scale.y = blink ? 0.08 : 1;
-    // cabeça: olha para o teclado ao digitar, olha em volta quando está parado
-    const look = !rt.moving && !typing ? Math.sin(now / 2100 + a.name.length * 1.7) * 0.25 : 0;
-    const hk = Math.min(1, dt * 6);
-    u.head.rotation.y += (look - u.head.rotation.y) * hk;
-    u.head.rotation.x += ((typing ? 0.2 : mood === 'bloqueado' ? -0.08 : 0) - u.head.rotation.x) * hk;
-    u.head.rotation.z += ((cheer ? 0.09 : 0) - u.head.rotation.z) * hk;
+    animateRig(u, a, rt, { now, dt, sk, hipSit, hipStand: HIP_STAND });
     // nome e emoji da atividade
     // etiqueta no chão, na frente do personagem (no mundo: 0,4 para o lado da câmera); assim não cobre monitor nem balão
     const th = u.rot, off = 0.34;
@@ -917,6 +933,11 @@ export function create3D({ canvas, wrap, onDrag }) {
     cam, render, pick, screenPos, resize, resetCamera,
     // alterna entre a vista de trás das mesas e a de frente (vendo o rosto de quem está sentado)
     flip: () => { cam.azT = (Math.round(cam.azT / Math.PI) + 1) * Math.PI; },
+    // troca entre os personagens novos e os clássicos; devolve o estilo em uso
+    setCharQuality, // para testes: redefine o nível de detalhe antes de criar os personagens
+    setCharStyle: (st) => (charStyle = st === 'classico' ? 'classico' : 'novo'),
+    // contadores para medir desempenho (chamadas de desenho, triângulos e geometrias na GPU)
+    stats: () => ({ calls: renderer.info.render.calls, tris: renderer.info.render.triangles, geos: renderer.info.memory.geometries, texs: renderer.info.memory.textures }),
     zoomBy: (f) => { cam.zoom = clamp(cam.zoom * f, camRange.zoom); },
     dispose: () => renderer.dispose(),
   };
