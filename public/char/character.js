@@ -9,6 +9,7 @@ import { outlineGeo, quality } from './geometry.js';
 import { acquireGeos, releaseGeos, charMaterial, outlineMaterial } from './resources.js';
 
 export const HEAD_S = 1.25, HEAD_Y = 0.92;
+const SCALE = 1.3; // um pouco maior que o boneco clássico (1,22): sentado ele ficava pequeno atrás da mesa e do monitor
 const limbOutlines = () => quality.k >= 0.8;
 const LINE = 0.009; // espessura do contorno em unidades do corpo (constante, por deslocamento nas normais)
 
@@ -37,7 +38,7 @@ export function buildCharacter(a) {
   const mat = charMaterial(), line = outlineMaterial();
 
   const part = (parent, geo, outline, x = 0, y = 0, z = 0) => {
-    const m = new THREE.Mesh(G[geo], mat); m.position.set(x, y, z); m.castShadow = true; m.receiveShadow = true;
+    const m = new THREE.Mesh(G[geo], mat); m.position.set(x, y, z); m.castShadow = true; // não recebe sombra: o mapa de sombras é grosso demais para o corpo e riscava as mangas
     if (outline && G[geo + 'O']) { const o = new THREE.Mesh(G[geo + 'O'], line); o.userData.outline = true; m.add(o); }
     parent.add(m);
     return m;
@@ -87,8 +88,11 @@ export function buildCharacter(a) {
   hit.position.y = 0.95; root.add(hit);
   hit.userData = { kind: 'agent', id: a.id };
 
-  root.scale.setScalar(1.22);
-  root.userData = { style: 'novo', cres: cfg.key, cconst: constKey(), body, head, headY: HEAD_Y, browY, L, R, LL, RL, sitk: 0, moveK: 0, rot: 0, hit, eyes, brows, mN, mS, mF };
+  root.scale.setScalar(SCALE);
+  // ajustes de postura deste modelo (lidos pelo animateRig): sola no chão (a perna chega 0,0425 abaixo do quadril), coxa sobre o assento
+  // (a 0,27 de altura) e pose de digitar com tronco inclinado, braço mais para baixo e o antebraço descendo até o teclado
+  const poseAdj = { seatFit: true, bodyScale: SCALE, thigh: 0.088, standLift: 0.0425 + 0.004, sitDrop: 0.045, restSpread: 0.07, restElbow: 0.16, typePose: { sh: 0.55, el: 0.92, lean: 0.1, spread: 0.1 } };
+  root.userData = { style: 'novo', ...poseAdj, cres: cfg.key, cconst: constKey(), body, head, headY: HEAD_Y, browY, L, R, LL, RL, sitk: 0, moveK: 0, rot: 0, hit, eyes, brows, mN, mS, mF };
   return root;
 }
 

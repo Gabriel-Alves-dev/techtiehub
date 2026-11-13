@@ -396,11 +396,15 @@ export function create3D({ canvas, wrap, onDrag }) {
   // luzes
   const hemi = new THREE.HemisphereLight('#cfe0ff', '#7b6650', 1.1);
   scene.add(hemi);
+  const fill = new THREE.DirectionalLight('#a9bcff', 0.55); // luz de preenchimento sem sombra, do lado oposto ao sol: levanta o lado escuro das roupas e do rosto
+  fill.position.set(-6, 5, -8);
+  scene.add(fill);
   const sun = new THREE.DirectionalLight('#fff3dd', 2.6);
   sun.castShadow = true;
   const sm = mobile ? 1024 : 2048;
   sun.shadow.mapSize.set(sm, sm);
   sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.03;
+  sun.shadow.intensity = 0.7; // sombras menos pesadas: a mesa e o chão não escurecem tanto em volta dos personagens
   scene.add(sun, sun.target);
   const warm = [0, 1, 2].map(() => { const l = new THREE.PointLight('#ffb866', 0, 9, 1.6); scene.add(l); return l; });
 
@@ -880,6 +884,7 @@ export function create3D({ canvas, wrap, onDrag }) {
     renderer.render(scene, camera);
   }
 
+  const SEAT_BY_ACT = { reuniao: SEAT_Y, sofa: 0.62, puff: 0.66 }; // altura do assento de cada lugar de sentar
   const SIT_ACTS = { reuniao: HIP_SIT, sofa: HIP_SIT, puff: 0.26 };
   function pose(g, a, now, dt) {
     const u = g.userData, rt = a.rt;
@@ -891,11 +896,14 @@ export function create3D({ canvas, wrap, onDrag }) {
     const hipSit = rt.seated ? HIP_SIT : spotSit ? SIT_ACTS[rt.atSpot.act] : HIP_SIT;
     let x = rt.x / T, z = rt.y / T;
     if (rt.seated) z -= 0.6 * sk;
-    else if (spotSit && rt.atSpot.act === 'sofa') z -= 0.55 * sk;
+    // sofá: o personagem novo senta mais à frente (as canelas ficam fora da base); pufe: no topo, um pouco à frente do centro
+    else if (spotSit && rt.atSpot.act === 'sofa') z -= (u.seatFit ? 0.25 : 0.55) * sk;
+    else if (spotSit && u.seatFit && rt.atSpot.act === 'puff') z += 0.25 * sk;
     g.position.set(x, 0, z);
     u.rot = lerpAngle(u.rot, rotFor(rt.facing), Math.min(1, dt * 14));
     g.rotation.y = u.rot;
-    animateRig(u, a, rt, { now, dt, sk, hipSit, hipStand: HIP_STAND });
+    const seatY = rt.seated ? SEAT_Y : spotSit ? SEAT_BY_ACT[rt.atSpot.act] : null;
+    animateRig(u, a, rt, { now, dt, sk, hipSit, hipStand: HIP_STAND, seatY });
     // nome e emoji da atividade
     // etiqueta no chão, na frente do personagem (no mundo: 0,4 para o lado da câmera); assim não cobre monitor nem balão
     const th = u.rot, off = 0.34;

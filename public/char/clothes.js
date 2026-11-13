@@ -1,7 +1,9 @@
 // Roupas modulares: cada conjunto diz o que veste o tronco, as mangas e as pernas, e acrescenta os detalhes
 // (capuz, lapelas, gola, zíper, gravata). As mangas são peças dos braços, então acompanham o movimento deles.
+// Detalhes finos (lapelas, vivos, gravata) são fitas com espessura que acompanham a curva do tronco; regiões de outra
+// cor (a camisa no decote) são pintadas por vértice na própria malha, sem placas coladas por cima.
 import * as THREE from '../vendor/three.module.min.js';
-import { plate, sectionAt } from './geometry.js';
+import { sectionAt, ribbon } from './geometry.js';
 import { shade } from './config.js';
 
 // perfil do tronco (y de baixo para cima; z positivo é a frente), em unidades do corpo
@@ -25,42 +27,79 @@ export function outfitSpec(cfg) {
   }
 }
 
-// detalhes de cada conjunto no tronco. B = construtor do tronco; o = spec; fz(y) = z da frente da roupa nessa altura
-export function decorate(B, cfg, o) {
-  const p = cfg.shirt, s = cfg.second;
-  const fz = (y) => { const q = sectionAt(TORSO, y); return (q.cz + q.rz) * o.scale; };
+// z da frente do tronco (escalado por k) no ponto (x, y): a roupa e as fitas acompanham a curva do corpo
+export function surfZ(x, y, k) {
+  const q = sectionAt(TORSO, y), r = Math.min(Math.abs(x) / (q.rx * k), 0.97);
+  return ((q.cz || 0) + q.rz * Math.sqrt(1 - r * r)) * k;
+}
+const surfN = (k) => (p) => { const q = sectionAt(TORSO, p.y); return new THREE.Vector3(p.x / (q.rx * q.rx * k * k), 0.02, (p.z - (q.cz || 0) * k) / (q.rz * q.rz * k * k)); };
+const strip = (B, fn, n, k, lift, color, w, t) => {
+  const pts = Array.from({ length: n }, (_, i) => { const [x, y] = fn(i / (n - 1)); return [x, y, surfZ(x, y, k) + lift]; });
+  return B.add(ribbon(pts, { w, t, normal: surfN(k) }), color);
+};
+
+const sstep = (a, b, v) => { const t = Math.max(0, Math.min(1, (v - a) / (b - a))); return t * t * (3 - 2 * t); };
+const blend = (c1, c2, t) => (t <= 0.001 ? null : new THREE.Color(c1).lerp(new THREE.Color(c2), t));
+
+// pintura do tronco: a camisa aparece no decote do blazer, no colete e na abertura do cardigan (bordas suaves)
+export function torsoPaint(cfg, o) {
+  const front = (z) => sstep(0.0, 0.035, z);
   switch (cfg.outfit) {
     case 'blazer': {
-      B.add(plate([[-0.075, 0], [0.075, 0], [0, -0.23]], 0.03), WHITE, { y: 0.56, z: fz(0.45) - 0.01 }); // camisa em V
-      for (const sg of [-1, 1]) B.box(0.04, 0.17, 0.03, s, { x: sg * 0.078, y: 0.46, z: fz(0.46) + 0.006, rz: -sg * 0.42 }, 0.01); // lapelas
+      const h = (y) => 0.014 + (0.075 * (y - 0.3)) / 0.285;
+      return (x, y, z) => blend(o.color, WHITE, (1 - sstep(h(y) - 0.006, h(y) + 0.006, Math.abs(x))) * sstep(0.29, 0.31, y) * front(z));
+    }
+    case 'colete': {
+      const h = (y) => 0.012 + (0.07 * (y - 0.33)) / 0.21;
+      return (x, y, z) => blend(cfg.shirt, WHITE, (1 - sstep(h(y) - 0.006, h(y) + 0.006, Math.abs(x))) * sstep(0.325, 0.345, y) * front(z));
+    }
+    case 'cardigan':
+      return (x, y, z) => blend(o.color, WHITE, (1 - sstep(0.052, 0.064, Math.abs(x))) * front(z));
+    default: return null;
+  }
+}
+
+// detalhes de cada conjunto no tronco. B = construtor do tronco; o = spec
+export function decorate(B, cfg, o) {
+  const p = cfg.shirt, s = cfg.second, k = o.scale;
+  switch (cfg.outfit) {
+    case 'blazer': {
+      const edge = (y) => 0.014 + (0.075 * (y - 0.3)) / 0.285;
+      const lw = (u) => 0.012 + 0.011 * Math.sin(Math.min(1, u * 1.25) * Math.PI * 0.9); // lapela: mais larga no alto
+      for (const sg of [-1, 1]) strip(B, (u) => { const y = 0.585 - u * 0.285; return [sg * (edge(y) + lw(u) * 0.9), y]; }, 10, k, 0.004, s, lw, 0.0075);
       B.torus(0.088, 0.022, s, { y: 0.585, rx: Math.PI / 2 }, Math.PI * 2, 16); // gola
-      for (const y of [0.3, 0.23]) B.sph(0.013, shade(p, -0.4), { y, z: fz(y) + 0.004 }, 8, 6); // botões
+      for (const y of [0.27, 0.2]) B.sph(0.012, shade(p, -0.45), { y, z: surfZ(0, y, k) + 0.004 }, 8, 6); // botões
       break;
     }
     case 'cardigan': {
-      B.add(plate([[-0.1, 0], [0.1, 0], [0.092, -0.3], [-0.092, -0.3]], 0.03), WHITE, { y: 0.55, z: fz(0.4) - 0.012 }); // blusa aparecendo
-      for (const sg of [-1, 1]) B.box(0.016, 0.3, 0.024, shade(p, -0.2), { x: sg * 0.108, y: 0.4, z: fz(0.4) + 0.002 }, 0.006); // vivo do cardigan aberto
-      for (const y of [0.47, 0.37, 0.27]) B.sph(0.012, '#d8d2c4', { y, z: fz(0.4) + 0.012 }, 8, 6);
+      for (const sg of [-1, 1]) strip(B, (u) => [sg * 0.064, 0.565 - u * (0.545 - o.hem)], 10, k, 0.003, shade(p, -0.22), 0.011, 0.0065); // vivo da abertura
+      for (const y of [0.45, 0.35, 0.25]) B.sph(0.009, '#d9d3c2', { y, z: surfZ(0, y, k) + 0.003 }, 8, 6); // botões da blusa
       B.torus(0.09, 0.02, WHITE, { y: 0.585, rx: Math.PI / 2 }, Math.PI * 2, 16); // gola da blusa
       break;
     }
     case 'bomber': {
       B.torus(0.086, 0.03, s, { y: 0.592, rx: Math.PI / 2 }, Math.PI * 2, 16); // gola canelada
-      B.box(0.013, 0.4, 0.014, '#c9ccd4', { y: 0.33, z: fz(0.33) + 0.002 }, 0.005); // zíper
-      B.box(0.03, 0.045, 0.02, '#9aa0ad', { y: 0.51, z: fz(0.5) + 0.01 }, 0.008); // puxador
+      strip(B, (u) => [0, 0.53 - u * 0.4], 8, k, 0.002, '#c9ccd4', 0.006, 0.004); // zíper
+      B.box(0.03, 0.045, 0.02, '#9aa0ad', { y: 0.51, z: surfZ(0, 0.5, k) + 0.008 }, 0.008); // puxador
       break;
     }
     case 'colete': {
-      for (const sg of [-1, 1]) B.box(0.075, 0.04, 0.018, WHITE, { x: sg * 0.048, y: 0.59, z: fz(0.58) + 0.006, rz: sg * 0.5, rx: -0.25 }, 0.008); // gola
-      B.box(0.04, 0.036, 0.03, cfg.tie, { y: 0.545, z: fz(0.5) + 0.012 }, 0.01); // nó
-      B.add(plate([[-0.02, 0], [0.02, 0], [0.034, -0.2], [0, -0.245], [-0.034, -0.2]], 0.014), cfg.tie, { y: 0.52, z: fz(0.4) + 0.014 }); // gravata
-      for (const y of [0.3, 0.22]) B.sph(0.011, shade(p, -0.4), { x: 0.0, y, z: fz(y) * 1.045 }, 8, 6);
+      const kv = 1.045, h = (y) => 0.012 + (0.07 * (y - 0.33)) / 0.21;
+      for (const sg of [-1, 1]) {
+        strip(B, (u) => { const y = 0.545 - u * 0.215; return [sg * (h(y) + 0.004), y]; }, 10, kv, 0.004, shade(cfg.shirt, -0.3), 0.006, 0.006); // vivo da abertura em V
+        strip(B, (u) => [sg * (0.03 + u * 0.05), 0.598 - u * 0.03], 5, 1.0, 0.004, WHITE, 0.012, 0.009); // ponta da gola da camisa
+      }
+      B.torus(0.09, 0.02, WHITE, { y: 0.585, rx: Math.PI / 2 }, Math.PI * 2, 16); // gola
+      B.sph(0.022, cfg.tie, { y: 0.552, z: surfZ(0, 0.552, kv) + 0.004, sy: 0.8, sz: 0.75 }, 10, 8); // nó
+      const tw = (u) => (u < 0.12 ? 0.012 + u * 0.1 : u < 0.8 ? 0.024 + (u - 0.12) * 0.018 : Math.max(0.004, 0.036 * (1 - (u - 0.8) / 0.2)));
+      strip(B, (u) => [0, 0.545 - u * 0.25], 12, kv, 0.007, cfg.tie, tw, 0.0065); // gravata com ponta
+      for (const y of [0.27, 0.2]) B.sph(0.01, shade(p, -0.4), { y, z: surfZ(0, y, 1.045) + 0.003 }, 8, 6);
       break;
     }
     default: { // moletom
       B.add(new THREE.TorusGeometry(0.1, 0.045, 8, 16, Math.PI * 1.5), p, { y: 0.6, z: -0.05, rx: Math.PI / 2 - 0.5, rz: Math.PI * 0.75 }); // capuz
-      B.box(0.22, 0.085, 0.04, shade(p, -0.14), { y: 0.2, z: fz(0.2) + 0.004 }, 0.015); // bolso canguru
-      for (const sg of [-1, 1]) B.caps(0.007, 0.1, WHITE, { x: sg * 0.036, y: 0.49, z: fz(0.5) + 0.006 }, 6); // cordões
+      B.box(0.22, 0.085, 0.04, shade(p, -0.14), { y: 0.2, z: surfZ(0, 0.2, k) + 0.002 }, 0.015); // bolso canguru
+      for (const sg of [-1, 1]) B.caps(0.007, 0.1, WHITE, { x: sg * 0.036, y: 0.49, z: surfZ(0, 0.5, k) + 0.006 }, 6); // cordões
       break;
     }
   }

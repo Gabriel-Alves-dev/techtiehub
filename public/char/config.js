@@ -11,7 +11,7 @@ import * as THREE from '../vendor/three.module.min.js';
 import { quality } from './geometry.js';
 
 export const OUTFITS = ['moletom', 'blazer', 'cardigan', 'bomber', 'colete'];
-const PANTS = ['#2f3550', '#3b3b44', '#4a3b2e', '#2c4a52'];
+const PANTS = ['#3d4668', '#4d4d59', '#6a5440', '#3f6670']; // tons médios: a calça escura sumia na cadeira escura
 const SKIRTS = ['#3a3f5c', '#5a3a3a', '#2f4a45', '#4a4a52'];
 const TIES = ['#c0392b', '#2f6fb5', '#7a3b8f', '#e0a43a'];
 const HAIR_STYLES = ['curto', 'longo', 'coque'];

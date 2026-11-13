@@ -11,7 +11,8 @@ const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _e = new THREE.Eule
 // junta peças numa BufferGeometry com position, normal e color. t = { x, y, z, rx, ry, rz, sx, sy, sz }
 export class Builder {
   constructor() { this.parts = []; }
-  add(geo, color, t = {}) {
+  // paint(x, y, z) pode devolver outra cor para um vértice (ou null para manter a cor da peça): serve para regiões da roupa
+  add(geo, color, t = {}, paint = null) {
     const g = geo.clone();
     _p.set(t.x || 0, t.y || 0, t.z || 0);
     _q.setFromEuler(_e.set(t.rx || 0, t.ry || 0, t.rz || 0));
@@ -19,6 +20,10 @@ export class Builder {
     g.applyMatrix4(_m.compose(_p, _q, _s));
     const c = new THREE.Color(color), n = g.attributes.position.count, arr = new Float32Array(n * 3);
     for (let i = 0; i < n; i++) { arr[i * 3] = c.r; arr[i * 3 + 1] = c.g; arr[i * 3 + 2] = c.b; }
+    if (paint) {
+      const pa = g.attributes.position, pc = new THREE.Color();
+      for (let i = 0; i < n; i++) { const r = paint(pa.getX(i), pa.getY(i), pa.getZ(i)); if (r) { pc.set(r); arr[i * 3] = pc.r; arr[i * 3 + 1] = pc.g; arr[i * 3 + 2] = pc.b; } }
+    }
     g.setAttribute('color', new THREE.BufferAttribute(arr, 3));
     g.deleteAttribute('uv');
     if (!g.index) g.setIndex([...Array(n).keys()]);
@@ -92,9 +97,13 @@ export const scaleSections = (secs, k, kz = k) => secs.map((s) => ({ ...s, rx: s
 
 // superfície por seções elípticas (de baixo para cima). round: fecha as pontas arredondadas; senão, tampa reta.
 // Seção: { y, rx, rz, cx?, cz? }; o ângulo 0 aponta para +z (frente do personagem).
-export function loft(secs, { seg: segIn = 18, round = false } = {}) {
+export function loft(secs, { seg: segIn = 18, round = false, rows = 0 } = {}) {
   const seg = qs(segIn, 8);
   let s = secs.map((q) => ({ cx: 0, cz: 0, ...q })).sort((p, q) => p.y - q.y); // sempre de baixo para cima (orienta as faces para fora)
+  if (rows > s.length) { // mais fileiras: a pintura por vértice precisa de malha fina para as bordas ficarem suaves
+    const y0 = s[0].y, y1 = s[s.length - 1].y, src = s;
+    s = Array.from({ length: rows }, (_, i) => ({ cx: 0, cz: 0, ...sectionAt(src, y0 + ((y1 - y0) * i) / (rows - 1)) }));
+  }
   if (round) {
     const a = s[0], b = s[s.length - 1], ra = Math.max(a.rx, a.rz), rb = Math.max(b.rx, b.rz);
     s = [
@@ -173,6 +182,43 @@ export function outlineGeo(geo, thick) {
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(out, 3));
   g.setIndex(geo.index);
+  return g;
+}
+
+// fita com espessura: tubo achatado (largura w, espessura t) ao longo de uma trajetória sobre uma superfície.
+// normal(Vector3) dá a normal da superfície em cada ponto; a fita acompanha a curvatura do corpo, sem virar placa.
+// w e t podem ser números ou funções de u (0 a 1, ao longo da fita); as pontas fecham afuniladas.
+export function ribbon(pts, { w = 0.02, t = 0.01, normal, seg = 8 } = {}) {
+  const P = pts.map((p) => new THREE.Vector3(...p)), n = P.length, pos = [], idx = [];
+  const T = new THREE.Vector3(), N = new THREE.Vector3(), L = new THREE.Vector3(), N2 = new THREE.Vector3();
+  for (let i = 0; i < n; i++) {
+    const u = i / (n - 1), end = Math.min(1, Math.min(u, 1 - u) * 8 + 0.3);
+    T.subVectors(P[Math.min(n - 1, i + 1)], P[Math.max(0, i - 1)]).normalize();
+    N.copy(normal(P[i])).normalize();
+    L.crossVectors(T, N).normalize();
+    N2.crossVectors(L, T).normalize();
+    const W = (typeof w === 'function' ? w(u) : w) * end, H = (typeof t === 'function' ? t(u) : t) * end;
+    for (let k = 0; k < seg; k++) {
+      const a = (k / seg) * Math.PI * 2, c = Math.cos(a) * W, s = Math.sin(a) * H;
+      pos.push(P[i].x + L.x * c + N2.x * s, P[i].y + L.y * c + N2.y * s, P[i].z + L.z * c + N2.z * s);
+    }
+  }
+  for (let r = 0; r < n - 1; r++) for (let k = 0; k < seg; k++) {
+    const a = r * seg + k, b = r * seg + ((k + 1) % seg), c = (r + 1) * seg + k, d = (r + 1) * seg + ((k + 1) % seg);
+    idx.push(a, c, b, b, c, d);
+  }
+  const c0 = pos.length / 3; pos.push(P[0].x, P[0].y, P[0].z);
+  const c1 = c0 + 1; pos.push(P[n - 1].x, P[n - 1].y, P[n - 1].z);
+  for (let k = 0; k < seg; k++) { idx.push(k, (k + 1) % seg, c0); idx.push((n - 1) * seg + ((k + 1) % seg), (n - 1) * seg + k, c1); }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  // garante as faces para fora (o sentido depende da direção da fita): compara a normal de um vértice do meio com o raio
+  const mid = Math.floor(n / 2) * seg, nr = g.attributes.normal, ps = g.attributes.position;
+  const cx = (P[Math.floor(n / 2)].x), cy = P[Math.floor(n / 2)].y, cz = P[Math.floor(n / 2)].z;
+  const dot = nr.getX(mid) * (ps.getX(mid) - cx) + nr.getY(mid) * (ps.getY(mid) - cy) + nr.getZ(mid) * (ps.getZ(mid) - cz);
+  if (dot < 0) { const ia = g.index.array; for (let i = 0; i < ia.length; i += 3) { const x = ia[i + 1]; ia[i + 1] = ia[i + 2]; ia[i + 2] = x; } g.computeVertexNormals(); }
   return g;
 }
 

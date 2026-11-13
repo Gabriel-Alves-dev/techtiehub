@@ -1,7 +1,7 @@
 // Anatomia: tronco, braços e pernas por perfis em seções (ombros arredondados, cintura, coxa, panturrilha e tornozelo),
 // vestidos pelo conjunto escolhido. Cada articulação do esqueleto de grupos recebe uma malha própria.
 import { Builder, loft, clipSections, scaleSections, sectionAt } from './geometry.js';
-import { TORSO, outfitSpec, decorate } from './clothes.js';
+import { TORSO, outfitSpec, decorate, torsoPaint } from './clothes.js';
 import { shade } from './config.js';
 
 // o quadril fica um pouco por dentro do tronco para as duas superfícies não brigarem (z-fighting)
@@ -14,15 +14,15 @@ const FORE = [[0.01, 0.052], [-0.05, 0.05], [-0.12, 0.045], [-0.2, 0.041, 0.012]
 
 // tronco + pescoço + quadril + roupa de cima (e saia)
 export function torsoGeo(cfg) {
-  const o = outfitSpec(cfg), B = new Builder();
+  const o = outfitSpec(cfg), B = new Builder(), paint = torsoPaint(cfg, o);
   B.cyl(0.062, 0.07, 0.1, cfg.skin, { y: 0.625 }, 12); // pescoço
   B.add(loft(HIP, { round: true, seg: 18 }), cfg.pants);
   if (o.vest) { // camisa por baixo e colete por cima (a camisa aparece nos ombros)
     B.add(loft(clipSections(TORSO, o.hem), { seg: 20 }), o.color);
     const vest = [...clipSections(TORSO, 0.09, 0.46), { y: 0.5, rx: 0.17, rz: 0.125, cz: 0.01 }, { y: 0.54, rx: 0.1, rz: 0.08 }];
-    B.add(loft(scaleSections(vest, 1.045), { seg: 20 }), cfg.shirt);
+    B.add(loft(scaleSections(vest, 1.045), { seg: 24, rows: 14 }), cfg.shirt, {}, paint);
   } else {
-    B.add(loft(scaleSections(clipSections(TORSO, o.hem), o.scale), { seg: 20 }), o.color);
+    B.add(loft(scaleSections(clipSections(TORSO, o.hem), o.scale), { seg: 24, rows: 14 }), o.color, {}, paint);
   }
   if (o.band) { // barra de ribana
     const a = sectionAt(TORSO, o.hem), b = sectionAt(TORSO, o.hem + o.bandH), k = o.scale + 0.012;
