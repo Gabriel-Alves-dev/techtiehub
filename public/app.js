@@ -3058,6 +3058,11 @@ function prettyModel(id) {
 
 const HAIR_NAMES = { '': 'Automático', curto: 'Curto', longo: 'Longo', coque: 'Coque' };
 const ACCESSORY_NAMES = { '': 'Nenhum', oculos: 'Óculos', fone: 'Fone de ouvido', bone: 'Boné' };
+const OUTFIT_NAMES = { '': 'Automático', moletom: 'Moletom', blazer: 'Blazer', cardigan: 'Cardigan com saia', bomber: 'Jaqueta bomber', colete: 'Colete com gravata' };
+// cor opcional: vazia = automática (a caixa "auto" fica marcada até o usuário escolher uma cor)
+const autoColor = (name, label, value, fallback) => `<label>${label}
+  <input type="color" name="${name}" value="${esc(value || fallback)}" />
+  <span class="auto-check"><input type="checkbox" name="${name}_auto" ${value ? '' : 'checked'} /> auto</span></label>`;
 
 function openAgentDialog(a) {
   const shirt = a?.shirt || PALETTE[state.agents.length % PALETTE.length];
@@ -3069,6 +3074,15 @@ function openAgentDialog(a) {
       <label>Camisa<input type="color" name="shirt" value="${esc(shirt)}" /></label>
       <label>Cabelo<input type="color" name="hair" value="${esc(a?.hair || '#3b2416')}" /></label>
       <label>Pele<input type="color" name="skin" value="${esc(a?.skin || '#f1c7a0')}" /></label>
+    </div>
+    <div class="colors">
+      <label>Roupa<select name="outfit">${Object.entries(OUTFIT_NAMES).map(([k, v]) =>
+        `<option value="${k}" ${k === (a?.outfit || '') ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+    </div>
+    <div class="colors">
+      ${autoColor('second', 'Cor 2', a?.second, '#3f6cc6')}
+      ${autoColor('pants', 'Calça', a?.pants, '#3d4668')}
+      ${autoColor('shoe', 'Calçado', a?.shoe, '#f4f1ea')}
     </div>
     <div class="colors">
       <label>Estilo do cabelo<select name="hairStyle">${Object.entries(HAIR_NAMES).map(([k, v]) =>
@@ -3085,9 +3099,18 @@ function openAgentDialog(a) {
     <p class="muted dialog-hint">“Padrão do PC” usa o que estiver configurado no Claude Code do computador que executa.
       Mais esforço pensa mais (melhor em tarefas difíceis), mas demora e gasta mais do seu plano.</p>
   `, async (d) => {
+    for (const k of ['second', 'pants', 'shoe']) { // "auto" marcado: manda vazio e o personagem usa o padrão
+      if (d[k + '_auto'] !== undefined) d[k] = '';
+      delete d[k + '_auto'];
+    }
     if (a) await api('PATCH', `/api/agents/${a.id}`, d);
     else await api('POST', '/api/agents', d);
   }, a && { label: 'Demitir', confirm: `Demitir ${a.name}?`, action: () => api('DELETE', `/api/agents/${a.id}`) });
+  // escolher uma cor desmarca o "auto" dela
+  for (const c of form.querySelectorAll('.auto-check')) {
+    const color = c.parentElement.querySelector('input[type=color]');
+    color.addEventListener('input', () => { c.querySelector('input').checked = false; });
+  }
 }
 
 document.getElementById('btn-new-project').onclick = () => openProjectDialog();

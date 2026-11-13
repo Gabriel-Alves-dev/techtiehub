@@ -23,8 +23,16 @@ function hairline(az, nape) {
 // B: peças com contorno (calota, massa, coque); F: peças sem contorno (mechas), para não riscar o cabelo de preto
 export function addHair(B, F, cfg, rand = rng(hash(cfg.hair + cfg.hairStyle + cfg.skin + cfg.shirt, 37) + 1)) {
   const hat = cfg.accessory === 'bone';
-  const col = () => shade(cfg.hair, (rand() - 0.5) * 0.12);
-  const strand = (pts, o) => F.add(strandGeo(pts, { seg: 6, rings: 7, blunt: 0.28, ...o }), col());
+  // cabelo escuro: o sombreamento toon achata tons muito escuros numa mancha só. Mechas e massa ganham um brilho frio
+  // discreto (mais forte na coroa e no topo da massa), o que devolve a leitura do volume sem clarear o contorno.
+  const hc = new THREE.Color(cfg.hair), luma = 0.2126 * hc.r + 0.7152 * hc.g + 0.0722 * hc.b;
+  const dark = Math.max(0, Math.min(1, 1 - luma / 0.03));
+  const SHEEN = new THREE.Color('#7a84a8');
+  const tone = (k) => '#' + hc.clone().lerp(SHEEN, Math.min(0.8, k * dark)).getHexString();
+  const sst = (a, b, v) => { const t = Math.max(0, Math.min(1, (v - a) / (b - a))); return t * t * (3 - 2 * t); };
+  // w (0 a 1): quanto a mecha pega luz (coroa e franja mais, nuca menos)
+  const col = (w = 0.4) => (dark > 0 ? tone(0.18 + 0.55 * w * (0.6 + 0.8 * rand())) : shade(cfg.hair, (rand() - 0.5) * 0.12));
+  const strand = (pts, o, w) => F.add(strandGeo(pts, { seg: 6, rings: 7, blunt: 0.28, ...o }), col(w));
   const style = cfg.hairStyle;
   const side = rand() < 0.5 ? -1 : 1; // lado da repartição
   const short = style === 'curto';
@@ -40,14 +48,14 @@ export function addHair(B, F, cfg, rand = rng(hash(cfg.hair + cfg.hairStyle + cf
       const vol = (short ? 0.034 : 0.03) * (1 - sd * 0.75) + 0.008;
       const top = lerp(1.22, 1.5, rand());
       const pts = [0, 0.3, 0.62, 1].map((t, j) => sp(az + side * 0.12 * t, lerp(top, end, t), [0.006, vol * 0.8, vol, 0.01][j]));
-      strand(pts, { w: lerp(0.036, 0.06, rand()), d: 0.026, taper: 1.5 });
+      strand(pts, { w: lerp(0.036, 0.06, rand()), d: 0.026, taper: 1.5 }, (top - 1.2) / 0.3);
     }
     // franja repartida: poucas mechas largas varridas para o lado, de comprimentos e alturas diferentes
     const fr = short ? 6 : 5;
     for (let i = 0; i < fr; i++) {
       const t = i / (fr - 1), az = side * (0.15 - t * 0.9) + (rand() - 0.5) * 0.12, e = (short ? 0.66 : 0.6) + rand() * 0.12 + (1 - t) * 0.04; // termina acima das sobrancelhas
       const pts = [0, 0.35, 0.7, 1].map((u, j) => sp(az + side * (0.5 + t * 0.6) * u, lerp(1.35, e, u), [0.008, 0.032, 0.034, 0.02][j]));
-      strand(pts, { w: lerp(0.05, 0.04, t), d: 0.028, rings: 6, taper: 1.3 });
+      strand(pts, { w: lerp(0.05, 0.04, t), d: 0.028, rings: 6, taper: 1.3 }, 0.8);
     }
     // tufo de volume no lado da repartição: quebra a silhueta redonda
     F.add(new THREE.SphereGeometry(0.075, 12, 8), cfg.hair, { x: side * 0.06, y: 0.205, z: 0.06, sx: 1.25, sy: 0.62, sz: 1.05, rz: side * -0.35 });
@@ -58,7 +66,7 @@ export function addHair(B, F, cfg, rand = rng(hash(cfg.hair + cfg.hairStyle + cf
   if (short) {
     if (!hat) for (let i = 0; i < 5; i++) { // topete: mechas que sobem e caem para o lado, em alturas diferentes
       const az = -0.55 + i * 0.3 + (rand() - 0.5) * 0.1, p0 = sp(az, 1.2, 0.02), p1 = sp(az + side * 0.18, 1.42 + rand() * 0.1, 0.05 + rand() * 0.015);
-      strand([p0, p1, [p1[0] * 1.15 + side * 0.02, p1[1] + 0.015 + rand() * 0.015, p1[2] * 1.15 - 0.005]], { w: lerp(0.032, 0.044, rand()), d: 0.022, rings: 5 });
+      strand([p0, p1, [p1[0] * 1.15 + side * 0.02, p1[1] + 0.015 + rand() * 0.015, p1[2] * 1.15 - 0.005]], { w: lerp(0.032, 0.044, rand()), d: 0.022, rings: 5 }, 1);
     }
   } else if (style === 'longo') {
     // massa lisa atrás da cabeça, do alto até o ombro; com boné começa logo abaixo da aba
@@ -67,7 +75,8 @@ export function addHair(B, F, cfg, rand = rng(hash(cfg.hair + cfg.hairStyle + cf
       { y: -0.34, rx: 0.12, rz: 0.07, cz: -0.125 }, { y: -0.26, rx: 0.16, rz: 0.1, cz: -0.125 }, { y: -0.14, rx: 0.2, rz: 0.125, cz: -0.115 },
       { y: -0.02, rx: 0.215, rz: 0.13, cz: -0.095 },
     ];
-    B.add(loft([...base.filter((s) => s.y < top), { y: top, rx: 0.2, rz: 0.11, cz: -0.08 }], { seg: 18, round: true }), cfg.hair);
+    // degradê vertical por vértice: topo da massa mais claro, ponta mais escura (só em cabelo escuro)
+    B.add(loft([...base.filter((s) => s.y < top), { y: top, rx: 0.2, rz: 0.11, cz: -0.08 }], { seg: 20, round: true, rows: 12 }), cfg.hair, {}, dark > 0 ? (x, y) => tone(0.6 * sst(-0.34, 0.08, y)) : null);
     for (const sg of [-1, 1]) for (const k of [0, 1]) { // mechas que emolduram o rosto
       const az = sg * (1.3 + k * 0.18), e = sp(az, -0.22, 0.04);
       strand([sp(az, hat ? 0.0 : 0.5, 0.012), sp(az, 0.1, 0.034), sp(az, -0.1, 0.04), [e[0], -0.25 - k * 0.02, e[2] * 0.8]], { w: 0.05, d: 0.03, rings: 8, taper: 1.3 });

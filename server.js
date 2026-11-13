@@ -397,7 +397,7 @@ function pick(obj, fields) {
 
 const FIELDS = {
   projects: ['name', 'description', 'color', 'agentId', 'roomId', 'permissionMode', 'role'], // pasta: tratada à parte (uma por PC)
-  agents: ['name', 'role', 'shirt', 'hair', 'skin', 'hairStyle', 'accessory', 'status', 'message', 'model', 'effort'],
+  agents: ['name', 'role', 'shirt', 'hair', 'skin', 'hairStyle', 'accessory', 'outfit', 'second', 'pants', 'shoe', 'status', 'message', 'model', 'effort'],
   rooms: ['name', 'kind', 'cols', 'floor', 'wall', 'decor', 'slots', 'areas'],
 };
 
@@ -928,6 +928,9 @@ async function officeApi(req, res, url, o, user) {
     // aparência do agente: '' = automático (cabelo) / nenhum (acessório)
     if (body.hairStyle !== undefined && !['', 'curto', 'longo', 'coque'].includes(body.hairStyle)) body.hairStyle = '';
     if (body.accessory !== undefined && !['', 'oculos', 'fone', 'bone'].includes(body.accessory)) body.accessory = '';
+    // roupa e cores extras do personagem 3D: '' = automático (o front completa a partir do id do agente)
+    if (body.outfit !== undefined && !['', 'moletom', 'blazer', 'cardigan', 'bomber', 'colete'].includes(body.outfit)) body.outfit = '';
+    for (const k of ['second', 'pants', 'shoe']) if (body[k] !== undefined && !/^#[0-9a-f]{6}$/i.test(body[k])) body[k] = '';
     if (body.slots !== undefined) {
       // posição de cada mesa na grade da sala: { idDoProjeto: { c: coluna, r: fileira } }
       const ids = new Set(state.projects.map((p) => p.id));

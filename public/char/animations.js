@@ -3,6 +3,9 @@
 
 // pose de digitar padrão (a do boneco clássico); o personagem novo traz a sua em u.typePose
 const DEF_TYPE = { sh: 0.95, el: 0.9, lean: 0, spread: 0 };
+// aceno de "bloqueado": o braço esquerdo sobe para o lado e para cima (-2,5 rad a partir de pendurado), fora da cabeça e do monitor,
+// e só o antebraço balança; assim o gesto aparece na câmera isométrica, que vê o personagem de costas
+const WAVE_Z = -2.5, WAVE_X = -0.3;
 
 // u = g.userData do personagem; ctx = { now, dt, sk (0 a 1: quanto já sentou), hipSit, hipStand }
 export function animateRig(u, a, rt, { now, dt, sk, hipSit, hipStand, seatY }) {
@@ -22,18 +25,20 @@ export function animateRig(u, a, rt, { now, dt, sk, hipSit, hipStand, seatY }) {
   const sw = Math.sin(walkPh) * 0.7 * u.moveK * (1 - sk);
   const cheer = false; // concluído não levanta os braços: fica sentado em repouso, com a tela de "pronto" acesa
   const wave = rt.seated && a.status === 'bloqueado';
+  const wk = u.waveK = (u.waveK || 0) + ((wave ? 1 : 0) - (u.waveK || 0)) * Math.min(1, dt * 8); // entra e sai do aceno suavemente
   // pernas: andando balançam; sentado a coxa vai à frente e a canela desce
   u.LL.hp.rotation.x = sw - 1.5 * sk; u.RL.hp.rotation.x = -sw - 1.5 * sk;
   u.LL.kn.rotation.x = 1.5 * sk + Math.max(0, -sw) * 0.5; u.RL.kn.rotation.x = 1.5 * sk + Math.max(0, sw) * 0.5;
   // braços
   const k = Math.floor(now / 140) % 2;
   const rest = (u.restElbow || 0) * (1 - sk); // em repouso o cotovelo fica levemente dobrado e o braço um pouco afastado do corpo
-  u.L.sh.rotation.x = -sw * 0.8 - (cheer ? 3.0 : 0) - (typing ? tp.sh : sk * 0.7) - (wave ? 2.6 + Math.sin(now / 120) * 0.2 : 0);
+  u.L.sh.rotation.x = (-sw * 0.8 - (cheer ? 3.0 : 0) - (typing ? tp.sh : sk * 0.7)) * (1 - wk) + WAVE_X * wk;
   u.R.sh.rotation.x = sw * 0.8 - (cheer ? 3.0 : 0) - (typing ? tp.sh : sk * 0.7);
-  u.L.el.rotation.x = -(typing ? tp.el + (k ? 0.12 : 0) : sk * 0.5) - (wave ? 0.2 : 0) - rest;
+  u.L.el.rotation.x = (-(typing ? tp.el + (k ? 0.12 : 0) : sk * 0.5) - rest) * (1 - wk) - 0.5 * wk;
+  u.L.el.rotation.z = Math.sin(now / 140) * 0.5 * wk;
   u.R.el.rotation.x = -(typing ? tp.el + (k ? 0 : 0.12) : sk * 0.5) - rest;
   const spr = (u.restSpread || 0) * (1 - sk) + tp.spread * u.typeK;
-  u.L.sh.rotation.z = cheer || wave ? 0.2 : -spr; u.R.sh.rotation.z = cheer ? -0.2 : spr;
+  u.L.sh.rotation.z = (cheer ? 0.2 : -spr) * (1 - wk) + WAVE_Z * wk; u.R.sh.rotation.z = cheer ? -0.2 : spr;
   // respiração e humor
   u.head.position.y = u.headY + Math.sin(now / 520 + nl) * 0.007 + Math.abs(Math.sin(walkPh)) * 0.012 * u.moveK;
   // expressão: concluído e ocioso sorriem, bloqueado fica preocupado (sobrancelhas inclinadas, boca para baixo), trabalhando se concentra
