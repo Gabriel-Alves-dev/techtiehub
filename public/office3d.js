@@ -3,6 +3,7 @@
 import * as THREE from './vendor/three.module.min.js';
 import { buildCharacter, releaseCharacter, setCharQuality } from './char/character.js';
 import { animateRig } from './char/animations.js';
+import { buildServerRoom, updateServerRoom } from './server3d.js';
 
 const T = 16;
 const WALL_H = 3; // tiles de parede no topo do mapa 2D (a parede 3D começa em z = 3)
@@ -429,7 +430,7 @@ export function create3D({ canvas, wrap, onDrag }) {
       g.clear();
     } else disposeGroup(g);
   }
-  const state = { key: '', room: null, desks: new Map(), agents: new Map(), plants: [], arcade: null, steam: null, lamp: null, clock: null, tv: null, glass: [], glassKey: '', lastNow: 0, lastFrame: 0 };
+  const state = { srv: null, key: '', room: null, desks: new Map(), agents: new Map(), plants: [], arcade: null, steam: null, lamp: null, clock: null, tv: null, glass: [], glassKey: '', lastNow: 0, lastFrame: 0 };
 
   // câmera orbital: azimute e elevação em torno do centro da sala
   const cam = { az: 0, azT: 0, el: 0.95, zoom: 1, cx: 0, cz: 0, bx: 0, bz: 0, R: 10, depth: 10, width: 20, dist: 20, zMin: 3, zMax: 20, W: 20, Lt: 15 };
@@ -525,9 +526,23 @@ export function create3D({ canvas, wrap, onDrag }) {
     hitList.length = 0;
     state.desks.clear(); state.flat = []; state.plants = []; state.glass = []; state.arcade = null; state.steam = null; state.clock = null; state.tv = null; state.glassKey = '';
     const g = staticGroup;
+    state.srv = null;
     const { W, H, L } = s;
     const Wt = W, Ht = H, Lt = L / T, wTiles = W - 2, zMin = WALL_H, zMax = H - 1;
     cam.bx = W / 2; cam.bz = (zMin + zMax) / 2; cam.zMin = zMin; cam.zMax = zMax; cam.W = W; cam.Lt = Lt; cam.R = Math.hypot(W, zMax - zMin) * 0.5; cam.depth = zMax - zMin; cam.width = W - 2;
+
+    if (s.server) { // sala de servidores: racks no lugar de mesas, áreas e janelas
+      state.srv = buildServerRoom({ box, add, mat, canvasTex, glossPlane, wallTexture, aniso, WALL_H, WALL_UP, mobile }, s, g, { hitList, flat: state.flat });
+      state.backWall = state.srv.wallItems;
+      const rs = Math.hypot(W, zMax - zMin) * 0.55;
+      Object.assign(sun.shadow.camera, { left: -rs, right: rs, top: rs, bottom: -rs, near: 1, far: rs * 6 });
+      sun.shadow.camera.updateProjectionMatrix();
+      sun.position.set(cam.bx - rs * 0.7, rs * 1.7, cam.bz + rs * 0.9);
+      sun.target.position.set(cam.bx, 0, cam.bz);
+      const sdims = W + 'x' + H + 'srv';
+      if (state.dims !== sdims) { state.dims = sdims; resetCamera(); }
+      return;
+    }
 
     // piso
     const floorW = Lt - 1, loungeW = W - 1 - Lt;
@@ -808,8 +823,10 @@ export function create3D({ canvas, wrap, onDrag }) {
     const dt = Math.min(0.1, (now - (state.lastNow || now)) / 1000);
     state.lastNow = now; state.lastFrame = now;
 
-    const key = JSON.stringify([s.W, s.H, s.L, s.floor, s.wallColors, s.blocks, s.desks.map((d) => [d.id, d.name, d.color, d.x, d.y, !!d.empty, !!d.isNew]), s.decor, s.spots.length]);
+    const key = JSON.stringify([s.W, s.H, s.L, s.floor, s.wallColors, s.blocks, s.desks.map((d) => [d.id, d.name, d.color, d.x, d.y, !!d.empty, !!d.isNew]), s.decor, s.spots.length, s.server ? [s.server.msg, s.server.rackX0, s.server.racks.map((r) => r.host)] : 0]);
     if (key !== state.key) { state.key = key; resize(); build(s); }
+
+    if (s.server) return renderServer(s, now, dt);
 
     // luz e céu conforme a hora
     const night = s.night, h = new Date().getHours();
@@ -884,6 +901,17 @@ export function create3D({ canvas, wrap, onDrag }) {
     renderer.render(scene, camera);
   }
 
+  // sala de servidores: luz fria e baixa, só os racks se mexem (LEDs, ventoinhas, farol)
+  function renderServer(s, now, dt) {
+    sun.intensity = 1.7; sun.color.set('#c4d4ff');
+    hemi.intensity = 1.5; hemi.color.set('#9fb2e8');
+    warm.forEach((l) => { l.intensity = 0; });
+    for (const [id, g] of state.agents) { agentsGroup.remove(g); freeAgent(g); state.agents.delete(id); }
+    if (state.srv) updateServerRoom(state.srv, s, now, dt);
+    placeCamera();
+    renderer.render(scene, camera);
+  }
+
   const SEAT_BY_ACT = { reuniao: SEAT_Y, sofa: 0.62, puff: 0.66 }; // altura do assento de cada lugar de sentar
   const SIT_ACTS = { reuniao: HIP_SIT, sofa: HIP_SIT, puff: 0.26 };
   function pose(g, a, now, dt) {
@@ -928,6 +956,7 @@ export function create3D({ canvas, wrap, onDrag }) {
     if (!hits.length) return null;
     const agent = hits.find((h) => h.object.userData.kind === 'agent');
     const o = (agent || hits[0]).object.userData;
+    if (o.kind === 'rack') return { kind: 'rack', host: o.host ?? null };
     return o.kind === 'slot' ? { kind: 'slot' } : { kind: o.kind, id: o.id };
   }
   const v3 = new THREE.Vector3();

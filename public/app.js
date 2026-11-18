@@ -1075,7 +1075,7 @@ function setView3d(on) {
 
 // mostra o canvas certo: salas de servidores continuam em 2D
 function syncView() {
-  const want = view3d && !!v3 && !world.server;
+  const want = view3d && !!v3; // a sala de servidores também tem vista 3D
   if (want === using3dNow) return;
   using3dNow = want;
   canvas.hidden = want;
@@ -1100,6 +1100,35 @@ function activityEmoji(a, rt, now, talkers) {
   return null;
 }
 
+// vista 3D da sala de servidores: racks em fileiras de até 6 (o 2D coloca todos lado a lado, o que fica largo demais)
+const SV3D_COLS = 6, SV3D_ROW = 5.2;
+function svLayout3D() {
+  const n = monitor.hosts.length, cols = Math.max(1, Math.min(SV3D_COLS, n)), rows = Math.max(1, Math.ceil(n / cols));
+  const W = Math.max(14, cols * 4 + 3);
+  return { W, H: WALL_H + 9 + (rows - 1) * SV3D_ROW, rackX0: 1 + Math.floor(((W - 2) - (cols * 4 - 1)) / 2) };
+}
+
+// resumo de cada unidade do rack (CPU, memória, disco, PM2, Docker e systemd) para a vista 3D
+function rackUnits(h) {
+  const pct = (v) => (v == null ? '?' : Math.round(v) + '%');
+  const fill = (v) => (v == null ? 0 : Math.max(0, Math.min(1, v / 100)));
+  const first = (g) => (g.names[0] ? ' · ' + truncate(g.names[0], 11) : '');
+  const grp = (name, total, bad, warn, noteBad, noteWarn) => ({
+    name, text: total == null ? '?' : String(total), fill: null, total: total ?? 0, bad: bad.count, warn: warn?.count || 0,
+    color: bad.count ? MON_COLOR.critico : warn?.count ? MON_COLOR.atencao : MON_COLOR.ok,
+    note: bad.count ? `${bad.count} ${noteBad}${first(bad)}` : warn?.count ? `${warn.count} ${noteWarn}${first(warn)}` : '',
+    noteColor: bad.count ? MON_COLOR.critico : MON_COLOR.atencao,
+  });
+  return [
+    { name: 'CPU', text: pct(h.cpu), fill: fill(h.cpu), color: level(h.cpu, 75, 90) },
+    { name: 'MEMÓRIA', text: pct(h.mem), fill: fill(h.mem), color: level(h.mem, 80, 90) },
+    { name: 'DISCO', text: pct(h.disk), fill: fill(h.disk), color: level(h.disk, 80, 90) },
+    grp('PM2', h.pm2.total, h.pm2.errored, h.pm2.highRestarts, 'com erro', 'reiniciando'),
+    grp('DOCKER', h.docker.total, h.docker.unhealthy, null, 'sem saúde'),
+    grp('SYSTEMD', h.systemd.total, h.systemd.failed, null, 'falhou'),
+  ];
+}
+
 function snapshot3D(now) {
   const vis = visibleAgents();
   const desks = [];
@@ -1118,10 +1147,16 @@ function snapshot3D(now) {
   const talkers = vis.filter((a) => runtime.get(a.id)?.atSpot?.act === 'reuniao').map((a) => a.id);
   const h = new Date().getHours();
   return {
-    W: world.W, H: world.H, L: world.L, floor: world.floor,
+    W: world.server ? svLayout3D().W : world.W, H: world.server ? svLayout3D().H : world.H, L: world.L, floor: world.floor,
     floorColors: FLOORS[world.floor] || FLOORS.madeira, wallColors: WALLS[world.wall] || WALLS.cinza,
     blocks: world.blocks, spots: world.spots, desks,
-    decor: roomDecor().filter(decorFits),
+    decor: world.server ? [] : roomDecor().filter(decorFits),
+    server: world.server ? {
+      racks: monitor.hosts.map((h, i) => ({ host: h.host, status: h.status, cpu: h.cpu, units: rackUnits(h), col: i % SV3D_COLS, row: Math.floor(i / SV3D_COLS) })),
+      rackX0: svLayout3D().rackX0, rowGap: SV3D_ROW,
+      msg: monitor.denied ? 'SÓ A DONA DO HUB VÊ' : monitor.configured ? 'AGUARDANDO DADOS' : 'SEM MONITOR',
+      hover: hover?.kind === 'rack' ? hover.host ?? '' : undefined, // '' = rack vazio (configurar)
+    } : undefined,
     night: h >= 19 || h < 5, sky: skyColor(),
     counts: ['trabalhando', 'bloqueado', 'concluido', 'ocioso'].map((st) => vis.filter((a) => a.status === st).length),
     statusColors: ['trabalhando', 'bloqueado', 'concluido', 'ocioso'].map((st) => STATUS[st].color),
