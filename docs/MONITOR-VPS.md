@@ -12,7 +12,14 @@ Só a dona do hub vê os racks e gera ou revoga o segredo. Gerar outro segredo i
 
 ## Várias VPS
 
-Todas as VPS usam o **mesmo segredo**. O que separa uma da outra é o campo `host` do envio: cada `host` vira um rack próprio na sala (até 20). Para somar uma VPS, instale o monitor nela com o mesmo segredo e um `host` diferente (o nome do servidor). Se gerar um novo segredo, todas as VPS precisam receber o novo.
+Cada `host` do envio vira um rack próprio na sala (até 20). Há dois tipos de segredo, gerados na janela do monitor (clique no rack):
+
+- **Segredo por servidor (recomendado):** gerado para um nome de `host` e válido **só para ele**. Se for usado com outro `host`, o hub responde `403`. Gerar outro substitui o anterior só daquele servidor; revogar derruba só ele (o rack some) e não afeta os demais.
+- **Segredo geral:** o de sempre, válido para qualquer `host`. Continua funcionando (por exemplo, para uma VPS que ainda não migrou). Trocar ou revogar o geral só afeta os servidores que enviam por ele.
+
+Cada card do servidor mostra se ele usa o segredo geral ou um próprio. O nome do servidor aceita letras, números, `.`, `_` e `-` (até 64) e pode haver até 20 servidores com segredo próprio. O valor do segredo aparece **uma única vez**, ao gerar: copie direto para a VPS por um canal seguro, nunca pelo chat. O hub guarda só o hash.
+
+Para migrar uma VPS do geral para o próprio: gere o segredo do servidor, grave-o na VPS e reinicie o monitor; depois que ela enviar com sucesso, o card passa a mostrar "segredo próprio".
 
 ## Requisição
 
@@ -84,4 +91,4 @@ As seis unidades do rack são, de cima para baixo: CPU, memória, disco, PM2, Do
 
 ## Armazenamento
 
-`data/monitor.json` guarda só o hash do segredo. Os resumos ficam em memória: depois de reiniciar o hub, cada rack volta no próximo envio.
+`data/monitor.json` guarda só os hashes dos segredos (o geral e os por servidor). Os resumos ficam em memória: depois de reiniciar o hub, cada rack volta no próximo envio.

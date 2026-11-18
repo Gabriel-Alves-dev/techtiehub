@@ -1213,25 +1213,30 @@ async function monitorReport(req, res) {
   if (req.method !== 'POST') return send(res, 405, { error: 'use POST' });
   const ip = clientIp(req);
   try { auth.guard(ip, 'monitor'); } catch (e) { return send(res, 429, { error: e.message }); }
-  if (!monitor.check(bearer(req))) {
+  const scope = monitor.scope(bearer(req)); // '*' = segredo geral; um nome = segredo próprio desse host
+  if (scope === null) {
     auth.fail(ip, 'monitor');
     return send(res, 401, { error: 'não autorizado' });
   }
   if (!String(req.headers['content-type']).startsWith('application/json')) return send(res, 415, { error: 'use Content-Type: application/json' });
   try {
     const body = await readBody(req, 32e3); // o v2 com 60 serviços chega a ~9 KB e, no pior caso, a ~19 KB
-    send(res, 200, { ok: true, host: monitor.ingest(body).host });
+    send(res, 200, { ok: true, host: monitor.ingest(body, scope).host });
   } catch (e) {
-    send(res, 400, { error: e.message });
+    send(res, e.code === 403 ? 403 : 400, { error: e.message });
   }
 }
 
 // /api/monitor — só a dona do hub: ver os servidores e gerar/revogar o segredo
-async function monitorApi(req, res, sub, user) {
+async function monitorApi(req, res, sub, user, url) {
   if (!user.isOwner) return send(res, 403, { error: 'só a dona do hub vê o monitor de servidores' });
-  if (!sub && req.method === 'GET') return send(res, 200, { configured: monitor.configured(), hosts: monitor.view(), now: Date.now() });
-  if (sub === 'secret' && req.method === 'POST') return send(res, 200, { secret: monitor.newSecret() });
-  if (sub === 'secret' && req.method === 'DELETE') { monitor.revoke(); return send(res, 204, {}); }
+  if (!sub && req.method === 'GET') return send(res, 200, { configured: monitor.configured(), secrets: monitor.secrets(), hosts: monitor.view(), now: Date.now() });
+  if (sub === 'secret' && req.method === 'POST') {
+    const body = (await readBody(req, 2e3)) || {}; // { host } opcional: com host, o segredo vale só para esse servidor
+    try { return send(res, 200, { secret: monitor.newSecret(body.host == null || body.host === '' ? null : body.host), host: body.host || null }); }
+    catch (e) { return send(res, 400, { error: e.message }); }
+  }
+  if (sub === 'secret' && req.method === 'DELETE') { monitor.revoke(url.searchParams.get('host')); return send(res, 204, {}); }
   send(res, 404, { error: 'rota desconhecida' });
 }
 
@@ -1265,7 +1270,7 @@ async function api(req, res, url) {
   if (resource === 'community') return communityApi(req, res, url, user);
   if (resource === 'team') return teamApi(req, res, url, user);
   if (resource === 'tasks') return tasksApi(req, res, url, user);
-  if (resource === 'monitor') return monitorApi(req, res, id, user);
+  if (resource === 'monitor') return monitorApi(req, res, id, user, url);
   return officeApi(req, res, url, getOffice(user.offices[0]), user);
 }
 

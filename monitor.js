@@ -84,37 +84,71 @@ class Monitor {
   }
 
   configured() {
-    return !!this.db.secretHash;
+    return !!this.db.secretHash || Object.keys(this.db.hostSecrets || {}).length > 0;
   }
 
-  // Gera (ou troca) o segredo. O valor só existe nesta resposta: o hub guarda apenas o hash.
-  newSecret() {
+  // Segredos: há o segredo geral (vale para qualquer host, como sempre foi) e, opcionalmente, um segredo por host, que só
+  // vale para o host a que foi dado. Revogar um não derruba os outros. O hub guarda só os hashes.
+  secrets() {
+    return {
+      general: this.db.secretHash ? { createdAt: this.db.createdAt || null } : null,
+      hosts: Object.entries(this.db.hostSecrets || {}).map(([host, v]) => ({ host, createdAt: v.createdAt })).sort((a, b) => a.host.localeCompare(b.host)),
+    };
+  }
+
+  // Gera (ou troca) um segredo. Sem `host`: o geral. Com `host`: o desse servidor. O valor só existe nesta resposta.
+  newSecret(host) {
     const secret = 'mon_' + crypto.randomBytes(32).toString('base64url');
-    this.db = { secretHash: sha(secret), createdAt: Date.now() };
+    if (host == null) {
+      this.db = { ...this.db, secretHash: sha(secret), createdAt: Date.now() };
+    } else {
+      const h = String(host);
+      if (!h || h !== h.replace(NAME_RE, '').slice(0, 64)) throw new Error('nome de servidor inválido (use letras, números, ponto, _ e -; até 64)');
+      const mine = this.db.hostSecrets || {};
+      if (!mine[h] && Object.keys(mine).length >= MAX_HOSTS) throw new Error('servidores demais com segredo próprio');
+      this.db = { ...this.db, hostSecrets: { ...mine, [h]: { hash: sha(secret), createdAt: Date.now() } } };
+    }
     this.save();
     return secret;
   }
 
-  revoke() {
-    this.db = {};
-    this.hosts.clear();
+  // Revoga o segredo geral (sem `host`) ou o de um servidor. Os racks que enviavam por ele somem; os dos outros segredos ficam.
+  revoke(host) {
+    if (host == null) {
+      const { secretHash, createdAt, ...rest } = this.db;
+      this.db = rest;
+      for (const [h, e] of this.hosts) if (e.via === '*') this.hosts.delete(h);
+    } else {
+      const { [host]: gone, ...rest } = this.db.hostSecrets || {};
+      this.db = { ...this.db, hostSecrets: rest };
+      for (const [h, e] of this.hosts) if (e.via === host) this.hosts.delete(h);
+    }
     this.save();
   }
 
+  // Quem é o dono deste segredo? '*' = o geral (qualquer host), um nome = só aquele host, null = não confere.
+  scope(secret) {
+    if (!secret) return null;
+    const a = Buffer.from(sha(secret), 'hex');
+    const same = (hash) => hash && crypto.timingSafeEqual(a, Buffer.from(hash, 'hex'));
+    let found = same(this.db.secretHash) ? '*' : null;
+    for (const [host, v] of Object.entries(this.db.hostSecrets || {})) if (same(v.hash) && !found) found = host; // percorre todos: tempo constante
+    return found;
+  }
+
   check(secret) {
-    if (!this.db.secretHash || !secret) return false;
-    const a = Buffer.from(sha(secret), 'hex'), b = Buffer.from(this.db.secretHash, 'hex');
-    return crypto.timingSafeEqual(a, b);
+    return this.scope(secret) !== null;
   }
 
   // Valida o corpo contra o contrato e guarda só o que ele prevê (o resto é descartado).
-  ingest(body) {
+  ingest(body, scope = '*') {
     const host = String(body?.host || '').replace(NAME_RE, '').slice(0, 64);
     if (!host) throw new Error('host é obrigatório');
+    if (scope !== '*' && scope !== host) { const e = new Error('este segredo não vale para o host "' + host + '"'); e.code = 403; throw e; }
     if (!this.hosts.has(host) && this.hosts.size >= MAX_HOSTS) throw new Error('hosts demais');
     if (body.v === 2) {
       const r2 = fromV2(body, host);
-      this.hosts.set(host, { report: r2, at: Date.now() });
+      this.hosts.set(host, { report: r2, at: Date.now(), via: scope });
       return r2;
     }
     const r = {
@@ -127,7 +161,7 @@ class Monitor {
       systemd: { total: num(body.systemd?.total, 0, 9999), failed: group(body.systemd?.failed) },
       ports: { exposed: num(body.ports?.exposed, 0, 65535) },
     };
-    this.hosts.set(host, { report: r, at: Date.now() });
+    this.hosts.set(host, { report: r, at: Date.now(), via: scope });
     return r;
   }
 
@@ -146,7 +180,7 @@ class Monitor {
   view() {
     const now = Date.now();
     return [...this.hosts.values()]
-      .map((e) => ({ ...e.report, at: e.at, status: Monitor.status(e, now) }))
+      .map((e) => ({ ...e.report, at: e.at, status: Monitor.status(e, now), own: e.via !== '*' })) // own: envia com segredo próprio
       .sort((a, b) => a.host.localeCompare(b.host));
   }
 }

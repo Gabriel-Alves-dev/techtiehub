@@ -811,7 +811,7 @@ async function loadMonitor() {
   try {
     const d = await api('GET', '/api/monitor', null, { quiet: true });
     const changed = d.hosts.length !== monitor.hosts.length;
-    monitor = { hosts: d.hosts, configured: d.configured, denied: false, at: Date.now() };
+    monitor = { hosts: d.hosts, configured: d.configured, secrets: d.secrets, denied: false, at: Date.now() };
     if (changed && world?.server) { world = computeWorld(); resize(); }
   } catch (e) {
     if (e.status === 403) monitor = { hosts: [], configured: false, denied: true, at: Date.now() };
@@ -2898,7 +2898,7 @@ function renderMonitor(win) {
   const url = location.origin + '/api/monitor/report';
   win.body.innerHTML = monitor.denied ? '<p class="muted">Só a dona do hub vê o monitor de servidores.</p>' : `
     ${hosts.map((h) => `<div class="card" style="border-left:4px solid ${MON_COLOR[h.status]}">
-      <div class="title mono">${esc(h.host)} <span class="badge" style="background:${MON_COLOR[h.status]};color:#000">${MON_LABEL[h.status]}</span></div>
+      <div class="title mono">${esc(h.host)} <span class="badge" style="background:${MON_COLOR[h.status]};color:#000">${MON_LABEL[h.status]}</span> <span class="muted" style="font-size:11px">${h.own ? '🔑 segredo próprio' : 'segredo geral'}</span></div>
       <div class="sub">Último envio há ${since(h.at)} (a cada ${h.interval}s) · ligado há ${uptimeText(h.uptime)}</div>
       <div class="sub">Carga 1 min (% dos vCPUs${h.cpus ? `, ${h.cpus} vCPUs` : ''}) <b>${h.cpu ?? '—'}%</b> · memória <b>${h.mem ?? '—'}%</b>${h.memTotalMb ? ` de ${Math.round(h.memTotalMb / 1024 * 10) / 10} GB` : ''} · disco <b>${h.disk ?? '—'}%</b>${h.swap != null ? ` · swap <b>${h.swap}%</b>` : ''}</div>
       <div class="sub">PM2: ${h.pm2.total} processos · Docker${h.v === 2 ? '/Swarm' : ''}: ${h.docker.total} ${h.v === 2 ? 'itens' : 'containers'} · systemd: ${h.systemd.total ?? '—'} ${h.v === 2 ? 'unidades listadas' : 'serviços'} · portas expostas: ${h.ports.exposed ?? '—'}${h.ports.listening != null ? ` (de ${h.ports.listening} abertas)` : ''}</div>
@@ -2910,11 +2910,18 @@ function renderMonitor(win) {
     </div>`).join('') || '<p class="muted">Nenhum servidor enviou dados ainda.</p>'}
     <h3>Conexão</h3>
     <p class="muted">A VPS envia um resumo para o hub (o hub nunca acessa a VPS). Endereço:
-      <code>${esc(url)}</code><br>Cabeçalho: <code>Authorization: Bearer &lt;segredo&gt;</code>, JSON de até 16 KB.</p>
-    ${win.secret ? `<div class="card"><div class="sub"><b>Segredo (aparece só agora — copie e guarde na VPS, não no chat):</b></div>
+      <code>${esc(url)}</code><br>Cabeçalho: <code>Authorization: Bearer &lt;segredo&gt;</code>, JSON de até 32 KB.</p>
+    ${win.secret ? `<div class="card"><div class="sub"><b>Segredo${win.secretHost ? ` do servidor <span class="mono">${esc(win.secretHost)}</span>` : ' geral'} (aparece só agora — copie e guarde na VPS, não no chat):</b></div>
       <div class="title mono" style="word-break:break-all;user-select:all">${esc(win.secret)}</div></div>` : ''}
-    <div class="row"><button class="primary" data-act="secret">${monitor.configured ? 'Gerar novo segredo' : 'Gerar segredo'}</button>
-      ${monitor.configured ? '<button class="danger" data-act="revoke">Revogar</button>' : ''}</div>`;
+    <h3>Segredo por servidor</h3>
+    <p class="muted">Cada servidor pode ter o seu segredo, que só vale para o nome (<code>host</code>) dele: revogar um não derruba os outros. O segredo geral continua valendo para qualquer servidor.</p>
+    ${(monitor.secrets?.hosts || []).map((s) => `<div class="card"><div class="title mono">${esc(s.host)} <span class="muted" style="font-size:11px">criado ${s.createdAt ? new Date(s.createdAt).toLocaleDateString('pt-BR') : ''}</span></div>
+      <div class="row"><button data-act="host-secret" data-host="${esc(s.host)}">Gerar novo</button><button class="danger" data-act="host-revoke" data-host="${esc(s.host)}">Revogar</button></div></div>`).join('')}
+    <div class="row"><input data-host-name placeholder="nome do servidor (host), ex.: srv1854371" maxlength="64" style="flex:1" />
+      <button class="primary" data-act="host-new">Gerar segredo do servidor</button></div>
+    <h3>Segredo geral</h3>
+    <div class="row"><button class="primary" data-act="secret">${monitor.secrets?.general ? 'Gerar novo segredo geral' : 'Gerar segredo geral'}</button>
+      ${monitor.secrets?.general ? '<button class="danger" data-act="revoke">Revogar o geral</button>' : ''}</div>`;
 }
 
 function openMonitorWindow(host) {
@@ -2923,17 +2930,25 @@ function openMonitorWindow(host) {
     win.render = renderMonitor;
     win.body.onclick = async (e) => {
       const act = e.target.dataset.act;
+      const host = e.target.dataset.host || (act === 'host-new' ? win.body.querySelector('[data-host-name]').value.trim() : '');
       if (act === 'secret') {
-        if (monitor.configured && !confirm('Gerar um novo segredo? O monitor atual deixa de ser aceito até você trocar o segredo nele.')) return;
-        win.secret = (await api('POST', '/api/monitor/secret')).secret;
-        monitor.configured = true;
+        if (monitor.secrets?.general && !confirm('Gerar um novo segredo geral? Os servidores que usam o geral deixam de ser aceitos até você trocar o segredo neles (os que têm segredo próprio não são afetados).')) return;
+        win.secret = (await api('POST', '/api/monitor/secret', {})).secret; win.secretHost = null;
+      } else if (act === 'host-new' || act === 'host-secret') {
+        if (!host) return alert('Digite o nome do servidor (o campo "host" que o monitor envia).');
+        if (act === 'host-secret' && !confirm(`Gerar um novo segredo para "${host}"? O monitor desse servidor deixa de ser aceito até você trocar o segredo nele.`)) return;
+        win.secret = (await api('POST', '/api/monitor/secret', { host })).secret; win.secretHost = host;
       } else if (act === 'revoke') {
-        if (!confirm('Revogar o segredo? O monitor para de enviar dados e os racks somem.')) return;
+        if (!confirm('Revogar o segredo geral? Os servidores que usam o geral deixam de enviar e os racks deles somem (os que têm segredo próprio continuam).')) return;
         await api('DELETE', '/api/monitor/secret');
         win.secret = null;
-        monitor = { ...monitor, configured: false, hosts: [] };
-        world = computeWorld(); resize();
+      } else if (act === 'host-revoke') {
+        if (!confirm(`Revogar o segredo de "${host}"? Esse servidor deixa de enviar e o rack dele some.`)) return;
+        await api('DELETE', '/api/monitor/secret?host=' + encodeURIComponent(host));
+        win.secret = null;
       } else return;
+      await loadMonitor();
+      if (world?.server) { world = computeWorld(); resize(); }
       renderMonitor(win);
     };
   });
