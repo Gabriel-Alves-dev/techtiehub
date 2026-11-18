@@ -757,6 +757,8 @@ function drawRest({ y0 }, now, occupied) {
 // ---------- Sala de servidores ----------
 const MON_COLOR = { ok: '#3fbf7f', atencao: '#f2a93b', critico: '#e5534b', 'sem-sinal': '#6b7088' };
 const MON_LABEL = { ok: 'OK', atencao: 'ATENCAO', critico: 'CRITICO', 'sem-sinal': 'SEM SINAL' }; // sem acento: a fonte pixel não tem
+// a carga (load ÷ vCPUs) sozinha só chega a ATENÇÃO: ela sobe com o steal do hypervisor mesmo com a VM quase ociosa
+const loadLevel = (v) => (v == null ? '#6b7088' : v >= 75 ? MON_COLOR.atencao : MON_COLOR.ok);
 const level = (v, warn, crit) => (v == null ? '#6b7088' : v >= crit ? MON_COLOR.critico : v >= warn ? MON_COLOR.atencao : MON_COLOR.ok);
 const RACK_W = 3 * T, RACK_H = 6 * T;
 const rackPos = (i) => ({ x: (world.rackX0 + i * 4) * T, y: (WALL_H + 1) * T });
@@ -780,7 +782,7 @@ function drawRacks(now) {
     rect(x, y, RACK_W, RACK_H, '#1c1f2b');
     // seis unidades: CPU, memória, disco, PM2, Docker e systemd, cada uma com a cor do seu estado
     const unit = [
-      [level(h.cpu, 75, 90), h.cpu == null ? 0 : Math.min(1, h.cpu / 100)],
+      [loadLevel(h.cpu), h.cpu == null ? 0 : Math.min(1, h.cpu / 100)],
       [level(h.mem, 80, 90), h.mem == null ? 0 : h.mem / 100],
       [level(h.disk, 80, 90), h.disk == null ? 0 : h.disk / 100],
       [h.pm2.errored.count ? MON_COLOR.critico : h.pm2.highRestarts.count ? MON_COLOR.atencao : MON_COLOR.ok, null],
@@ -1101,11 +1103,11 @@ function activityEmoji(a, rt, now, talkers) {
 }
 
 // vista 3D da sala de servidores: racks em fileiras de até 6 (o 2D coloca todos lado a lado, o que fica largo demais)
-const SV3D_COLS = 6, SV3D_ROW = 5.2;
+const SV3D_COLS = 6, SV3D_ROW = 5.2, SV3D_PITCH = 3;
 function svLayout3D() {
   const n = monitor.hosts.length, cols = Math.max(1, Math.min(SV3D_COLS, n)), rows = Math.max(1, Math.ceil(n / cols));
-  const W = Math.max(14, cols * 4 + 3);
-  return { W, H: WALL_H + 9 + (rows - 1) * SV3D_ROW, rackX0: 1 + Math.floor(((W - 2) - (cols * 4 - 1)) / 2) };
+  const W = Math.max(9, cols * SV3D_PITCH + 3); // sala justa ao redor dos racks: com poucos hosts eles aparecem maiores
+  return { W, H: WALL_H + 7 + (rows - 1) * SV3D_ROW, x0: W / 2 - ((cols - 1) * SV3D_PITCH) / 2 }; // x0: centro do primeiro rack
 }
 
 // resumo de cada unidade do rack (CPU, memória, disco, PM2, Docker e systemd) para a vista 3D
@@ -1120,7 +1122,7 @@ function rackUnits(h) {
     noteColor: bad.count ? MON_COLOR.critico : MON_COLOR.atencao,
   });
   return [
-    { name: 'CPU', text: pct(h.cpu), fill: fill(h.cpu), color: level(h.cpu, 75, 90) },
+    { name: 'CARGA', text: pct(h.cpu), fill: fill(h.cpu), color: loadLevel(h.cpu) },
     { name: 'MEMÓRIA', text: pct(h.mem), fill: fill(h.mem), color: level(h.mem, 80, 90) },
     { name: 'DISCO', text: pct(h.disk), fill: fill(h.disk), color: level(h.disk, 80, 90) },
     grp('PM2', h.pm2.total, h.pm2.errored, h.pm2.highRestarts, 'com erro', 'reiniciando'),
@@ -1147,13 +1149,13 @@ function snapshot3D(now) {
   const talkers = vis.filter((a) => runtime.get(a.id)?.atSpot?.act === 'reuniao').map((a) => a.id);
   const h = new Date().getHours();
   return {
-    W: world.server ? svLayout3D().W : world.W, H: world.server ? svLayout3D().H : world.H, L: world.L, floor: world.floor,
+    W: world.server ? svLayout3D().W : world.W, H: world.server ? svLayout3D().H : world.H, L: world.server ? (svLayout3D().W - 1) * T : world.L, floor: world.floor, // sala de servidores: o 3D tem tamanho próprio, o L do 2D deslocava a câmera do celular
     floorColors: FLOORS[world.floor] || FLOORS.madeira, wallColors: WALLS[world.wall] || WALLS.cinza,
     blocks: world.blocks, spots: world.spots, desks,
     decor: world.server ? [] : roomDecor().filter(decorFits),
     server: world.server ? {
-      racks: monitor.hosts.map((h, i) => ({ host: h.host, status: h.status, cpu: h.cpu, units: rackUnits(h), col: i % SV3D_COLS, row: Math.floor(i / SV3D_COLS) })),
-      rackX0: svLayout3D().rackX0, rowGap: SV3D_ROW,
+      racks: monitor.hosts.map((h, i) => ({ host: h.host, status: h.status, cpu: h.cpu, uptime: h.uptime, units: rackUnits(h), col: i % SV3D_COLS, row: Math.floor(i / SV3D_COLS) })),
+      x0: svLayout3D().x0, pitch: SV3D_PITCH, rowGap: SV3D_ROW,
       msg: monitor.denied ? 'SÓ A DONA DO HUB VÊ' : monitor.configured ? 'AGUARDANDO DADOS' : 'SEM MONITOR',
       hover: hover?.kind === 'rack' ? hover.host ?? '' : undefined, // '' = rack vazio (configurar)
     } : undefined,
@@ -1408,7 +1410,7 @@ const onCanvasMove = (ev) => {
   let html;
   if (hover.kind === 'rack') {
     const h = monitor.hosts.find((x) => x.host === hover.host);
-    html = h ? `<b>${esc(h.host)}</b><br>${MON_LABEL[h.status]} · CPU ${h.cpu ?? '?'}% · RAM ${h.mem ?? '?'}% · disco ${h.disk ?? '?'}%` : 'Monitor de servidores';
+    html = h ? `<b>${esc(h.host)}</b><br>${MON_LABEL[h.status]} · carga 1 min ${h.cpu ?? '?'}% dos vCPUs · RAM ${h.mem ?? '?'}% · disco ${h.disk ?? '?'}%` : 'Monitor de servidores';
   } else if (hover.kind === 'agent') {
     const a = state.agents.find((x) => x.id === hover.id);
     html = `<b>${esc(a.name)}</b> · ${esc(a.role || '')}<br>${STATUS[a.status]?.label || ''}${a.message ? ' — ' + esc(a.message) : ''}`;
@@ -2863,6 +2865,34 @@ const uptimeText = (s) => (s == null ? '—' : s >= 86400 ? `${Math.floor(s / 86
 const monItems = (label, g) => `<div class="sub">${label}: ${!g.count ? '<span style="color:var(--ok)">nenhum</span>'
   : g.names.length ? `<b>${g.names.map(esc).join(', ')}</b>` : `<b>${g.count}</b> (o monitor não envia os nomes)`}</div>`;
 
+
+// tabela por serviço (envio v2): origem, nome, status, saúde, CPU (% de UM núcleo, sem corte em 100), memória e reinícios/réplicas
+const SVC_STATUS = { online: 'online', running: 'rodando', active: 'ativo', launching: 'iniciando', stopped: 'parado', inactive: 'inativo', exited: 'saiu', restarting: 'reiniciando', errored: 'erro', failed: 'falhou', other: 'outro' };
+const svcBad = (x) => x.status === 'errored' || x.status === 'failed' || x.health === 'unhealthy';
+const svcWarn = (x) => x.status === 'restarting' || x.status === 'exited' || x.status === 'stopped' || x.status === 'other';
+function servicesTable(h) {
+  if (!h.services?.length) return h.v === 2 ? '<div class="sub">Nenhum serviço listado neste envio.</div>' : '';
+  const num = (v, suf = '') => (v == null ? '—' : `${v}${suf}`);
+  const mem = (v) => (v == null ? '—' : v >= 1024 ? `${(v / 1024).toFixed(1)} GB` : `${Math.round(v)} MB`);
+  const rows = h.services.map((x) => {
+    const col = svcBad(x) ? MON_COLOR.critico : svcWarn(x) ? MON_COLOR.atencao : MON_COLOR.ok;
+    const saude = x.health === 'ok' ? 'ok' : x.health === 'unhealthy' ? 'sem saúde' : x.health || '—';
+    const extra = x.replicas ? `${x.replicas} réplicas` : x.instances != null ? `${x.instances} inst.` : '';
+    return `<tr>
+      <td><span class="src">${esc(x.src)}</span></td>
+      <td class="mono">${esc(x.name)}${x.project && x.project !== x.name ? `<div class="muted">${esc(x.project)}</div>` : ''}</td>
+      <td style="color:${col}"><b>${esc(SVC_STATUS[x.status] || x.status)}</b></td>
+      <td style="color:${x.health === 'unhealthy' ? MON_COLOR.critico : 'inherit'}">${esc(saude)}</td>
+      <td class="r">${num(x.cpu_core_pct, '%')}</td>
+      <td class="r">${mem(x.mem_mb)}</td>
+      <td class="r">${x.restarts == null ? '—' : esc(x.restarts)}${extra ? `<div class="muted">${esc(extra)}</div>` : ''}</td></tr>`;
+  }).join('');
+  return `<div class="svc-wrap"><table class="svc">
+    <thead><tr><th>Origem</th><th>Serviço</th><th>Status</th><th>Saúde</th><th class="r" title="% de um núcleo: acima de 100% é normal em serviço com mais de uma thread">CPU/núcleo</th><th class="r">Memória</th><th class="r" title="Acumulados desde o boot; o Docker e o Swarm não informam">Reinícios</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>
+    ${h.truncated ? '<div class="sub" style="color:var(--warn,#f2a93b)">Lista cortada em 60 itens: os que têm problema vêm primeiro, os demais podem não aparecer.</div>' : ''}`;
+}
+
 function renderMonitor(win) {
   const hosts = [...monitor.hosts].sort((a, b) => (a.host === win.first ? -1 : b.host === win.first ? 1 : 0));
   const url = location.origin + '/api/monitor/report';
@@ -2870,12 +2900,13 @@ function renderMonitor(win) {
     ${hosts.map((h) => `<div class="card" style="border-left:4px solid ${MON_COLOR[h.status]}">
       <div class="title mono">${esc(h.host)} <span class="badge" style="background:${MON_COLOR[h.status]};color:#000">${MON_LABEL[h.status]}</span></div>
       <div class="sub">Último envio há ${since(h.at)} (a cada ${h.interval}s) · ligado há ${uptimeText(h.uptime)}</div>
-      <div class="sub">CPU (carga ÷ vCPUs) <b>${h.cpu ?? '—'}%</b> · memória <b>${h.mem ?? '—'}%</b> · disco <b>${h.disk ?? '—'}%</b></div>
-      <div class="sub">PM2: ${h.pm2.total} processos · Docker: ${h.docker.total} containers · systemd: ${h.systemd.total ?? '—'} serviços · portas expostas: ${h.ports.exposed ?? '—'}</div>
+      <div class="sub">Carga 1 min (% dos vCPUs${h.cpus ? `, ${h.cpus} vCPUs` : ''}) <b>${h.cpu ?? '—'}%</b> · memória <b>${h.mem ?? '—'}%</b>${h.memTotalMb ? ` de ${Math.round(h.memTotalMb / 1024 * 10) / 10} GB` : ''} · disco <b>${h.disk ?? '—'}%</b>${h.swap != null ? ` · swap <b>${h.swap}%</b>` : ''}</div>
+      <div class="sub">PM2: ${h.pm2.total} processos · Docker${h.v === 2 ? '/Swarm' : ''}: ${h.docker.total} ${h.v === 2 ? 'itens' : 'containers'} · systemd: ${h.systemd.total ?? '—'} ${h.v === 2 ? 'unidades listadas' : 'serviços'} · portas expostas: ${h.ports.exposed ?? '—'}${h.ports.listening != null ? ` (de ${h.ports.listening} abertas)` : ''}</div>
       ${monItems('PM2 com erro', h.pm2.errored)}
       ${monItems('PM2 com muitos reinícios (acumulados desde o boot)', h.pm2.highRestarts)}
       ${monItems('Containers unhealthy', h.docker.unhealthy)}
       ${monItems('Serviços systemd em falha', h.systemd.failed)}
+      ${servicesTable(h)}
     </div>`).join('') || '<p class="muted">Nenhum servidor enviou dados ainda.</p>'}
     <h3>Conexão</h3>
     <p class="muted">A VPS envia um resumo para o hub (o hub nunca acessa a VPS). Endereço:
@@ -2887,7 +2918,7 @@ function renderMonitor(win) {
 }
 
 function openMonitorWindow(host) {
-  const win = openWindow('monitor', { w: 520, h: 620, cls: 'win-vars' }, (win) => {
+  const win = openWindow('monitor', { w: 680, h: 640, cls: 'win-vars' }, (win) => {
     win.titleEl.textContent = '🖥️ Servidores';
     win.render = renderMonitor;
     win.body.onclick = async (e) => {

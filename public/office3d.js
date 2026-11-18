@@ -823,7 +823,7 @@ export function create3D({ canvas, wrap, onDrag }) {
     const dt = Math.min(0.1, (now - (state.lastNow || now)) / 1000);
     state.lastNow = now; state.lastFrame = now;
 
-    const key = JSON.stringify([s.W, s.H, s.L, s.floor, s.wallColors, s.blocks, s.desks.map((d) => [d.id, d.name, d.color, d.x, d.y, !!d.empty, !!d.isNew]), s.decor, s.spots.length, s.server ? [s.server.msg, s.server.rackX0, s.server.racks.map((r) => r.host)] : 0]);
+    const key = JSON.stringify([s.W, s.H, s.L, s.floor, s.wallColors, s.blocks, s.desks.map((d) => [d.id, d.name, d.color, d.x, d.y, !!d.empty, !!d.isNew]), s.decor, s.spots.length, s.server ? [s.server.msg, s.server.x0, s.server.pitch, s.server.racks.map((r) => r.host)] : 0]);
     if (key !== state.key) { state.key = key; resize(); build(s); }
 
     if (s.server) return renderServer(s, now, dt);

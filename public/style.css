@@ -330,6 +330,13 @@ input, textarea, select {
   border: 2px solid var(--line);
 }
 input[type='color'] { height: 36px; padding: 2px; }
+.svc-wrap { margin-top: 8px; max-height: 260px; overflow: auto; border: 1px solid #ffffff14; border-radius: 6px; }
+.svc { width: 100%; border-collapse: collapse; font-size: 12px; }
+.svc th, .svc td { padding: 4px 7px; text-align: left; vertical-align: top; border-bottom: 1px solid #ffffff0d; }
+.svc th { position: sticky; top: 0; background: var(--panel-2, #1c2030); font-weight: 600; color: var(--muted, #9097b0); white-space: nowrap; }
+.svc .r { text-align: right; white-space: nowrap; }
+.svc .muted { font-size: 10px; opacity: .7; }
+.svc .src { white-space: nowrap; display: inline-block; padding: 1px 6px; border-radius: 4px; background: #ffffff14; font-size: 10px; text-transform: uppercase; }
 .colors { display: flex; gap: 8px; }
 .auto-check { display: block; margin-top: 2px; font-size: 11px; color: var(--muted, #9097b0); }
 .auto-check input { width: auto; margin: 0 3px 0 0; vertical-align: middle; }

@@ -10,11 +10,20 @@ const STATUS_COLOR = { ok: OKC, atencao: WARN, critico: CRIT, 'sem-sinal': IDLE 
 const STATUS_LABEL = { ok: 'OK', atencao: 'ATENÇÃO', critico: 'CRÍTICO', 'sem-sinal': 'SEM SINAL' };
 const ORDER = ['ok', 'atencao', 'critico', 'sem-sinal'];
 
-// medidas do rack (unidades do mundo = tiles)
-const RW = 2.3, RD = 1.4, IH = 2.6, BASE = 0.12, TOPY = BASE + IH + 0.1;
-const PW = RW - 0.38, UH = (IH - 0.1) / 6, PH = UH * 6; // painel da frente: largura, altura de uma unidade e total
-const CW = 512, CH = Math.round((CW * PH) / PW); // textura da frente
-const ZF = RD / 2 - 0.1; // face das unidades
+// medidas do rack (unidades do mundo = tiles; 1 tile ≈ 1 m, então o rack fica com ~2,8 de altura, como um de 42U)
+const RW = 1.6, RD = 1.2, BASE = 0.14;
+const PW = 1.3, OW = RW - 0.12; // largura do equipamento e do painel da frente (que inclui os trilhos furados)
+const GAP = 0.012;
+// de cima para baixo: patch panel, switch, seis servidores (um por métrica), etiqueta com o nome e nobreak
+const SLOTS = [
+  { k: 'patch', h: 0.15 }, { k: 'switch', h: 0.15 },
+  ...[0, 1, 2, 3, 4, 5].map((i) => ({ k: 'srv', i, h: 0.28 })),
+  { k: 'blank', h: 0.09 }, { k: 'ups', h: 0.34 },
+];
+const PH = SLOTS.reduce((a, s) => a + s.h + GAP, GAP); // altura do conjunto de equipamentos
+const IH = PH + 0.06, TOPY = BASE + IH + 0.06, PTOP = BASE + IH - 0.03; // interior, face de cima do teto e topo do conjunto
+const LAYOUT = (() => { let y = PTOP - GAP; return SLOTS.map((s) => { const o = { ...s, yTop: y, yc: y - s.h / 2 }; y -= s.h + GAP; return o; }); })();
+const CABLES = [{ p: 1, s: 2, c: '#4f8cff' }, { p: 4, s: 5, c: '#f2a93b' }, { p: 9, s: 8, c: '#3fbf7f' }, { p: 13, s: 10, c: '#e5534b' }]; // patch → switch
 const FONT = 'Inter, system-ui, sans-serif';
 
 let glowTex = null;
@@ -35,36 +44,111 @@ const glowSprite = (U, color, size, opacity = 1) => {
 const basic = (color, o = {}) => new THREE.MeshBasicMaterial({ color, toneMapped: false, ...o });
 
 // ---------- texturas ----------
-// frente do rack: nome, valor e barra de cada unidade (os LEDs, que piscam, são malhas à parte)
-function drawFront(g, w, h, units, stale) {
+// frente do rack: cada equipamento é desenhado numa textura só (a tela LCD dos servidores muda com os dados; os LEDs, que piscam,
+// são malhas à parte). Tudo em pixels de um desenho-base de 562 px de largura para o equipamento (k ajusta ao tamanho real).
+const rr = (g, x, y, w, h, r, fill, stroke, lw = 1.5) => {
+  g.beginPath(); g.roundRect(x, y, w, h, r);
+  if (fill) { g.fillStyle = fill; g.fill(); }
+  if (stroke) { g.strokeStyle = stroke; g.lineWidth = lw; g.stroke(); }
+};
+const uptimeLabel = (sec) => {
+  if (!Number.isFinite(sec)) return '--';
+  const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600);
+  return d ? `${d}d ${h}h` : h ? `${h}h` : '<1h';
+};
+
+// barra da tela: percentual (CPU, memória, disco) ou segmentos (um por processo/contêiner/serviço, os ruins primeiro)
+function bar(g, x, y, w, h, u, stale) {
+  rr(g, x, y, w, h, h / 2, '#0b0d14');
+  if (u.fill != null) { if (u.fill > 0) rr(g, x, y, Math.max(h, w * u.fill), h, h / 2, stale ? '#4a4f66' : u.color); return; }
+  const n = Math.min(u.total || 0, 24);
+  if (!n) return;
+  const gap = 2, sw = (w - gap * (n - 1)) / n;
+  for (let k = 0; k < n; k++) {
+    g.fillStyle = stale ? '#4a4f66' : k < (u.bad || 0) ? CRIT : k < (u.bad || 0) + (u.warn || 0) ? WARN : '#2f8a5f';
+    g.fillRect(x + k * (sw + gap), y, sw, h);
+  }
+}
+
+function drawServer(g, x0, y0, w, h, u, stale, idx) {
+  const k = w / 562, X = (v) => x0 + v * k;
+  for (let r = 0; r < 2; r++) for (let c = 0; c < 4; c++) { // baias de disco: 2 fileiras de 4, com frestas e um LED
+    const bx = X(40 + c * 44), by = y0 + h * (0.17 + r * 0.36), bw = 38 * k, bh = h * 0.29;
+    rr(g, bx, by, bw, bh, 2 * k, '#0a0c13', '#3f476a', 1.3);
+    g.fillStyle = '#1b2033';
+    for (let l = 0; l < 3; l++) g.fillRect(bx + 4 * k, by + (4 + l * 5) * k * 0.9, bw - 14 * k, 1.4);
+    g.fillStyle = stale ? '#3a3f55' : (c + r * 4 + idx) % 6 === 0 ? WARN : '#2f8a5f';
+    g.beginPath(); g.arc(bx + bw - 6 * k, by + bh - 5 * k, 2.2 * k, 0, 7); g.fill();
+  }
+  // tela LCD: nome da métrica, valor, aviso (quando há) e a barra
+  const lx = X(228), lw = 214 * k, ly = y0 + h * 0.13, lh = h * 0.74;
+  rr(g, lx, ly, lw, lh, 6 * k, '#04060c', stale ? '#33384e' : '#56628d', 2);
+  g.textBaseline = 'middle'; g.textAlign = 'left';
+  g.font = `700 ${Math.round(lh * 0.22)}px ${FONT}`; g.fillStyle = stale ? '#6b7088' : '#9fb0e0'; g.fillText(u.name, lx + 12 * k, ly + lh * 0.24);
+  g.textAlign = 'right'; g.font = `700 ${Math.round(lh * 0.34)}px ${FONT}`; g.fillStyle = stale ? '#6b7088' : '#ffffff'; g.fillText(u.text, lx + lw - 12 * k, ly + lh * 0.27);
+  if (u.note) { g.textAlign = 'left'; g.font = `600 ${Math.round(lh * 0.17)}px ${FONT}`; g.fillStyle = stale ? '#6b7088' : u.noteColor || WARN; g.fillText(u.note, lx + 12 * k, ly + lh * 0.55); }
+  bar(g, lx + 12 * k, ly + lh * 0.7, lw - 24 * k, lh * 0.15, u, stale);
+  // botão de energia e grade de ventilação
+  g.fillStyle = '#0a0c13'; g.strokeStyle = '#6b7498'; g.lineWidth = 2;
+  g.beginPath(); g.arc(X(468), y0 + h * 0.3, h * 0.12, 0, 7); g.fill(); g.stroke();
+  g.fillStyle = stale ? '#4a4f66' : '#9fb0e0'; g.fillRect(X(468) - 1.2, y0 + h * 0.3 - h * 0.08, 2.4, h * 0.09);
+  g.fillStyle = '#0a0c13';
+  for (let r = 0; r < 5; r++) for (let c = 0; c < 4; c++) g.fillRect(X(500 + c * 10), y0 + h * (0.18 + r * 0.14), 6 * k, h * 0.07);
+}
+
+function drawPatch(g, x0, y0, w, h, stale) {
+  const k = w / 562, X = (v) => x0 + v * k;
+  for (let i = 0; i < 24; i++) { // 24 portas, algumas com cabo
+    const px = X(34 + i * 20.3), py = y0 + h * 0.3, pw = 16 * k, ph = h * 0.42;
+    rr(g, px, py, pw, ph, 2 * k, '#07090f', '#5a6590', 1.2);
+    const cab = CABLES.find((q) => q.p === i);
+    if (cab || [6, 16, 20, 22].includes(i)) { g.fillStyle = stale ? '#4a4f66' : cab ? cab.c : '#8d95b0'; g.fillRect(px + 2 * k, py + ph * 0.25, pw - 4 * k, ph * 0.6); }
+  }
+}
+
+function drawSwitch(g, x0, y0, w, h, stale) {
+  const k = w / 562, X = (v) => x0 + v * k;
+  for (let r = 0; r < 2; r++) for (let c = 0; c < 12; c++) { // 2 fileiras de 12 portas com LED de atividade
+    const px = X(40 + c * 24), py = y0 + h * (0.14 + r * 0.42), pw = 19 * k, ph = h * 0.3;
+    rr(g, px, py, pw, ph, 1.5 * k, '#07090f', '#5a6590', 1);
+    const cab = r === 0 ? CABLES.find((q) => q.s === c) : null;
+    if (cab) { g.fillStyle = stale ? '#4a4f66' : cab.c; g.fillRect(px + 2 * k, py + ph * 0.2, pw - 4 * k, ph * 0.7); }
+    g.fillStyle = stale ? '#33364a' : (c * 7 + r * 3) % 5 === 0 ? WARN : '#3fbf7f';
+    g.fillRect(px + pw / 2 - 1.5 * k, py - h * 0.075, 3 * k, h * 0.05);
+  }
+  for (let c = 0; c < 4; c++) rr(g, X(340 + c * 28), y0 + h * 0.3, 22 * k, h * 0.4, 2 * k, '#07090f', '#7a86b5', 1.2); // portas SFP
+}
+
+function drawUps(g, x0, y0, w, h, stale, up) {
+  const k = w / 562, X = (v) => x0 + v * k;
+  rr(g, X(36), y0 + h * 0.14, 250 * k, h * 0.72, 6 * k, '#04100c', stale ? '#33384e' : '#2f8a5f', 2);
+  g.textBaseline = 'middle'; g.textAlign = 'left';
+  g.font = `700 ${Math.round(h * 0.15)}px ${FONT}`; g.fillStyle = stale ? '#6b7088' : '#6fe3a4'; g.fillText('UPTIME', X(52), y0 + h * 0.3);
+  g.font = `700 ${Math.round(h * 0.32)}px ${FONT}`; g.fillStyle = stale ? '#6b7088' : '#ffffff'; g.fillText(up, X(52), y0 + h * 0.6);
+  g.fillStyle = '#0a0c13';
+  for (let l = 0; l < 7; l++) g.fillRect(X(310), y0 + h * (0.16 + l * 0.105), 190 * k, 3.5 * k); // frestas de ventilação
+}
+
+function drawBlank(g, x0, y0, w, h, host, stale) { // etiqueta com o nome do servidor
+  rr(g, x0 + w * 0.22, y0 + h * 0.12, w * 0.56, h * 0.76, 4, '#05070d', '#3f476a', 1.2);
+  g.textAlign = 'center'; g.textBaseline = 'middle'; g.font = `700 ${Math.round(h * 0.5)}px ${FONT}`; g.fillStyle = stale ? '#6b7088' : '#c3cbe3';
+  g.fillText(host.toUpperCase().slice(0, 18), x0 + w / 2, y0 + h * 0.54);
+}
+
+function drawFront(g, w, h, ppu, units, stale, info) {
   g.clearRect(0, 0, w, h);
-  const uh = h / 6;
-  units.forEach((u, i) => {
-    const y0 = i * uh, col = stale ? '#4a4f66' : u.color;
-    g.fillStyle = '#0b0d14'; g.beginPath(); g.arc(48, y0 + uh / 2, 15, 0, 7); g.fill(); // soquete do LED
-    g.textBaseline = 'middle'; g.textAlign = 'left';
-    g.font = `700 28px ${FONT}`; g.fillStyle = stale ? '#6b7088' : '#c3cbe3'; g.fillText(u.name, 84, y0 + uh * 0.3);
-    if (u.note) { // aviso ao lado do nome (ex.: "2 com erro · api")
-      const nx = 84 + g.measureText(u.name).width + 18;
-      g.font = `600 21px ${FONT}`; g.fillStyle = stale ? '#6b7088' : u.noteColor || WARN; g.fillText(u.note, nx, y0 + uh * 0.3 + 1);
-    }
-    g.textAlign = 'right'; g.font = `700 32px ${FONT}`; g.fillStyle = stale ? '#6b7088' : '#ffffff'; g.fillText(u.text, w - 34, y0 + uh * 0.3);
-    // barra: percentual (CPU, memória, disco) ou segmentos (um por processo/contêiner/serviço, os ruins primeiro)
-    const bx = 84, bw = w - 84 - 34, by = y0 + uh * 0.58, bh = 15;
-    g.fillStyle = '#0b0d14'; g.beginPath(); g.roundRect(bx, by, bw, bh, 7); g.fill();
-    if (u.fill != null) {
-      if (u.fill > 0) { g.fillStyle = col; g.beginPath(); g.roundRect(bx, by, Math.max(10, bw * u.fill), bh, 7); g.fill(); }
-    } else {
-      const n = Math.min(u.total || 0, 24);
-      if (n > 0) {
-        const gap = 3, sw = (bw - gap * (n - 1)) / n;
-        for (let k = 0; k < n; k++) {
-          g.fillStyle = stale ? '#4a4f66' : k < (u.bad || 0) ? CRIT : k < (u.bad || 0) + (u.warn || 0) ? WARN : '#2f8a5f';
-          g.fillRect(bx + k * (sw + gap), by, sw, bh);
-        }
-      }
-    }
-  });
+  const ew = PW * ppu, x0 = (w - ew) / 2;
+  g.fillStyle = '#3d4566'; g.fillRect(0, 0, x0, h); g.fillRect(w - x0, 0, x0, h); // trilhos
+  g.fillStyle = '#0d1019'; // furos quadrados dos trilhos
+  for (let y = ppu * 0.035; y < h - 4; y += ppu * 0.07) { g.fillRect(x0 / 2 - 4, y, 8, 10); g.fillRect(w - x0 / 2 - 4, y, 8, 10); }
+  for (const s of LAYOUT) {
+    const y0 = (PTOP - s.yTop) * ppu, sh = s.h * ppu;
+    if (s.k === 'srv') drawServer(g, x0, y0, ew, sh, units[s.i], stale, s.i);
+    else if (s.k === 'patch') drawPatch(g, x0, y0, ew, sh, stale);
+    else if (s.k === 'switch') drawSwitch(g, x0, y0, ew, sh, stale);
+    else if (s.k === 'ups') drawUps(g, x0, y0, ew, sh, stale, info.up);
+    else drawBlank(g, x0, y0, ew, sh, info.host, stale);
+  }
 }
 
 function drawPlate(g, w, h, host, status) {
@@ -107,67 +191,95 @@ function floorTex(U, w, d) {
 }
 
 // ---------- um rack ----------
+// Gabinete de 19" (colunas, laterais, teto com ventoinhas, soco com pés) com equipamentos de verdade na frente: patch panel e switch
+// ligados por cabos, seis servidores (cada um mostra uma métrica na tela LCD), etiqueta com o nome e nobreak com o uptime.
 function makeRack(U, parent, cx, cz, rack, idx, ctx) {
   const g = new THREE.Group(); g.position.set(cx, 0, cz); parent.add(g);
-  // casca, trilhos, unidades e discos das ventoinhas viram uma malha só (cor por vértice): uma chamada de desenho em vez de ~30
-  const S = new Builder(), by = BASE + IH / 2;
-  S.box(RW + 0.14, BASE, RD + 0.14, '#0b0d14', { y: BASE / 2 }, 0.02); // base
-  for (const sg of [-1, 1]) {
-    S.box(0.08, IH, RD, '#303752', { x: sg * (RW / 2 - 0.04), y: by }, 0.02); // laterais
-    S.box(0.12, IH, 0.08, '#454e70', { x: sg * (RW / 2 - 0.1), y: by, z: RD / 2 - 0.06 }, 0.02); // trilhos da frente
-    S.cyl(0.42, 0.42, 0.024, '#0e1019', { x: sg * 0.62, y: TOPY + 0.012, z: -0.12 }, 20); // disco da ventoinha
+  const CW = U.mobile ? 448 : 640, ppu = CW / OW, CH = Math.round(PH * ppu);
+  const x1 = RW / 2, z1 = RD / 2, by = BASE + IH / 2, zF = z1 - 0.04, UD = 0.62; // zF: frente do corpo dos equipamentos (a plaqueta frontal chega a z1)
+  const X = (v) => -PW / 2 + (v * PW) / 562; // posição no desenho-base do equipamento (562 px) -> x do mundo
+
+  // gabinete, equipamentos e cabos viram uma malha só (cor por vértice): uma chamada de desenho em vez de dezenas
+  const S = new Builder();
+  S.box(RW + 0.06, 0.1, RD + 0.06, '#10131c', { y: 0.09 }, 0.02); // soco
+  for (const sx of [-1, 1]) {
+    for (const sz of [-1, 1]) {
+      S.cyl(0.05, 0.05, 0.04, '#0b0d14', { x: sx * (x1 - 0.08), y: 0.02, z: sz * (z1 - 0.08) }, 10); // pés niveladores
+      S.box(0.07, IH, 0.07, '#4a5378', { x: sx * (x1 - 0.035), y: by, z: sz * (z1 - 0.035) }, 0.012); // colunas
+    }
+    S.box(0.03, IH, RD - 0.14, '#1c2236', { x: sx * (x1 - 0.015), y: by }, 0.01); // laterais
+    S.box((OW - PW) / 2, IH, 0.12, '#3d4566', { x: sx * ((PW + OW) / 4), y: by, z: z1 - 0.06 }, 0.01); // trilhos (os furos vêm da textura)
+    S.cyl(0.3, 0.3, 0.024, '#0e1019', { x: sx * 0.4, y: TOPY + 0.012, z: -0.1 }, 20); // bandeja das ventoinhas
   }
-  S.box(RW, 0.1, RD, '#303752', { y: BASE + IH + 0.05 }, 0.02); // tampo
-  S.box(RW - 0.1, IH, 0.06, '#0a0c12', { y: by, z: -RD / 2 + 0.05 }, 0.02); // fundo
-  S.box(RW - 0.3, IH - 0.05, 0.04, '#07080d', { y: by, z: ZF - 1.1 }, 0.01); // interior escuro atrás das unidades
-  // seis unidades de servidor: corpo em relevo + a textura com os textos por cima
-  const unitY = (u) => BASE + 0.05 + PH - (u + 0.5) * UH;
-  for (let u = 0; u < 6; u++) {
-    S.box(PW, UH - 0.05, 1.05, '#343b58', { y: unitY(u), z: ZF - 0.525 }, 0.03);
-    S.box(0.34, 0.035, 0.05, '#3a405a', { x: PW / 2 - 0.3, y: unitY(u) - UH * 0.31, z: ZF + 0.02 }, 0.01); // puxador
+  S.box(RW - 0.1, IH, 0.04, '#141826', { y: by, z: -z1 + 0.02 }, 0.01); // fundo
+  S.box(RW - 0.1, 0.03, RD - 0.1, '#10131c', { y: BASE + 0.015 }, 0.01); // piso interno
+  S.box(RW, 0.06, RD, '#3a4366', { y: BASE + IH + 0.03 }, 0.02); // teto
+  S.cyl(0.028, 0.028, 0.3, '#0b0d14', { y: TOPY + 0.15, z: 0.05 }, 8); // haste do farol
+
+  const BODY = { srv: '#1b2033', patch: '#222840', switch: '#1b2033', ups: '#222840', blank: '#161a28' };
+  const BEZEL = { srv: '#2b3250', patch: '#363f62', switch: '#2b3250', ups: '#303858', blank: '#232a44' };
+  for (const s of LAYOUT) {
+    S.box(PW - 0.02, s.h - 0.01, UD, BODY[s.k], { y: s.yc, z: zF - UD / 2 }, 0.01); // corpo
+    S.box(PW, s.h, 0.04, BEZEL[s.k], { y: s.yc, z: zF + 0.02 }, 0.008); // frente
+    if (s.k === 'srv' || s.k === 'ups') for (const sx of [-1, 1]) S.box(0.045, s.h * (s.k === 'ups' ? 0.7 : 0.6), 0.06, '#98a1c0', { x: sx * (PW / 2 - 0.028), y: s.yc, z: zF + 0.065 }, 0.012); // alças
+  }
+
+  // cabos: do patch panel ao switch e dois descendo pela lateral
+  const tube = (pts, color, r = 0.011) => S.add(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts.map((p) => new THREE.Vector3(...p))), 22, r, 6, false), color);
+  const sp = LAYOUT[0], ss = LAYOUT[1], zc = z1 + 0.02;
+  for (const c of CABLES) {
+    const xp = X(34 + c.p * 20.3 + 8), xs = X(40 + c.s * 24 + 9.5), yp = sp.yc, ys = ss.yc + ss.h * 0.21;
+    tube([[xp, yp, zc], [xp, yp - 0.04, z1 + 0.07], [(xp + xs) / 2, (yp + ys) / 2, z1 + 0.1], [xs, ys + 0.04, z1 + 0.07], [xs, ys, zc]], c.c);
+  }
+  for (const [dx, col] of [[0, '#4f8cff'], [0.035, '#f2a93b']]) {
+    tube([[X(430), ss.yc, zc], [X(500), ss.yc - 0.05, z1 + 0.08], [PW / 2 + 0.04 + dx, ss.yc - 0.4, z1 + 0.09], [PW / 2 + 0.05 + dx, 0.6, z1 + 0.06], [PW / 2 + 0.07 + dx, 0.2, z1 - 0.05]], col);
   }
   const shell = new THREE.Mesh(S.build(), shellMaterial()); shell.castShadow = true; g.add(shell);
-  const front = U.canvasTex(CW, CH, () => {}, { aniso: U.aniso });
-  const overlay = new THREE.Mesh(new THREE.PlaneGeometry(PW, PH), basic('#ffffff', { map: front, transparent: true, depthWrite: false }));
-  overlay.position.set(0, BASE + 0.05 + PH / 2, ZF + 0.012); overlay.renderOrder = 2; g.add(overlay);
-  const gloss = U.glossPlane(PW, PH); gloss.position.set(0, BASE + 0.05 + PH / 2, ZF + 0.02); g.add(gloss);
 
-  // LEDs: núcleo + brilho aditivo (a cor e o piscar mudam por quadro)
+  // frente com os desenhos dos equipamentos e o reflexo
+  const front = U.canvasTex(CW, CH, () => {}, { aniso: U.aniso });
+  const py = PTOP - PH / 2;
+  const overlay = new THREE.Mesh(new THREE.PlaneGeometry(OW, PH), basic('#ffffff', { map: front, transparent: true, depthWrite: false }));
+  overlay.position.set(0, py, z1 + 0.008); overlay.renderOrder = 2; g.add(overlay);
+  const gloss = U.glossPlane(OW, PH); gloss.position.set(0, py, z1 + 0.012); g.add(gloss);
+
+  // LED de cada servidor (núcleo + brilho aditivo): a cor e o piscar mudam por quadro
   const leds = [];
-  for (let u = 0; u < 6; u++) {
-    const core = new THREE.Mesh(new THREE.SphereGeometry(0.04, 10, 8), basic('#1c1f2b'));
-    core.position.set(-PW / 2 + (48 / CW) * PW, unitY(u) + UH * 0.0, ZF + 0.03); g.add(core);
-    const glow = glowSprite(U, '#ffffff', 0.26, 0); glow.position.copy(core.position); glow.position.z += 0.02;
+  for (const s of LAYOUT) {
+    if (s.k !== 'srv') continue;
+    const core = new THREE.Mesh(new THREE.SphereGeometry(0.03, 10, 8), basic('#1c1f2b'));
+    core.position.set(X(468), s.yc - s.h * 0.22, z1 + 0.03); g.add(core);
+    const glow = glowSprite(U, '#ffffff', 0.22, 0); glow.position.copy(core.position); glow.position.z += 0.02;
     if (!U.mobile) g.add(glow); // celular: sem o brilho dos LEDs (uma chamada de desenho a menos por LED)
     leds.push({ core, glow, key: '' });
   }
 
-  // faixa de status no pé do rack e farol no topo
-  const strip = new THREE.Mesh(new THREE.BoxGeometry(RW - 0.3, 0.05, 0.05), basic(IDLE)); strip.position.set(0, 0.06, RD / 2 + 0.085); g.add(strip);
-  const beacon = new THREE.Mesh(new THREE.SphereGeometry(0.14, 14, 8, 0, Math.PI * 2, 0, Math.PI / 2), basic(IDLE)); beacon.position.set(0, TOPY, 0.1); g.add(beacon);
-  const beaconGlow = glowSprite(U, '#ffffff', 1.1, 0); beaconGlow.position.set(0, TOPY + 0.14, 0.1); g.add(beaconGlow);
+  // faixa de status no soco e farol no topo (haste + lâmpada)
+  const strip = new THREE.Mesh(new THREE.BoxGeometry(RW - 0.3, 0.04, 0.04), basic(IDLE)); strip.position.set(0, 0.09, z1 + 0.05); g.add(strip);
+  const beacon = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.075, 0.12, 14), basic(IDLE)); beacon.position.set(0, TOPY + 0.36, 0.05); g.add(beacon);
+  const beaconGlow = glowSprite(U, '#ffffff', 1.1, 0); beaconGlow.position.set(0, TOPY + 0.4, 0.05); g.add(beaconGlow);
 
-  // ventoinhas no tampo (giram mais rápido com a CPU)
+  // pás das ventoinhas do teto (giram mais rápido com a CPU)
   const fans = [];
-  for (const sg of [-1, 1]) {
+  for (const sx of [-1, 1]) {
     const FB = new Builder();
     for (let b = 0; b < 5; b++) {
       const a = (b / 5) * Math.PI * 2;
-      FB.add(new THREE.BoxGeometry(0.34, 0.012, 0.1), '#3a4263', { x: Math.cos(a) * 0.19, z: Math.sin(a) * 0.19, ry: -a + 0.35 });
+      FB.add(new THREE.BoxGeometry(0.24, 0.012, 0.075), '#3a4263', { x: Math.cos(a) * 0.13, z: Math.sin(a) * 0.13, ry: -a + 0.35 });
     }
-    FB.cyl(0.07, 0.07, 0.03, '#1b1f2e', { y: 0.004 }, 12);
-    const blades = new THREE.Mesh(FB.build(), shellMaterial()); blades.position.set(sg * 0.62, TOPY + 0.028, -0.12); g.add(blades);
+    FB.cyl(0.05, 0.05, 0.03, '#1b1f2e', { y: 0.004 }, 12);
+    const blades = new THREE.Mesh(FB.build(), shellMaterial()); blades.position.set(sx * 0.4, TOPY + 0.028, -0.1); g.add(blades);
     fans.push(blades);
   }
 
-  // cabos do tampo até a bandeja do teto
+  // cabos do teto do rack até a bandeja do teto da sala (somem quando a câmera passa para o outro lado)
   const cableColors = ['#4f8cff', '#f2a93b', '#9aa0b4'];
-  if (rack.row === 0) [-0.8, -0.1, 0.8].forEach((x, k) => { // só a fileira da frente da bandeja liga por cabos
+  if (rack.row === 0) [-0.55, -0.1, 0.55].forEach((x, k) => {
     const curve = new THREE.CatmullRomCurve3([
-      new THREE.Vector3(x, TOPY, -0.55), new THREE.Vector3(x + 0.05, TOPY + 0.14, -0.62), new THREE.Vector3(x, 3.0, -0.7), new THREE.Vector3(x, 3.1, ctx.trayZ - cz),
+      new THREE.Vector3(x, TOPY, -0.42), new THREE.Vector3(x + 0.05, TOPY + 0.14, -0.5), new THREE.Vector3(x, 3.0, -0.56), new THREE.Vector3(x, 3.1, ctx.trayZ - cz),
     ]);
-    const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, 14, 0.03, 6, false), U.mat(cableColors[(k + idx) % 3])); tube.castShadow = true; g.add(tube);
-    ctx.wallItems.push(tube);
+    const t = new THREE.Mesh(new THREE.TubeGeometry(curve, 14, 0.03, 6, false), U.mat(cableColors[(k + idx) % 3])); t.castShadow = true; g.add(t);
+    ctx.wallItems.push(t);
   });
 
   // brilho no chão em frente ao rack e a placa com o nome
@@ -181,9 +293,9 @@ function makeRack(U, parent, cx, cz, rack, idx, ctx) {
   const outline = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(RW + 0.2, TOPY + 0.12, RD + 0.2)), new THREE.LineBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.95 }));
   outline.position.y = (TOPY + 0.12) / 2; outline.visible = false; g.add(outline);
   const hit = new THREE.Mesh(new THREE.BoxGeometry(RW + 0.3, TOPY + 0.3, RD + 1.9), new THREE.MeshBasicMaterial({ visible: false }));
-  hit.position.set(0, (TOPY + 0.3) / 2, 0.95 - 0.0); hit.userData = { kind: 'rack', host: rack.host }; g.add(hit); ctx.hitList.push(hit);
+  hit.position.set(0, (TOPY + 0.3) / 2, 0.95); hit.userData = { kind: 'rack', host: rack.host }; g.add(hit); ctx.hitList.push(hit);
 
-  return { host: rack.host, idx, g, leds, strip, beacon, beaconGlow, fans, floorGlow, outline, front, plateTex, key: '', plateKey: '', spin: [Math.random() * 6, Math.random() * 6], cur: { strip: '', beacon: '' } };
+  return { host: rack.host, idx, g, leds, strip, beacon, beaconGlow, fans, floorGlow, outline, front, ppu, plateTex, key: '', plateKey: '', spin: [Math.random() * 6, Math.random() * 6], cur: { strip: '', beacon: '' } };
 }
 
 // rack vazio (sem monitor configurado, sem dados ou sem permissão): contorno tracejado e a mensagem no chão
@@ -243,8 +355,8 @@ export function buildServerRoom(U, s, g, { hitList, flat }) {
 
   // racks
   const gap = sv.rowGap || 5.2, rcz = (row) => zMin + 0.95 + row * gap, ctx = { hitList, flat, wallItems, trayZ };
-  const racks = [], ghost = sv.racks.length ? null : makeGhost(U, g, sv.rackX0 + 1.5, rcz(0), sv.msg, ctx);
-  sv.racks.forEach((rk, i) => racks.push(makeRack(U, g, sv.rackX0 + rk.col * 4 + 1.5, rcz(rk.row), rk, i, ctx)));
+  const racks = [], ghost = sv.racks.length ? null : makeGhost(U, g, sv.x0, rcz(0), sv.msg, ctx);
+  sv.racks.forEach((rk, i) => racks.push(makeRack(U, g, sv.x0 + rk.col * sv.pitch, rcz(rk.row), rk, i, ctx)));
   const nrows = Math.max(1, ...sv.racks.map((r) => r.row + 1));
   for (let r = 1; r < nrows; r++) { // faixa de segurança também entre as fileiras de trás
     const ln = line.clone(); ln.position.z = rcz(r) + RD / 2 + 2.45; g.add(ln);
@@ -259,7 +371,7 @@ export function buildServerRoom(U, s, g, { hitList, flat }) {
   const bgl = U.glossPlane(2.8, 1.64); bgl.rotation.y = Math.PI / 2; bgl.position.set(1.14, 2.05, zc); g.add(bgl);
 
   // ar-condicionado na parede direita
-  const az = zMin + 5.2;
+  const az = zMin + Math.min(5.2, depth - 1.2);
   box(g, 1.1, 2.4, 1.7, '#2b3042', W - 1.6, 1.2, az);
   const grille = U.canvasTex(256, 384, (c, w, h) => {
     c.fillStyle = '#1b2030'; c.fillRect(0, 0, w, h); c.fillStyle = '#0c0e15';
@@ -290,8 +402,9 @@ export function updateServerRoom(rt, s, now, dt) {
     const d = sv.racks.find((x) => x.host === r.host);
     if (!d) continue;
     const stale = d.status === 'sem-sinal', crit = d.status === 'critico';
-    const key = JSON.stringify([d.units, stale]);
-    if (key !== r.key) { r.key = key; redraw(r.front, (c, w, h) => drawFront(c, w, h, d.units, stale)); }
+    const up = uptimeLabel(d.uptime);
+    const key = JSON.stringify([d.units, stale, up]);
+    if (key !== r.key) { r.key = key; redraw(r.front, (c, w, h) => drawFront(c, w, h, r.ppu, d.units, stale, { host: r.host, up })); }
     if (d.status !== r.plateKey) { r.plateKey = d.status; redraw(r.plateTex, (c, w, h) => drawPlate(c, w, h, r.host, d.status)); }
     const sc = STATUS_COLOR[d.status];
 

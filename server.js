@@ -1219,7 +1219,7 @@ async function monitorReport(req, res) {
   }
   if (!String(req.headers['content-type']).startsWith('application/json')) return send(res, 415, { error: 'use Content-Type: application/json' });
   try {
-    const body = await readBody(req, 16e3);
+    const body = await readBody(req, 32e3); // o v2 com 60 serviços chega a ~9 KB e, no pior caso, a ~19 KB
     send(res, 200, { ok: true, host: monitor.ingest(body).host });
   } catch (e) {
     send(res, 400, { error: e.message });
