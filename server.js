@@ -1237,6 +1237,11 @@ async function monitorApi(req, res, sub, user, url) {
     catch (e) { return send(res, 400, { error: e.message }); }
   }
   if (sub === 'secret' && req.method === 'DELETE') { monitor.revoke(url.searchParams.get('host')); return send(res, 204, {}); }
+  if (sub === 'alias' && req.method === 'POST') { // { host, alias }: alias vazio remove o apelido
+    const body = (await readBody(req, 2e3)) || {};
+    try { return send(res, 200, { ok: true, host: body.host, alias: monitor.setAlias(body.host, body.alias) }); }
+    catch (e) { return send(res, 400, { error: e.message }); }
+  }
   send(res, 404, { error: 'rota desconhecida' });
 }
 

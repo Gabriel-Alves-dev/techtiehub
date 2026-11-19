@@ -800,7 +800,7 @@ function drawRacks(now) {
     });
     // faixa de status no pé do rack
     rect(x + 3, y + RACK_H - 9, RACK_W - 6, 6, stale ? '#33364a' : MON_COLOR[h.status]);
-    text(truncate(h.host.toUpperCase(), 12), x + RACK_W / 2, y + RACK_H + 10, 7, '#fff');
+    text(truncate(plainText(monName(h)).toUpperCase(), 12), x + RACK_W / 2, y + RACK_H + 10, 7, '#fff');
     text(MON_LABEL[h.status], x + RACK_W / 2, y + RACK_H + 20, 6, MON_COLOR[h.status]);
   });
 }
@@ -1154,7 +1154,7 @@ function snapshot3D(now) {
     blocks: world.blocks, spots: world.spots, desks,
     decor: world.server ? [] : roomDecor().filter(decorFits),
     server: world.server ? {
-      racks: monitor.hosts.map((h, i) => ({ host: h.host, status: h.status, cpu: h.cpu, uptime: h.uptime, units: rackUnits(h), col: i % SV3D_COLS, row: Math.floor(i / SV3D_COLS) })),
+      racks: monitor.hosts.map((h, i) => ({ host: h.host, status: h.status, cpu: h.cpu, uptime: h.uptime, alias: h.alias || null, units: rackUnits(h), col: i % SV3D_COLS, row: Math.floor(i / SV3D_COLS) })),
       x0: svLayout3D().x0, pitch: SV3D_PITCH, rowGap: SV3D_ROW,
       msg: monitor.denied ? 'SÓ A DONA DO HUB VÊ' : monitor.configured ? 'AGUARDANDO DADOS' : 'SEM MONITOR',
       hover: hover?.kind === 'rack' ? hover.host ?? '' : undefined, // '' = rack vazio (configurar)
@@ -1410,7 +1410,7 @@ const onCanvasMove = (ev) => {
   let html;
   if (hover.kind === 'rack') {
     const h = monitor.hosts.find((x) => x.host === hover.host);
-    html = h ? `<b>${esc(h.host)}</b><br>${MON_LABEL[h.status]} · carga 1 min ${h.cpu ?? '?'}% dos vCPUs · RAM ${h.mem ?? '?'}% · disco ${h.disk ?? '?'}%` : 'Monitor de servidores';
+    html = h ? `<b>${esc(monName(h))}</b>${h.alias ? ` <span style="color:#9097b0">${esc(h.host)}</span>` : ''}<br>${MON_LABEL[h.status]} · carga 1 min ${h.cpu ?? '?'}% dos vCPUs · RAM ${h.mem ?? '?'}% · disco ${h.disk ?? '?'}%` : 'Monitor de servidores';
   } else if (hover.kind === 'agent') {
     const a = state.agents.find((x) => x.id === hover.id);
     html = `<b>${esc(a.name)}</b> · ${esc(a.role || '')}<br>${STATUS[a.status]?.label || ''}${a.message ? ' — ' + esc(a.message) : ''}`;
@@ -2861,62 +2861,114 @@ const since = (ms) => {
 };
 const uptimeText = (s) => (s == null ? '—' : s >= 86400 ? `${Math.floor(s / 86400)} d ${Math.floor(s % 86400 / 3600)} h` : `${Math.floor(s / 3600)} h ${Math.floor(s % 3600 / 60)} min`);
 
-// lista de itens com problema: nomes (se o monitor os envia) ou só a contagem
-const monItems = (label, g) => `<div class="sub">${label}: ${!g.count ? '<span style="color:var(--ok)">nenhum</span>'
-  : g.names.length ? `<b>${g.names.map(esc).join(', ')}</b>` : `<b>${g.count}</b> (o monitor não envia os nomes)`}</div>`;
+// nome de exibição do servidor: o apelido, se houver, ou o nome do host
+const monName = (h) => h.alias || h.host;
+const plainText = (t) => String(t).normalize('NFD').replace(/[\u0300-\u036f]/g, ''); // a fonte pixel do 2D não tem acentos
+const monPct = (v) => (v == null ? '—' : `${v}%`);
 
-
-// tabela por serviço (envio v2): origem, nome, status, saúde, CPU (% de UM núcleo, sem corte em 100), memória e reinícios/réplicas
+// ---- serviços (envio v2): origem, nome, status, saúde, CPU (% de UM núcleo, sem corte em 100), memória e reinícios/réplicas
 const SVC_STATUS = { online: 'online', running: 'rodando', active: 'ativo', launching: 'iniciando', stopped: 'parado', inactive: 'inativo', exited: 'saiu', restarting: 'reiniciando', errored: 'erro', failed: 'falhou', other: 'outro' };
+const SVC_HEALTH = { ok: 'ok', unhealthy: 'sem saúde', starting: 'iniciando', none: '—' }; // "none" = o container não tem healthcheck
+const SVC_SRC = { pm2: 'PM2', docker: 'Docker', swarm: 'Swarm', systemd: 'systemd' };
 const svcBad = (x) => x.status === 'errored' || x.status === 'failed' || x.health === 'unhealthy';
 const svcWarn = (x) => x.status === 'restarting' || x.status === 'exited' || x.status === 'stopped' || x.status === 'other';
-function servicesTable(h) {
-  if (!h.services?.length) return h.v === 2 ? '<div class="sub">Nenhum serviço listado neste envio.</div>' : '';
+
+function servicesSection(h, win) {
+  if (h.v !== 2) return '<h3>Serviços</h3><p class="muted">Este servidor ainda envia no formato v1 (só os totais). A lista por serviço aparece quando ele passar a enviar no v2.</p>';
+  const all = h.services || [];
+  if (!all.length) return '<h3>Serviços</h3><p class="muted">Nenhum serviço listado neste envio.</p>';
+  const flagged = all.filter((x) => svcBad(x) || svcWarn(x));
+  const bySrc = {};
+  for (const x of all) bySrc[x.src] = (bySrc[x.src] || 0) + 1;
+  const chips = [['todos', 'Todos', all.length], ...(flagged.length ? [['problema', 'Com problema', flagged.length]] : []),
+    ...Object.keys(SVC_SRC).filter((k) => bySrc[k]).map((k) => [k, SVC_SRC[k], bySrc[k]])];
+  const want = win.svcFilter?.[h.host] || 'todos', f = chips.some((c) => c[0] === want) ? want : 'todos';
+  const list = f === 'todos' ? all : f === 'problema' ? flagged : all.filter((x) => x.src === f);
   const num = (v, suf = '') => (v == null ? '—' : `${v}${suf}`);
   const mem = (v) => (v == null ? '—' : v >= 1024 ? `${(v / 1024).toFixed(1)} GB` : `${Math.round(v)} MB`);
-  const rows = h.services.map((x) => {
+  const rows = list.map((x) => {
     const col = svcBad(x) ? MON_COLOR.critico : svcWarn(x) ? MON_COLOR.atencao : MON_COLOR.ok;
-    const saude = x.health === 'ok' ? 'ok' : x.health === 'unhealthy' ? 'sem saúde' : x.health || '—';
     const extra = x.replicas ? `${x.replicas} réplicas` : x.instances != null ? `${x.instances} inst.` : '';
     return `<tr>
       <td><span class="src">${esc(x.src)}</span></td>
       <td class="mono">${esc(x.name)}${x.project && x.project !== x.name ? `<div class="muted">${esc(x.project)}</div>` : ''}</td>
       <td style="color:${col}"><b>${esc(SVC_STATUS[x.status] || x.status)}</b></td>
-      <td style="color:${x.health === 'unhealthy' ? MON_COLOR.critico : 'inherit'}">${esc(saude)}</td>
+      <td style="color:${x.health === 'unhealthy' ? MON_COLOR.critico : 'inherit'}" ${x.health === 'none' ? 'title="sem healthcheck configurado"' : ''}>${esc(SVC_HEALTH[x.health] || x.health || '—')}</td>
       <td class="r">${num(x.cpu_core_pct, '%')}</td>
       <td class="r">${mem(x.mem_mb)}</td>
       <td class="r">${x.restarts == null ? '—' : esc(x.restarts)}${extra ? `<div class="muted">${esc(extra)}</div>` : ''}</td></tr>`;
   }).join('');
-  return `<div class="svc-wrap"><table class="svc">
-    <thead><tr><th>Origem</th><th>Serviço</th><th>Status</th><th>Saúde</th><th class="r" title="% de um núcleo: acima de 100% é normal em serviço com mais de uma thread">CPU/núcleo</th><th class="r">Memória</th><th class="r" title="Acumulados desde o boot; o Docker e o Swarm não informam">Reinícios</th></tr></thead>
-    <tbody>${rows}</tbody></table></div>
-    ${h.truncated ? '<div class="sub" style="color:var(--warn,#f2a93b)">Lista cortada em 60 itens: os que têm problema vêm primeiro, os demais podem não aparecer.</div>' : ''}`;
+  return `<h3>Serviços</h3>
+    <div class="mon-chips">${chips.map(([k, label, n]) => `<button class="mon-chip ${k === f ? 'on' : ''}" data-act="filter" data-host="${esc(h.host)}" data-f="${k}">${label} <b>${n}</b></button>`).join('')}</div>
+    <div class="svc-wrap"><table class="svc">
+      <thead><tr><th>Origem</th><th>Serviço</th><th>Status</th><th>Saúde</th><th class="r" title="% de um núcleo: acima de 100% é normal em serviço com mais de uma thread">CPU/núcleo</th><th class="r">Memória</th><th class="r" title="Acumulados desde o boot; o Docker e o Swarm não informam">Reinícios</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+    ${h.truncated ? '<div class="sub" style="color:var(--warn)">Lista cortada em 60 itens: os que têm problema vêm primeiro, os demais podem não aparecer.</div>' : ''}`;
 }
 
-function renderMonitor(win) {
-  const hosts = [...monitor.hosts].sort((a, b) => (a.host === win.first ? -1 : b.host === win.first ? 1 : 0));
+// ---- aba de um servidor: cabeçalho com apelido, métricas, problemas e serviços
+function serverTab(h, win) {
+  const col = MON_COLOR[h.status], editing = win.editAlias === h.host, he = esc(h.host);
+  const tile = (label, value, sub, color) => `<div class="mon-tile" style="border-top-color:${color || 'var(--line)'}"><div class="lab">${label}</div><div class="val">${value}</div>${sub ? `<div class="sub">${sub}</div>` : ''}</div>`;
+  const title = editing
+    ? `<input data-alias-input maxlength="24" value="${esc(h.alias || '')}" placeholder="Apelido, ex.: VPS Nova" />
+       <button class="primary mini" data-act="alias-save" data-host="${he}">Salvar</button><button class="mini" data-act="alias-cancel">Cancelar</button>
+       ${h.alias ? `<button class="danger mini" data-act="alias-clear" data-host="${he}">Remover apelido</button>` : ''}`
+    : `<b class="mon-name">${esc(monName(h))}</b>${h.alias ? ` <span class="mono muted">${he}</span>` : ''} <button class="mini" data-act="alias-edit" data-host="${he}" title="Dar um apelido a este servidor">✏️ Apelido</button>`;
+  const probs = [[h.v === 2 ? 'PM2 reiniciando' : 'PM2 com muitos reinícios (acumulados desde o boot)', h.pm2.highRestarts], ['PM2 com erro', h.pm2.errored], ['Containers unhealthy', h.docker.unhealthy], ['Serviços systemd em falha', h.systemd.failed]].filter(([, g]) => g.count);
+  const problems = probs.length
+    ? `<div class="mon-prob">${probs.map(([l, g]) => `<div class="sub">${l}: ${g.names.length ? `<b>${g.names.map(esc).join(', ')}</b>` : `<b>${g.count}</b> (o monitor não envia os nomes)`}</div>`).join('')}</div>`
+    : '<div class="mon-ok">✓ Nenhum problema nos serviços</div>';
+  return `<div class="mon-head" style="border-left-color:${col}">
+      <div class="mon-title">${title}</div>
+      <div class="mon-meta"><span class="badge" style="background:${col};color:#000">${MON_LABEL[h.status]}</span>
+        <span class="muted">${h.own ? '🔑 segredo próprio' : 'segredo geral'} · formato v${h.v || 1} · último envio há ${since(h.at)} (a cada ${h.interval}s)</span></div>
+    </div>
+    <div class="mon-tiles">
+      ${tile('Carga 1 min', monPct(h.cpu), `% dos ${h.cpus ? h.cpus + ' ' : ''}vCPUs`, loadLevel(h.cpu))}
+      ${tile('Memória', monPct(h.mem), h.memTotalMb ? `de ${Math.round(h.memTotalMb / 1024 * 10) / 10} GB` : '', level(h.mem, 80, 90))}
+      ${tile('Disco', monPct(h.disk), '', level(h.disk, 80, 90))}
+      ${h.swap != null ? tile('Swap', monPct(h.swap), '', 'var(--line)') : ''}
+      ${tile('Ligado há', uptimeText(h.uptime), '', 'var(--line)')}
+      ${tile('Portas expostas', h.ports.exposed ?? '—', h.ports.listening != null ? `de ${h.ports.listening} abertas` : '', 'var(--line)')}
+    </div>
+    <div class="sub">PM2: <b>${h.pm2.total}</b> processos · Docker${h.v === 2 ? '/Swarm' : ''}: <b>${h.docker.total}</b> ${h.v === 2 ? 'itens' : 'containers'} · systemd: <b>${h.systemd.total ?? '—'}</b> ${h.v === 2 ? 'unidades listadas' : 'serviços'}</div>
+    <h3>Problemas</h3>${problems}
+    ${servicesSection(h, win)}`;
+}
+
+// ---- aba de resumo: todos os servidores numa tabela (clique para abrir o servidor)
+function summaryTab() {
+  if (!monitor.hosts.length) return '<p class="muted">Nenhum servidor enviou dados ainda. Gere um segredo na aba ⚙ Conexão e configure o monitor na VPS.</p>';
+  const rows = monitor.hosts.map((h) => {
+    const bad = h.pm2.errored.count + h.docker.unhealthy.count + h.systemd.failed.count;
+    return `<tr class="click" data-act="tab" data-tab="${esc(h.host)}">
+      <td><b>${esc(monName(h))}</b>${h.alias ? `<div class="muted">${esc(h.host)}</div>` : ''}</td>
+      <td><span class="badge" style="background:${MON_COLOR[h.status]};color:#000">${MON_LABEL[h.status]}</span></td>
+      <td class="r" style="color:${loadLevel(h.cpu)}">${monPct(h.cpu)}</td>
+      <td class="r" style="color:${level(h.mem, 80, 90)}">${monPct(h.mem)}</td>
+      <td class="r" style="color:${level(h.disk, 80, 90)}">${monPct(h.disk)}</td>
+      <td class="r">${bad ? `<b style="color:${MON_COLOR.critico}">${bad}</b>` : '0'}</td>
+      <td class="r muted">há ${since(h.at)}</td></tr>`;
+  }).join('');
+  return `<div class="svc-wrap"><table class="svc">
+    <thead><tr><th>Servidor</th><th>Status</th><th class="r" title="Carga média de 1 min ÷ vCPUs">Carga</th><th class="r">Memória</th><th class="r">Disco</th><th class="r" title="PM2 com erro, containers sem saúde e serviços systemd em falha">Com problema</th><th class="r">Último envio</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>
+    <p class="muted">Clique em um servidor para ver as métricas e os serviços dele.</p>`;
+}
+
+// ---- aba de conexão: endereço e segredos
+function connectionTab(win) {
   const url = location.origin + '/api/monitor/report';
-  win.body.innerHTML = monitor.denied ? '<p class="muted">Só a dona do hub vê o monitor de servidores.</p>' : `
-    ${hosts.map((h) => `<div class="card" style="border-left:4px solid ${MON_COLOR[h.status]}">
-      <div class="title mono">${esc(h.host)} <span class="badge" style="background:${MON_COLOR[h.status]};color:#000">${MON_LABEL[h.status]}</span> <span class="muted" style="font-size:11px">${h.own ? '🔑 segredo próprio' : 'segredo geral'}</span></div>
-      <div class="sub">Último envio há ${since(h.at)} (a cada ${h.interval}s) · ligado há ${uptimeText(h.uptime)}</div>
-      <div class="sub">Carga 1 min (% dos vCPUs${h.cpus ? `, ${h.cpus} vCPUs` : ''}) <b>${h.cpu ?? '—'}%</b> · memória <b>${h.mem ?? '—'}%</b>${h.memTotalMb ? ` de ${Math.round(h.memTotalMb / 1024 * 10) / 10} GB` : ''} · disco <b>${h.disk ?? '—'}%</b>${h.swap != null ? ` · swap <b>${h.swap}%</b>` : ''}</div>
-      <div class="sub">PM2: ${h.pm2.total} processos · Docker${h.v === 2 ? '/Swarm' : ''}: ${h.docker.total} ${h.v === 2 ? 'itens' : 'containers'} · systemd: ${h.systemd.total ?? '—'} ${h.v === 2 ? 'unidades listadas' : 'serviços'} · portas expostas: ${h.ports.exposed ?? '—'}${h.ports.listening != null ? ` (de ${h.ports.listening} abertas)` : ''}</div>
-      ${monItems('PM2 com erro', h.pm2.errored)}
-      ${monItems('PM2 com muitos reinícios (acumulados desde o boot)', h.pm2.highRestarts)}
-      ${monItems('Containers unhealthy', h.docker.unhealthy)}
-      ${monItems('Serviços systemd em falha', h.systemd.failed)}
-      ${servicesTable(h)}
-    </div>`).join('') || '<p class="muted">Nenhum servidor enviou dados ainda.</p>'}
-    <h3>Conexão</h3>
+  return `<h3>Conexão</h3>
     <p class="muted">A VPS envia um resumo para o hub (o hub nunca acessa a VPS). Endereço:
       <code>${esc(url)}</code><br>Cabeçalho: <code>Authorization: Bearer &lt;segredo&gt;</code>, JSON de até 32 KB.</p>
     ${win.secret ? `<div class="card"><div class="sub"><b>Segredo${win.secretHost ? ` do servidor <span class="mono">${esc(win.secretHost)}</span>` : ' geral'} (aparece só agora — copie e guarde na VPS, não no chat):</b></div>
       <div class="title mono" style="word-break:break-all;user-select:all">${esc(win.secret)}</div></div>` : ''}
     <h3>Segredo por servidor</h3>
     <p class="muted">Cada servidor pode ter o seu segredo, que só vale para o nome (<code>host</code>) dele: revogar um não derruba os outros. O segredo geral continua valendo para qualquer servidor.</p>
-    ${(monitor.secrets?.hosts || []).map((s) => `<div class="card"><div class="title mono">${esc(s.host)} <span class="muted" style="font-size:11px">criado ${s.createdAt ? new Date(s.createdAt).toLocaleDateString('pt-BR') : ''}</span></div>
-      <div class="row"><button data-act="host-secret" data-host="${esc(s.host)}">Gerar novo</button><button class="danger" data-act="host-revoke" data-host="${esc(s.host)}">Revogar</button></div></div>`).join('')}
+    ${(monitor.secrets?.hosts || []).map((x) => `<div class="card"><div class="title mono">${esc(x.host)}${x.alias ? ` <span class="muted">· ${esc(x.alias)}</span>` : ''} <span class="muted" style="font-size:11px">criado ${x.createdAt ? new Date(x.createdAt).toLocaleDateString('pt-BR') : ''}</span></div>
+      <div class="row"><button data-act="host-secret" data-host="${esc(x.host)}">Gerar novo</button><button class="danger" data-act="host-revoke" data-host="${esc(x.host)}">Revogar</button></div></div>`).join('')}
     <div class="row"><input data-host-name placeholder="nome do servidor (host), ex.: srv1854371" maxlength="64" style="flex:1" />
       <button class="primary" data-act="host-new">Gerar segredo do servidor</button></div>
     <h3>Segredo geral</h3>
@@ -2924,14 +2976,41 @@ function renderMonitor(win) {
       ${monitor.secrets?.general ? '<button class="danger" data-act="revoke">Revogar o geral</button>' : ''}</div>`;
 }
 
+function renderMonitor(win) {
+  if (monitor.denied) { win.body.innerHTML = '<p class="muted">Só a dona do hub vê o monitor de servidores.</p>'; return; }
+  const ae = document.activeElement;
+  if (win.drawn && ae && win.body.contains(ae) && ae.matches('input')) return; // a atualização periódica não apaga o que está sendo digitado
+  let tab = win.tab || 'resumo';
+  if (tab !== 'resumo' && tab !== 'conexao' && !monitor.hosts.some((h) => h.host === tab)) tab = 'resumo';
+  const host = monitor.hosts.find((h) => h.host === tab);
+  const tabs = [['resumo', 'Resumo', ''], ...monitor.hosts.map((h) => [h.host, truncate(monName(h), 16), MON_COLOR[h.status]]), ['conexao', '⚙ Conexão', '']];
+  const keepScroll = win.drawnTab === tab ? win.body.scrollTop : 0;
+  win.body.innerHTML = `<div class="mon-tabs">${tabs.map(([id, label, dot]) => `<button class="mon-tab ${id === tab ? 'on' : ''}" data-act="tab" data-tab="${esc(id)}">${dot ? `<i class="dot" style="background:${dot}"></i>` : ''}${esc(label)}</button>`).join('')}</div>
+    ${tab === 'resumo' ? summaryTab() : tab === 'conexao' ? connectionTab(win) : serverTab(host, win)}`;
+  win.body.scrollTop = keepScroll;
+  win.drawn = true; win.drawnTab = tab;
+}
+
 function openMonitorWindow(host) {
-  const win = openWindow('monitor', { w: 680, h: 640, cls: 'win-vars' }, (win) => {
+  const win = openWindow('monitor', { w: 740, h: 680, cls: 'win-vars' }, (win) => {
     win.titleEl.textContent = '🖥️ Servidores';
     win.render = renderMonitor;
     win.body.onclick = async (e) => {
-      const act = e.target.dataset.act;
-      const host = e.target.dataset.host || (act === 'host-new' ? win.body.querySelector('[data-host-name]').value.trim() : '');
-      if (act === 'secret') {
+      const el = e.target.closest('[data-act]');
+      if (!el) return;
+      const fa = document.activeElement;
+      if (fa && win.body.contains(fa) && fa.matches('input')) fa.blur(); // sair do campo libera a tela para atualizar (nem todo navegador foca o botão ao clicar)
+      const act = el.dataset.act;
+      const host = el.dataset.host || (act === 'host-new' ? (win.body.querySelector('[data-host-name]')?.value || '').trim() : '');
+      if (act === 'tab') { win.tab = el.dataset.tab; win.secret = null; win.editAlias = null; return renderMonitor(win); } // sair da aba esconde o segredo mostrado
+      if (act === 'filter') { (win.svcFilter ||= {})[host] = el.dataset.f; return renderMonitor(win); }
+      if (act === 'alias-edit') { win.editAlias = host; renderMonitor(win); win.body.querySelector('[data-alias-input]')?.focus(); return; }
+      if (act === 'alias-cancel') { win.editAlias = null; return renderMonitor(win); }
+      if (act === 'alias-save' || act === 'alias-clear') {
+        const alias = act === 'alias-clear' ? '' : win.body.querySelector('[data-alias-input]')?.value ?? '';
+        await api('POST', '/api/monitor/alias', { host, alias });
+        win.editAlias = null;
+      } else if (act === 'secret') {
         if (monitor.secrets?.general && !confirm('Gerar um novo segredo geral? Os servidores que usam o geral deixam de ser aceitos até você trocar o segredo neles (os que têm segredo próprio não são afetados).')) return;
         win.secret = (await api('POST', '/api/monitor/secret', {})).secret; win.secretHost = null;
       } else if (act === 'host-new' || act === 'host-secret') {
@@ -2951,8 +3030,14 @@ function openMonitorWindow(host) {
       if (world?.server) { world = computeWorld(); resize(); }
       renderMonitor(win);
     };
+    win.body.onkeydown = (e) => { // Enter salva, Esc cancela; sai do campo antes para a tela poder atualizar
+      const t = e.target, q = (s) => win.body.querySelector(s);
+      if (t.matches('[data-alias-input]') && (e.key === 'Enter' || e.key === 'Escape')) { e.preventDefault(); t.blur(); q(e.key === 'Enter' ? '[data-act=alias-save]' : '[data-act=alias-cancel]')?.click(); }
+      else if (t.matches('[data-host-name]') && e.key === 'Enter') { e.preventDefault(); t.blur(); q('[data-act=host-new]')?.click(); }
+    };
   });
-  win.first = host || win.first;
+  if (host) win.tab = host;
+  win.drawn = false;
   loadMonitor().finally(() => renderMonitor(win));
   renderMonitor(win);
 }

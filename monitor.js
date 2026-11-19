@@ -10,6 +10,7 @@ const crypto = require('crypto');
 const MAX_HOSTS = 20;
 const MAX_NAMES = 20;
 const NAME_RE = /[^A-Za-z0-9._-]/g;
+const ALIAS_MAX = 24;
 
 const sha = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
 const num = (v, min, max) => (Number.isFinite(v) ? Math.max(min, Math.min(max, v)) : null);
@@ -29,6 +30,7 @@ function group(v, extra = {}) {
 const SRCS = ['pm2', 'docker', 'swarm', 'systemd'];
 const STATUSES = ['online', 'stopped', 'errored', 'launching', 'running', 'exited', 'restarting', 'active', 'inactive', 'failed'];
 const MAX_SERVICES = 60;
+const rd = (v, k) => (v == null ? null : Math.round(v * k) / k); // arredonda sem transformar null em 0
 const clean = (v, n) => String(v ?? '').replace(NAME_RE, '').slice(0, n);
 
 // Um item da lista `services`. O vocabulário de status é fechado (o resto vira "other"); números fora da faixa são
@@ -43,7 +45,7 @@ function service(s) {
     health: clean(s.health, 16).toLowerCase() || null,
     instances: num(s.instances, 0, 9999),
     replicas: /^\d{1,4}\/\d{1,4}$/.test(String(s.replicas)) ? String(s.replicas) : null,
-    cpu_core_pct: num(s.cpu_core_pct, 0, 1e5), mem_mb: num(s.mem_mb, 0, 1e7), restarts: num(s.restarts, 0, 1e9),
+    cpu_core_pct: rd(num(s.cpu_core_pct, 0, 1e5), 100), mem_mb: rd(num(s.mem_mb, 0, 1e7), 10), restarts: num(s.restarts, 0, 1e9),
   };
 }
 // item com problema: processo/serviço em erro ou falha, ou container reportando unhealthy
@@ -92,7 +94,7 @@ class Monitor {
   secrets() {
     return {
       general: this.db.secretHash ? { createdAt: this.db.createdAt || null } : null,
-      hosts: Object.entries(this.db.hostSecrets || {}).map(([host, v]) => ({ host, createdAt: v.createdAt })).sort((a, b) => a.host.localeCompare(b.host)),
+      hosts: Object.entries(this.db.hostSecrets || {}).map(([host, v]) => ({ host, alias: this.alias(host), createdAt: v.createdAt })).sort((a, b) => a.host.localeCompare(b.host)),
     };
   }
 
@@ -124,6 +126,24 @@ class Monitor {
       for (const [h, e] of this.hosts) if (e.via === host) this.hosts.delete(h);
     }
     this.save();
+  }
+
+  // Apelido de exibição de um servidor (ex.: "VPS Nova" no lugar de srv1854371). Só aparência: não muda o `host` do envio,
+  // que é o que identifica o servidor e vale para o segredo. Vazio remove o apelido.
+  alias(host) {
+    const a = this.db.aliases;
+    return a && Object.prototype.hasOwnProperty.call(a, host) && typeof a[host] === 'string' ? a[host] : null;
+  }
+
+  setAlias(host, alias) {
+    const h = String(host ?? '');
+    if (!h || h !== h.replace(NAME_RE, '').slice(0, 64)) throw new Error('nome de servidor inválido (use letras, números, ponto, _ e -; até 64)');
+    const clean = String(alias ?? '').replace(/\s+/g, ' ').replace(/[\u0000-\u001f\u007f<>]/g, '').trim().slice(0, ALIAS_MAX); // quebra de linha e tab viram espaço
+    const mine = Object.entries(this.db.aliases || {}).filter(([k]) => k !== h);
+    if (clean && mine.length >= MAX_HOSTS * 2) throw new Error('apelidos demais');
+    this.db = { ...this.db, aliases: Object.fromEntries(clean ? [...mine, [h, clean]] : mine) }; // fromEntries: o nome "__proto__" vira chave comum
+    this.save();
+    return clean || null;
   }
 
   // Quem é o dono deste segredo? '*' = o geral (qualquer host), um nome = só aquele host, null = não confere.
@@ -180,7 +200,7 @@ class Monitor {
   view() {
     const now = Date.now();
     return [...this.hosts.values()]
-      .map((e) => ({ ...e.report, at: e.at, status: Monitor.status(e, now), own: e.via !== '*' })) // own: envia com segredo próprio
+      .map((e) => ({ ...e.report, at: e.at, status: Monitor.status(e, now), own: e.via !== '*', alias: this.alias(e.report.host) })) // own: envia com segredo próprio
       .sort((a, b) => a.host.localeCompare(b.host));
   }
 }

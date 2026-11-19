@@ -50,6 +50,10 @@ Content-Type: application/json      (corpo de até 16 KB)
 
 `highRestarts` é o acumulado desde o boot: um processo com reinícios antigos continua na lista. Qualquer campo fora desta tabela é descartado.
 
+## Apelido do servidor
+
+Na janela do monitor, a aba de cada servidor tem o botão **✏️ Apelido**. O apelido (até 24 caracteres) aparece na janela, na dica do rack e na placa e na etiqueta do rack em 3D, com o nome do `host` em letras pequenas ao lado. Ele é só aparência: o `host` que o monitor envia continua sendo o que identifica o servidor e o que vale para o segredo. Fica em `data/monitor.json`; deixar o campo vazio remove o apelido. Rota: `POST /api/monitor/alias` com `{ "host": "...", "alias": "..." }`.
+
 ## Envio v2 (detalhamento por serviço)
 
 Com `"v": 2` o envio troca os contadores por `sys` (CPUs, `load_pct`, memória, swap, disco e uptime) e pela lista `services`. O hub aceita os dois formatos na mesma sala, identificados pelo `host`, e converte o v2 para o formato do v1 (as telas de rack continuam iguais).

@@ -151,12 +151,23 @@ function drawFront(g, w, h, ppu, units, stale, info) {
   }
 }
 
-function drawPlate(g, w, h, host, status) {
+// placa no chão: com apelido, ele vai em destaque e o nome do host fica pequeno embaixo; sem apelido, o host em maiúsculas
+function drawPlate(g, w, h, host, alias, status) {
   g.clearRect(0, 0, w, h);
   g.fillStyle = 'rgba(15,17,26,.82)'; g.beginPath(); g.roundRect(0, 0, w, h, 38); g.fill();
   g.textAlign = 'center'; g.textBaseline = 'middle';
-  g.font = `700 68px ${FONT}`; g.fillStyle = '#fff'; g.fillText(host.toUpperCase().slice(0, 16), w / 2, h * 0.4);
-  g.font = `700 44px ${FONT}`; g.fillStyle = STATUS_COLOR[status]; g.fillText(STATUS_LABEL[status], w / 2, h * 0.76);
+  const title = (alias || host.toUpperCase()).slice(0, 24);
+  let px = 68; g.font = `700 ${px}px ${FONT}`;
+  while (px > 34 && g.measureText(title).width > w - 70) g.font = `700 ${--px}px ${FONT}`; // nomes compridos encolhem para caber
+  g.fillStyle = '#fff';
+  if (alias) {
+    g.fillText(title, w / 2, h * 0.3);
+    g.font = `600 32px ${FONT}`; g.fillStyle = '#9fb0e0'; g.fillText(host.slice(0, 32), w / 2, h * 0.57);
+    g.font = `700 42px ${FONT}`; g.fillStyle = STATUS_COLOR[status]; g.fillText(STATUS_LABEL[status], w / 2, h * 0.83);
+  } else {
+    g.fillText(title, w / 2, h * 0.4);
+    g.font = `700 44px ${FONT}`; g.fillStyle = STATUS_COLOR[status]; g.fillText(STATUS_LABEL[status], w / 2, h * 0.76);
+  }
 }
 
 function drawBoard(g, w, h, counts, total) {
@@ -403,9 +414,10 @@ export function updateServerRoom(rt, s, now, dt) {
     if (!d) continue;
     const stale = d.status === 'sem-sinal', crit = d.status === 'critico';
     const up = uptimeLabel(d.uptime);
-    const key = JSON.stringify([d.units, stale, up]);
-    if (key !== r.key) { r.key = key; redraw(r.front, (c, w, h) => drawFront(c, w, h, r.ppu, d.units, stale, { host: r.host, up })); }
-    if (d.status !== r.plateKey) { r.plateKey = d.status; redraw(r.plateTex, (c, w, h) => drawPlate(c, w, h, r.host, d.status)); }
+    const key = JSON.stringify([d.units, stale, up, d.alias || '']);
+    if (key !== r.key) { r.key = key; redraw(r.front, (c, w, h) => drawFront(c, w, h, r.ppu, d.units, stale, { host: d.alias || r.host, up })); }
+    const pk = d.status + '|' + (d.alias || '');
+    if (pk !== r.plateKey) { r.plateKey = pk; redraw(r.plateTex, (c, w, h) => drawPlate(c, w, h, r.host, d.alias, d.status)); }
     const sc = STATUS_COLOR[d.status];
 
     // LEDs: piscam em ritmo próprio; em alarme piscam rápido; sem sinal ficam apagados
