@@ -397,7 +397,7 @@ function pick(obj, fields) {
 
 const FIELDS = {
   projects: ['name', 'description', 'color', 'agentId', 'roomId', 'permissionMode', 'role'], // pasta: tratada à parte (uma por PC)
-  agents: ['name', 'role', 'shirt', 'hair', 'skin', 'hairStyle', 'accessory', 'outfit', 'second', 'pants', 'shoe', 'status', 'message', 'model', 'effort'],
+  agents: ['name', 'role', 'shirt', 'hair', 'skin', 'hairStyle', 'accessory', 'outfit', 'second', 'pants', 'shoe', 'home', 'status', 'message', 'model', 'effort'],
   rooms: ['name', 'kind', 'cols', 'floor', 'wall', 'decor', 'slots', 'areas'],
 };
 
@@ -457,6 +457,8 @@ async function startRun(o, project, envId, text, { images = [], imageRefs = [] }
   const folder = folderFor(project, envId);
   if (!folder) throw new HttpError(400, `defina a pasta desta mesa no PC "${o.envName(envId)}" em ⚙ Mesa`);
   o.live[project.id] = { running: true, pending: null, envId }; // reserva a mesa até o conector confirmar
+  const worker = o.state.agents.find((a) => a.id === project.agentId);
+  if (worker?.home) { worker.home = false; o.save(); } // pedido novo chama o agente de volta ao escritório
   try {
     await o.connectors.rpc(envId, 'run', { project: briefFor(o, project, folder), text, chat: o.chats.get(project.id), images, imageRefs }, 60000);
   } catch (e) {
@@ -845,6 +847,14 @@ async function officeApi(req, res, url, o, user) {
     return send(res, 200, { ok: true });
   }
 
+  // luz do escritório: { on }. Cada clique registra `at`: o navegador só acende sozinho ao escurecer se foi apagada antes do anoitecer
+  if (resource === 'lights' && method === 'POST') {
+    state.lights = { on: body.on === true, at: Date.now() };
+    o.addLog(null, null, state.lights.on ? '💡 Luz do escritório acesa' : '🌙 Luz do escritório apagada');
+    o.save();
+    return send(res, 200, state.lights);
+  }
+
   // ---------- Servidores MCP do escritório ----------
   if (resource === 'mcp') return mcpApi(req, res, o, id, action, method, body);
   if (resource === 'vars') return varsApi(res, o, id, method, body);
@@ -928,6 +938,8 @@ async function officeApi(req, res, url, o, user) {
     // aparência do agente: '' = automático (cabelo) / nenhum (acessório)
     if (body.hairStyle !== undefined && !['', 'curto', 'longo', 'coque'].includes(body.hairStyle)) body.hairStyle = '';
     if (body.accessory !== undefined && !['', 'oculos', 'fone', 'bone'].includes(body.accessory)) body.accessory = '';
+    // em casa: o agente saiu pela porta (luz apagada) e some do escritório até ser chamado de volta
+    if (body.home !== undefined) body.home = body.home === true;
     // roupa e cores extras do personagem 3D: '' = automático (o front completa a partir do id do agente)
     if (body.outfit !== undefined && !['', 'moletom', 'blazer', 'cardigan', 'bomber', 'colete'].includes(body.outfit)) body.outfit = '';
     for (const k of ['second', 'pants', 'shoe']) if (body[k] !== undefined && !/^#[0-9a-f]{6}$/i.test(body[k])) body[k] = '';
@@ -995,6 +1007,7 @@ async function officeApi(req, res, url, o, user) {
         assign(o, item, changes.agentId);
         delete changes.agentId;
       }
+      if (resource === 'agents' && 'home' in changes && !!changes.home !== !!item.home) o.addLog(item.id, null, changes.home ? '🏠 Foi para casa' : '🚪 Voltou ao escritório');
       Object.assign(item, changes);
       // mudou o modo com um pedido rodando: vale na hora (libera o que estiver esperando)
       if (resource === 'projects' && 'permissionMode' in changes && live[item.id]) {

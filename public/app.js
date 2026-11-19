@@ -16,6 +16,7 @@ const STATUS = {
   ocioso: { label: 'Ocioso', color: '#9097b0' },
   bloqueado: { label: 'Bloqueado', color: '#e5534b' },
   concluido: { label: 'Concluído', color: '#4f8cff' },
+  casa: { label: 'Em casa', color: '#b072f5' }, // não vem do agente: é a flag `home` (ver stOf)
 };
 
 const canvas = document.getElementById('office');
@@ -57,9 +58,169 @@ function visibleAgents() {
   if (currentRoom()?.kind === 'servidor') return [];
   const first = currentRoom() === state.rooms[0];
   return state.agents.filter((a) => {
+    if (a.home) return false; // em casa: saiu pela porta e some do escritório até ser chamado de volta
     const desk = deskOf(a.id);
     return desk ? desk.here : first;
   });
+}
+
+// ---------- Luz do escritório e "Em casa" ----------
+// "Em casa" não é um status que o agente reporta (o runner e os hooks seguem mandando ocioso, trabalhando…): é a flag `home`
+const stOf = (a) => (a.home ? 'casa' : a.status);
+const isNight = () => { const h = new Date().getHours(); return h >= 19 || h < 5; };
+// quando começou a noite atual (19h; de madrugada, a de ontem)
+function nightStart() {
+  const d = new Date(); d.setHours(19, 0, 0, 0);
+  if (new Date().getHours() < 5) d.setDate(d.getDate() - 1);
+  return d.getTime();
+}
+// Acesa se foi acesa. Apagada de dia, acende sozinha quando escurece; apagada à noite, só acende por clique.
+// `at` vem do relógio do hub, por isso o clockOffset.
+function lightsOn() {
+  const l = state.lights;
+  if (!l || l.on) return true;
+  return isNight() && l.at + clockOffset < nightStart();
+}
+const exitQ = []; // agentes a caminho da porta, na ordem em que entraram na fila
+const homeGuard = new Map(); // agentId -> { home, at }: por uns segundos, um estado antigo do servidor não desfaz o que acabou de acontecer
+let doorK = 0; // 0 = porta fechada, 1 = aberta (alguém passando)
+const wantsHome = (a) => !a.home && !lightsOn() && (a.status === 'ocioso' || a.status === 'concluido');
+// 0 = a própria porta; os demais esperam em fila, um atrás do outro, subindo o corredor
+const exitSlot = (k) => (k === 0 ? world.door : { x: world.door.x, y: (world.H - 1) * T - (0.9 + (k - 1) * 0.95) * T });
+
+// Chegou à porta: sai do escritório. O servidor confirma pelo SSE; se falhar, volta.
+function sendHome(a) {
+  a.home = true;
+  homeGuard.set(a.id, { home: true, at: Date.now() });
+  runtime.delete(a.id);
+  const i = exitQ.indexOf(a.id);
+  if (i >= 0) exitQ.splice(i, 1);
+  api('PATCH', `/api/agents/${a.id}`, { home: true }, { quiet: true }).catch(() => {
+    homeGuard.delete(a.id);
+    const cur = state.agents.find((x) => x.id === a.id);
+    if (cur) { cur.home = false; syncRuntime(false); }
+  });
+}
+
+// Chama um agente de volta: ele aparece na porta e vai para a mesa. Precisa da luz acesa.
+async function callBack(id) {
+  const a = state.agents.find((x) => x.id === id);
+  if (!a?.home) return;
+  if (!lightsOn()) return toast('Acenda a luz para chamar de volta');
+  a.home = false;
+  homeGuard.set(id, { home: false, at: Date.now() });
+  syncRuntime(false);
+  refreshUI();
+  try {
+    await api('PATCH', `/api/agents/${id}`, { home: false }, { quiet: true });
+  } catch {
+    homeGuard.delete(id);
+    const cur = state.agents.find((x) => x.id === id);
+    if (cur) { cur.home = true; syncRuntime(false); refreshUI(); }
+  }
+}
+
+// Chama todos, um de cada vez (senão apareceriam todos juntos na porta)
+let callingAll = false;
+async function callAllHome() {
+  if (callingAll) return;
+  if (!lightsOn()) return toast('Acenda a luz para chamar de volta');
+  callingAll = true;
+  try {
+    for (const id of state.agents.filter((a) => a.home).map((a) => a.id)) {
+      if (!lightsOn()) break;
+      await callBack(id);
+      await new Promise((r) => setTimeout(r, 1300));
+    }
+  } finally { callingAll = false; }
+}
+
+function toggleLights() {
+  const on = !lightsOn();
+  state.lights = { on, at: Date.now() - clockOffset };
+  refreshUI();
+  api('POST', '/api/lights', { on }, { quiet: true }).catch(() => {});
+}
+
+// aviso curto no rodapé
+function toast(msg) {
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.classList.add('out'), 2200);
+  setTimeout(() => el.remove(), 2700);
+}
+
+// ---------- Ditado por voz ----------
+// Usa o reconhecimento de fala do navegador (Chrome, Edge e Safari; o Firefox não tem). Em Chrome e Edge o áudio é
+// enviado ao serviço de voz do próprio navegador, que devolve o texto: o hub não recebe nem guarda o áudio.
+const speechAPI = () => window.SpeechRecognition || window.webkitSpeechRecognition;
+// pontuação falada vira sinal ("vírgula", "ponto final", "nova linha"); as mais longas primeiro
+const VOICE_PUNCT = [[/\s*\bponto de interrogação\b/gi, '?'], [/\s*\bponto de exclamação\b/gi, '!'], [/\s*\bponto e vírgula\b/gi, ';'], [/\s*\bponto final\b/gi, '.'],
+  [/\s*\bdois pontos\b/gi, ':'], [/\s*\bvírgula\b/gi, ','], [/\s*\bnovo parágrafo\b/gi, '\n\n'], [/\s*\bnova linha\b/gi, '\n']];
+const voiceText = (t) => VOICE_PUNCT.reduce((x, [re, to]) => x.replace(re, to), t).replace(/\n[ \t]+/g, '\n').trim();
+// junta o que já está escrito com o trecho falado, sem espaço antes de pontuação nem depois de quebra de linha
+const joinSpoken = (a, b) => (!a ? b : !b ? a : /\s$/.test(a) || /^[,.;:!?]/.test(b) ? a + b : a + ' ' + b);
+const capFirst = (t, before) => (!before || /[.!?\n]\s*$/.test(before) ? t.charAt(0).toUpperCase() + t.slice(1) : t);
+
+// Liga um botão 🎤 a uma caixa de texto: clique para falar, clique de novo para parar. Cada frase dita entra no texto.
+// Comandos falados: "comando enviar" (chama onSend) e "comando limpar" (apaga a caixa).
+function attachMic(box, btn, { onSend } = {}) {
+  const TITLE = 'Falar em vez de digitar (ditado por voz). Diga "vírgula", "ponto final" ou "nova linha" para pontuar; "comando enviar" envia e "comando limpar" apaga.';
+  btn.title = TITLE;
+  let rec = null, on = false, base = '', lastHeard = 0;
+  const ui = (listening) => { btn.classList.toggle('listening', listening); btn.title = listening ? 'Ouvindo… clique para parar' : TITLE; };
+  const stop = () => {
+    on = false; ui(false);
+    const r = rec; rec = null;
+    try { r?.abort(); } catch {}
+  };
+  const commit = (raw) => {
+    let t = raw.trim(), cmd = null;
+    const m = /(?:^|\s)comando\s+(enviar|limpar)[\s.!]*$/i.exec(t);
+    if (m) { cmd = m[1].toLowerCase(); t = t.slice(0, m.index).trim(); }
+    if (t) { const v = voiceText(t); base = joinSpoken(base, capFirst(v, base)); }
+    if (cmd === 'limpar') base = '';
+    box.value = base;
+    box.dispatchEvent(new Event('input', { bubbles: true }));
+    if (cmd === 'enviar') { stop(); onSend?.(); }
+  };
+  const begin = () => {
+    const SR = speechAPI();
+    const r = (rec = new SR());
+    r.lang = 'pt-BR'; r.interimResults = true; r.continuous = false; r.maxAlternatives = 1;
+    r.onresult = (ev) => {
+      lastHeard = Date.now();
+      let fin = '', tmp = '';
+      for (let i = ev.resultIndex; i < ev.results.length; i++) { const x = ev.results[i]; if (x.isFinal) fin += x[0].transcript; else tmp += x[0].transcript; }
+      if (fin) commit(fin);
+      else if (tmp) { const v = voiceText(tmp); box.value = joinSpoken(base, capFirst(v, base)); } // prévia enquanto fala
+    };
+    r.onerror = (ev) => {
+      const err = ev.error;
+      if (err === 'not-allowed' || err === 'service-not-allowed') { stop(); toast('Permita o uso do microfone no navegador para ditar'); }
+      else if (err === 'audio-capture') { stop(); toast('Microfone não encontrado'); }
+      else if (err === 'network') { stop(); toast('O serviço de voz do navegador está sem conexão'); }
+      // "no-speech" e "aborted": o onend decide se continua
+    };
+    // o navegador encerra a cada pausa na fala: recomeça sozinho enquanto o botão estiver ligado (e desliga após ~45 s de silêncio)
+    r.onend = () => {
+      if (rec !== r || !on) return;
+      if (Date.now() - lastHeard > 45000) { stop(); toast('Ditado desligado por falta de fala'); return; }
+      box.value = base; // descarta uma prévia que não virou frase final
+      setTimeout(() => { if (on && rec === r) begin(); }, 150);
+    };
+    try { r.start(); } catch { stop(); }
+  };
+  btn.onclick = () => {
+    if (on) return stop();
+    if (!speechAPI()) return toast('Ditado por voz indisponível neste navegador (use Chrome, Edge ou Safari)');
+    base = box.value; on = true; lastHeard = Date.now(); ui(true);
+    box.focus();
+    begin();
+  };
+  return { stop, get listening() { return on; } };
 }
 
 // Posição de cada mesa na grade (índice = fileira * colunas + coluna). O usuário arruma em room.slots;
@@ -226,6 +387,7 @@ function syncRuntime(atSeats) {
       rt.wanderAt = Date.now() + 40000 + Math.random() * 40000;
       start = world.spots[rt.spot];
     }
+    if (start === world.door && desk) { rt.plan = 'sit'; rt.planAt = Date.now() + 25000 + Math.random() * 25000; } // quem chega pela porta vai à mesa antes de passear
     runtime.set(a.id, Object.assign(rt, { x: start.x, y: start.y }));
   }
   for (const id of runtime.keys()) if (!visible.some((a) => a.id === id)) runtime.delete(id);
@@ -279,6 +441,7 @@ function trackAlerts(first) {
 
 function applyState(next) {
   const firstLoad = !world;
+  for (const a of next.agents || []) { const g = homeGuard.get(a.id); if (g && Date.now() - g.at < 4000) a.home = g.home; }
   state = next;
   if (state.now) clockOffset = Date.now() - state.now;
   if (!state.rooms.some((r) => r.id === roomId)) roomId = state.rooms[0]?.id;
@@ -336,7 +499,13 @@ function switchRoom(id) {
 }
 
 function update(dt, now) {
-  for (const a of visibleAgents()) {
+  const vis = visibleAgents();
+  // fila da porta: sai dela quem não quer mais ir (luz acesa, voltou a trabalhar) ou não está nesta sala
+  for (let i = exitQ.length - 1; i >= 0; i--) {
+    const q = state.agents.find((x) => x.id === exitQ[i]);
+    if (!q || !wantsHome(q) || !runtime.has(q.id)) exitQ.splice(i, 1);
+  }
+  for (const a of vis) {
     const rt = runtime.get(a.id);
     const desk = deskOf(a.id);
     let target, key;
@@ -351,8 +520,20 @@ function update(dt, now) {
     // livre = sem nada a fazer: concluído (esperando você) ou ocioso de verdade. Trabalhando e bloqueado
     // ficam na mesa. Quem está livre alterna entre sentar, ir a uma área e dar uma volta pelo corredor.
     const free = !!desk && (a.status === 'concluido' || goIdle);
+
+    // luz apagada: quem está livre vai embora pela porta, em fila (cada um espera um tempo próprio antes de sair)
+    const leaving = wantsHome(a);
+    if (!leaving) rt.leaveAt = null;
+    else rt.leaveAt ??= now + 600 + Math.random() * 5500;
+    if (leaving && now >= rt.leaveAt && !exitQ.includes(a.id)) exitQ.push(a.id);
+    const qi = leaving ? exitQ.indexOf(a.id) : -1;
     const deskKey = desk && 'desk:' + desk.project.id + ':' + world.slotOf.get(desk.project.id) + ':' + world.cols;
-    if (desk && !free) {
+    if (qi >= 0) {
+      target = exitSlot(qi);
+      key = 'exit:' + qi + ':' + world.H + ':' + world.W; // o índice muda quando alguém da frente sai: refaz o caminho
+      rt.plan = null;
+      rt.spot = null;
+    } else if (desk && !free) {
       rt.plan = null;
       target = desk.cell.seat;
       key = deskKey;
@@ -414,6 +595,7 @@ function update(dt, now) {
       rt.facing = Math.abs(dy) > Math.abs(dx) ? (dy < 0 ? 'up' : 'down') : dx < 0 ? 'left' : 'right';
     }
     const arrived = !rt.path.length;
+    if (qi === 0 && arrived) { sendHome(a); continue; } // o primeiro da fila atravessou a porta
     rt.sit = (rt.sit || 0) + (((arrived && key.startsWith('desk')) ? 1 : 0) - (rt.sit || 0)) * Math.min(1, dt * 8);
     rt.seated = arrived && key.startsWith('desk');
     rt.atSpot = arrived && !rt.seated && rt.spot != null ? world.spots[rt.spot] : null;
@@ -421,6 +603,8 @@ function update(dt, now) {
     else if (rt.atSpot) rt.facing = rt.atSpot.facing;
     else if (!rt.moving) rt.facing = 'down';
   }
+  const near = vis.some((a) => { const r = runtime.get(a.id); return r && Math.hypot(r.x - world.door.x, r.y - world.door.y) < 1.1 * T; });
+  doorK += ((near ? 1 : 0) - doorK) * Math.min(1, dt * 6);
 }
 
 // ---------- Desenho ----------
@@ -563,7 +747,17 @@ function drawRoom(now) {
 
   // porta
   rect(world.door.x - 12, bottom, 24, T, '#2b2f3e');
-  rect(world.door.x - 10, bottom + 2, 20, T - 2, '#7a5a3a');
+  if (doorK > 0.5) { // aberta: vão escuro com a folha encostada na lateral
+    rect(world.door.x - 10, bottom + 2, 20, T - 2, '#171320');
+    rect(world.door.x - 10, bottom + 2, 4, T - 2, '#7a5a3a');
+    rect(world.door.x - 6, bottom + 2, 16, 1, '#3a3350');
+  } else {
+    rect(world.door.x - 10, bottom + 2, 20, T - 2, '#7a5a3a');
+    rect(world.door.x - 10, bottom + 2, 20, 1, '#8e6c47');
+    rect(world.door.x + 6, bottom + 8, 2, 2, '#e8c36a'); // maçaneta
+  }
+  rect(world.door.x - 7, bottom - 3, 14, 3, '#1c3a2c'); // placa de saída
+  rect(world.door.x - 6, bottom - 2, 12, 1, '#3fbf7f');
 
   drawAreas(now);
 }
@@ -872,7 +1066,7 @@ function drawDesk(i, now) {
   const mx = c.x + 1.75 * T, my = c.y + 0.2 * T, mw = 1.5 * T, mh = 0.95 * T;
   rect(mx - 2, my - 2, mw + 4, mh + 4, '#1c1c24');
   rect(c.x + 2.5 * T - 2, my + mh + 2, 4, 3, '#1c1c24');
-  const st = agent?.status;
+  const st = agent?.home ? 'ocioso' : agent?.status;
   const present = rt?.seated;
   if (st === 'trabalhando' && present) {
     rect(mx, my, mw, mh, '#0f2a1d');
@@ -1140,14 +1334,13 @@ function snapshot3D(now) {
     const ag = state.agents.find((x) => x.id === p.agentId), rt = ag && runtime.get(ag.id);
     desks.push({
       id: p.id, name: p.name, color: p.color, x: c.x, y: c.y, seat: c.seat,
-      status: ag?.status || 'ocioso', seated: !!rt?.seated,
+      status: ag?.home ? 'ocioso' : ag?.status || 'ocioso', seated: !!rt?.seated,
       ringing: !!(state.live?.[p.id]?.pending || ag?.status === 'bloqueado'),
       selected: selected?.kind === 'project' && selected.id === p.id,
       hover: hover?.kind === 'project' && hover.id === p.id,
     });
   }
   const talkers = vis.filter((a) => runtime.get(a.id)?.atSpot?.act === 'reuniao').map((a) => a.id);
-  const h = new Date().getHours();
   return {
     W: world.server ? svLayout3D().W : world.W, H: world.server ? svLayout3D().H : world.H, L: world.server ? (svLayout3D().W - 1) * T : world.L, floor: world.floor, // sala de servidores: o 3D tem tamanho próprio, o L do 2D deslocava a câmera do celular
     floorColors: FLOORS[world.floor] || FLOORS.madeira, wallColors: WALLS[world.wall] || WALLS.cinza,
@@ -1159,7 +1352,7 @@ function snapshot3D(now) {
       msg: monitor.denied ? 'SÓ A DONA DO HUB VÊ' : monitor.configured ? 'AGUARDANDO DADOS' : 'SEM MONITOR',
       hover: hover?.kind === 'rack' ? hover.host ?? '' : undefined, // '' = rack vazio (configurar)
     } : undefined,
-    night: h >= 19 || h < 5, sky: skyColor(),
+    night: isNight(), lights: lightsOn(), doorK, door: { x: world.door.x, y: world.door.y }, sky: skyColor(),
     counts: ['trabalhando', 'bloqueado', 'concluido', 'ocioso'].map((st) => vis.filter((a) => a.status === st).length),
     statusColors: ['trabalhando', 'bloqueado', 'concluido', 'ocioso'].map((st) => STATUS[st].color),
     statusLabels: ['trabalhando', 'bloqueado', 'concluido', 'ocioso'].map((st) => STATUS[st].label),
@@ -1187,8 +1380,9 @@ function draw(now) {
   drawRoom(now);
   if (world.server) drawRacks(now);
   else for (let i = 0; i < world.rows * world.cols; i++) drawDesk(i, now);
-  const hour = new Date().getHours();
-  if (hour >= 19 || hour < 5) { ctx.globalAlpha = 0.16; rect(0, 0, world.W * T, world.H * T, '#0d1440'); ctx.globalAlpha = 1; }
+  const lit = lightsOn(), night = isNight();
+  const dim = night ? (lit ? 0.06 : 0.42) : lit ? 0 : 0.12;
+  if (dim) { ctx.globalAlpha = dim; rect(0, 0, lit || world.server ? world.W * T : world.L, world.H * T, '#0d1440'); ctx.globalAlpha = 1; }
   const furniture = roomDecor().filter((d) => DECOR_META[d.type]?.layer === 'piso' && decorFits(d)).sort((p, q) => p.y - q.y);
   for (const d of furniture) DECOR_DRAW[d.type](d.x * T, d.y * T, now);
   if (decorMode && decorHover) drawDecorCursor();
@@ -1271,6 +1465,8 @@ document.getElementById('btn-chars').onclick = () => {
   document.getElementById('btn-chars').classList.toggle('active', charStyle3d === 'classico');
 };
 document.getElementById('btn-chars').classList.toggle('active', charStyle3d === 'classico');
+document.getElementById('btn-lights').onclick = toggleLights;
+document.getElementById('btn-home').onclick = openHomeWindow;
 document.getElementById('btn-3d').onclick = () => setView3d(!view3d);
 document.getElementById('btn-3d').classList.toggle('active', view3d);
 if (view3d) ensureV3();
@@ -1335,16 +1531,25 @@ function bubbleFor(a) {
 function updateBubbles() {
   const ox = canvas.offsetLeft, oy = canvas.offsetTop;
   const seen = new Set();
-  for (const a of visibleAgents()) {
-    const b = bubbleFor(a);
-    const rt = runtime.get(a.id);
-    if (!b || !rt) continue;
+  const items = [];
+  for (const a of visibleAgents()) { const b = bubbleFor(a), rt = runtime.get(a.id); if (b && rt) items.push({ a, b, rt }); }
+  // mesas de quem está em casa: balão pequeno; um clique chama de volta (com a luz acesa)
+  for (const a of state.agents) {
+    const d = a.home && deskOf(a.id);
+    if (d?.here) items.push({ a, b: { cls: 'away', text: lightsOn() ? '🏠 Em casa · chamar' : '🏠 Em casa' }, rt: { x: d.cell.seat.x, y: d.cell.seat.y, seated: true } });
+  }
+  for (const { a, b, rt } of items) {
     seen.add(a.id);
     let el = bubbleEls.get(a.id);
     if (!el) {
       el = document.createElement('button');
       el.className = 'bubble';
-      el.onclick = () => { const d = deskOf(a.id); if (d) openProjectWindow(d.project.id); };
+      el.onclick = () => {
+        const cur = state.agents.find((x) => x.id === a.id);
+        if (cur?.home) return callBack(a.id);
+        const d = deskOf(a.id);
+        if (d) openProjectWindow(d.project.id);
+      };
       bubbleLayer.appendChild(el);
       bubbleEls.set(a.id, el);
     }
@@ -1413,7 +1618,7 @@ const onCanvasMove = (ev) => {
     html = h ? `<b>${esc(monName(h))}</b>${h.alias ? ` <span style="color:#9097b0">${esc(h.host)}</span>` : ''}<br>${MON_LABEL[h.status]} · carga 1 min ${h.cpu ?? '?'}% dos vCPUs · RAM ${h.mem ?? '?'}% · disco ${h.disk ?? '?'}%` : 'Monitor de servidores';
   } else if (hover.kind === 'agent') {
     const a = state.agents.find((x) => x.id === hover.id);
-    html = `<b>${esc(a.name)}</b> · ${esc(a.role || '')}<br>${STATUS[a.status]?.label || ''}${a.message ? ' — ' + esc(a.message) : ''}`;
+    html = `<b>${esc(a.name)}</b> · ${esc(a.role || '')}<br>${STATUS[stOf(a)]?.label || ''}${a.message ? ' — ' + esc(a.message) : ''}`;
   } else {
     const p = state.projects.find((x) => x.id === hover.id);
     const a = state.agents.find((x) => x.id === p.agentId);
@@ -1764,14 +1969,60 @@ function logList(items) {
   }).join('');
 }
 
+// ---------- Janela "Em casa" ----------
+function openHomeWindow() {
+  const win = openWindow('home', { w: 380, h: 460, cls: 'win-log' }, (win) => {
+    win.titleEl.textContent = '🏠 Em casa';
+    win.render = renderHomeWindow;
+    win.body.onclick = (e) => {
+      const b = e.target.closest('[data-act]');
+      if (!b || b.disabled) return;
+      if (b.dataset.act === 'call') callBack(b.dataset.id);
+      else if (b.dataset.act === 'call-all') callAllHome();
+      else if (b.dataset.act === 'lights') toggleLights();
+    };
+  });
+  renderHomeWindow(win);
+}
+
+function renderHomeWindow(win) {
+  const away = state.agents.filter((a) => a.home), on = lightsOn();
+  win.body.innerHTML = `
+    <p class="muted">${on ? 'A luz está acesa: chame cada agente de volta ou todos de uma vez.' : 'A luz está apagada. Acenda para poder chamar os agentes de volta.'}</p>
+    <div class="row"><button data-act="lights">${on ? '🌙 Apagar a luz' : '💡 Acender a luz'}</button>
+      <button class="primary" data-act="call-all" ${on && away.length ? '' : 'disabled'}>Chamar todos${away.length ? ` (${away.length})` : ''}</button></div>
+    ${away.map((a) => {
+      const d = deskOf(a.id);
+      return `<div class="card"><div class="title"><i class="dot" style="background:${esc(a.shirt)}"></i>${esc(a.name)} ${badge('casa')}</div>
+        <div class="sub">${esc(a.role || '')}${d ? (a.role ? ' · ' : '') + esc(d.project.name) : ' · sem mesa'}</div>
+        <div class="row"><button data-act="call" data-id="${esc(a.id)}" ${on ? '' : 'disabled'}>Chamar de volta</button></div></div>`;
+    }).join('') || '<p class="muted">Ninguém foi para casa.</p>'}`;
+}
+
+// botões da luz e de "Em casa" na barra de salas
+function renderLightsUI() {
+  const on = lightsOn(), away = state.agents.filter((a) => a.home).length;
+  const lb = document.getElementById('btn-lights');
+  lb.classList.toggle('active', on);
+  lb.innerHTML = `${on ? '💡' : '🌙'}<span class="lbl"> ${on ? 'Luz acesa' : 'Luz apagada'}</span>`;
+  lb.title = on ? 'Apagar a luz do escritório: quem estiver livre vai para casa, em fila' : 'Acender a luz do escritório (acende sozinha ao escurecer)';
+  const hb = document.getElementById('btn-home');
+  hb.hidden = !away;
+  hb.innerHTML = `🏠<span class="lbl"> Em casa</span> <b>${away}</b>`;
+  const win = wins.get('home');
+  if (win && !win.minimized) renderHomeWindow(win);
+}
+setInterval(() => { if (state.lights) renderLightsUI(); }, 30000); // acende sozinha ao escurecer, sem esperar um clique
+
 function renderStats() {
+  renderLightsUI();
   const envBtn = document.getElementById('btn-env');
   envBtn.textContent = state.env ? 'PC: ' + state.env.name : 'PC: nenhum';
   envBtn.classList.toggle('warn', !state.env);
-  const count = (st) => state.agents.filter((a) => a.status === st).length;
+  const count = (st) => state.agents.filter((a) => stOf(a) === st).length;
   document.getElementById('stats').innerHTML =
     `<span><b>${state.projects.length}</b> mesas</span><span><b>${state.agents.length}</b> agentes</span>` +
-    Object.entries(STATUS).map(([k, v]) => `<span><i class="dot" style="background:${v.color}"></i>${count(k)} ${v.label.toLowerCase()}</span>`).join('');
+    Object.entries(STATUS).filter(([k]) => k !== 'casa' || count('casa')).map(([k, v]) => `<span><i class="dot" style="background:${v.color}"></i>${count(k)} ${v.label.toLowerCase()}</span>`).join('');
   renderUsageBar();
 }
 
@@ -1837,6 +2088,7 @@ function focusWindow(win) {
 }
 
 function closeWindow(win) {
+  win.onClose?.();
   win.el.remove();
   wins.delete(win.key);
   if (win.projectId && selected?.id === win.projectId) selected = null;
@@ -1954,6 +2206,7 @@ function openProjectWindow(projectId) {
           <button class="primary" data-act="send">Enviar</button>
           <button class="danger" data-act="stop" hidden>Parar</button>
           <button data-act="attach" title="Anexar imagem (ou cole um print com Ctrl+V, ou arraste para a janela)">📎</button>
+          <button data-act="mic" class="mic">🎤</button>
           <input type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden />
           <span class="spacer"></span>
           <button data-act="reset" title="Compactar a conversa: guarda o essencial na memória e começa uma sessão limpa (menos tokens)">🧹</button>
@@ -2001,6 +2254,8 @@ function openProjectWindow(projectId) {
       picker.value = '';
     };
     sendBtn.onclick = sendMsg;
+    win.mic = attachMic(input, win.body.querySelector('[data-act=mic]'), { onSend: sendMsg });
+    win.onClose = () => win.mic.stop(); // fechar a janela desliga o microfone
     input.onkeydown = (e) => {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMsg(); }
     };
@@ -2030,7 +2285,7 @@ function updateProjectWindow(win) {
   const live = state.live?.[p.id];
 
   win.titleEl.innerHTML = `<i class="dot" style="background:${esc(p.color)}"></i>${esc(p.name)}` +
-    (a ? ` <span class="muted">·</span> ${esc(a.name)} ${badge(a.status)}` : ' <span class="muted">· mesa vaga</span>');
+    (a ? ` <span class="muted">·</span> ${esc(a.name)} ${badge(stOf(a))}` : ' <span class="muted">· mesa vaga</span>');
 
   // barra de ferramentas (não redesenha enquanto o usuário mexe no seletor)
   const tb = win.body.querySelector('.pw-toolbar');
@@ -2081,6 +2336,9 @@ function updateProjectWindow(win) {
     ? `Peça algo para ${who}… (ex.: leia minhas mensagens no Bitrix e passe a demanda para a mesa certa)`
     : p.runEnv ? `Peça algo para ${who}… (Enter envia · Shift+Enter quebra linha)` : 'Defina a pasta do projeto primeiro';
   input.disabled = !canChat;
+  const micBtn = win.body.querySelector('[data-act=mic]');
+  micBtn.disabled = !canChat;
+  if (!canChat) win.mic?.stop();
   const send = win.body.querySelector('[data-act=send]');
   send.disabled = !canChat || !!live?.running;
   send.textContent = live?.running ? 'Trabalhando…' : 'Enviar';
@@ -2831,7 +3089,7 @@ function renderTeam(win) {
   win.body.innerHTML = (state.agents.map((a) => {
     const desk = deskOf(a.id);
     return `<div class="card" data-agent="${a.id}">
-      <div class="title"><i class="dot" style="background:${esc(a.shirt)}"></i>${esc(a.name)} ${badge(a.status)}</div>
+      <div class="title"><i class="dot" style="background:${esc(a.shirt)}"></i>${esc(a.name)} ${badge(stOf(a))}</div>
       <div class="sub">${esc(a.role || '')} · ${desk ? esc(desk.project.name) : 'sem mesa'}</div>
       ${a.message ? `<div class="sub">“${esc(a.message)}”</div>` : ''}
     </div>`;
@@ -3428,10 +3686,12 @@ function openCommunityWindow() {
       <div class="chat-log comm-log"></div>
       <form class="chat-input">
         <textarea rows="2" maxlength="2000"></textarea>
-        <div class="row"><button class="primary">Enviar</button></div>
+        <div class="row"><button class="primary">Enviar</button><button type="button" class="mic" data-act="mic">🎤</button></div>
       </form>`;
     const form = win.body.querySelector('form');
     const box = form.querySelector('textarea');
+    win.mic = attachMic(box, form.querySelector('[data-act=mic]'), { onSend: () => form.requestSubmit() });
+    win.onClose = () => win.mic.stop();
     win.body.querySelector('.comm-tabs').addEventListener('click', (e) => {
       const b = e.target.closest('[data-chat]');
       if (b) loadCommChat(win, b.dataset.chat);

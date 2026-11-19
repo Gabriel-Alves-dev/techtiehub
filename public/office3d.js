@@ -88,6 +88,15 @@ function textPlane(text, { w = 512, h = 96, px = 52, color = '#fff', weight = 70
   });
 }
 
+// mancha de luz macia (textura radial branca): vira poça de luz no chão com cor e opacidade
+let radialTexture = null;
+const radialTex = () => (radialTexture ??= canvasTex(128, 128, (g, w, h) => {
+  const gr = g.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, w / 2);
+  gr.addColorStop(0, 'rgba(255,255,255,.9)'); gr.addColorStop(0.5, 'rgba(255,255,255,.35)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, w, h);
+}));
+const WARM_WHITE = new THREE.Color('#fff0d6'), STRIP_OFF = new THREE.Color('#3a3f52'), STRIP_ON = new THREE.Color('#fff1c4');
+
 // ---------- utilidades de malha ----------
 const matCache = new Map();
 function mat(color, o = {}) {
@@ -430,7 +439,7 @@ export function create3D({ canvas, wrap, onDrag }) {
       g.clear();
     } else disposeGroup(g);
   }
-  const state = { srv: null, key: '', room: null, desks: new Map(), agents: new Map(), plants: [], arcade: null, steam: null, lamp: null, clock: null, tv: null, glass: [], glassKey: '', lastNow: 0, lastFrame: 0 };
+  const state = { srv: null, pools: [], strips: [], door: null, lk: undefined, key: '', room: null, desks: new Map(), agents: new Map(), plants: [], arcade: null, steam: null, lamp: null, clock: null, tv: null, glass: [], glassKey: '', lastNow: 0, lastFrame: 0 };
 
   // câmera orbital: azimute e elevação em torno do centro da sala
   const cam = { az: 0, azT: 0, el: 0.95, zoom: 1, cx: 0, cz: 0, bx: 0, bz: 0, R: 10, depth: 10, width: 20, dist: 20, zMin: 3, zMax: 20, W: 20, Lt: 15 };
@@ -524,6 +533,7 @@ export function create3D({ canvas, wrap, onDrag }) {
   function build(s) {
     disposeGroup(staticGroup);
     hitList.length = 0;
+    state.pools = []; state.strips = []; state.door = null;
     state.desks.clear(); state.flat = []; state.plants = []; state.glass = []; state.arcade = null; state.steam = null; state.clock = null; state.tv = null; state.glassKey = '';
     const g = staticGroup;
     state.srv = null;
@@ -561,8 +571,30 @@ export function create3D({ canvas, wrap, onDrag }) {
     leftW.rotation.y = Math.PI / 2;
     const rightW = add(g, new THREE.PlaneGeometry(zMax - zMin, WALL_UP), wm, W - 1, WALL_UP / 2, (zMin + zMax) / 2, { cast: false });
     rightW.rotation.y = -Math.PI / 2;
-    const frontW = add(g, new THREE.PlaneGeometry(wTiles, 0.9), mat(s.wallColors[1], { side: THREE.FrontSide }), W / 2, 0.45, zMax, { cast: false });
-    frontW.rotation.y = Math.PI;
+    // parede da frente (baixa), com um vão para a porta por onde os agentes saem para casa e voltam
+    const door = s.door ?? { x: (W - 2) * T };
+    const dx = door.x / T, dw = 0.75; // centro e meia largura do vão
+    const frontMat = mat(s.wallColors[1], { side: THREE.FrontSide });
+    for (const [x0, x1] of [[1, dx - dw], [dx + dw, W - 1]]) {
+      const seg = add(g, new THREE.PlaneGeometry(x1 - x0, 0.9), frontMat, (x0 + x1) / 2, 0.45, zMax, { cast: false });
+      seg.rotation.y = Math.PI;
+    }
+    {
+      const dg = new THREE.Group(); dg.position.set(dx, 0, zMax); g.add(dg);
+      const frame = '#2b2f3e';
+      box(dg, 0.14, 2.2, 0.24, frame, -dw - 0.07, 1.1, 0); box(dg, 0.14, 2.2, 0.24, frame, dw + 0.07, 1.1, 0);
+      box(dg, dw * 2 + 0.28, 0.16, 0.24, frame, 0, 2.18, 0);
+      box(dg, 0.78, 0.22, 0.08, '#10281d', 0, 2.5, 0); // placa de saída (acesa dos dois lados)
+      for (const sz of [1, -1]) {
+        const sign = new THREE.Mesh(new THREE.PlaneGeometry(0.64, 0.11), new THREE.MeshBasicMaterial({ color: '#4cff9a', toneMapped: false }));
+        sign.position.set(0, 2.5, 0.045 * sz); if (sz < 0) sign.rotation.y = Math.PI; dg.add(sign);
+      }
+      const pivot = new THREE.Group(); pivot.position.set(-dw, 0, 0); dg.add(pivot); // dobradiça à esquerda; abre para dentro da sala
+      box(pivot, dw * 2 - 0.02, 2.08, 0.07, '#7a5a3a', dw, 1.04, 0);
+      box(pivot, dw * 2 - 0.2, 1.7, 0.02, '#8a6742', dw, 1.08, 0.04); box(pivot, dw * 2 - 0.2, 1.7, 0.02, '#8a6742', dw, 1.08, -0.04); // almofadas
+      for (const sz of [1, -1]) sph(pivot, 0.05, '#e8c36a', dw * 2 - 0.16, 1.0, 0.07 * sz, 10);
+      state.door = { pivot };
+    }
     // moldura no alto da parede
     box(g, wTiles, 0.08, 0.1, s.wallColors[1], W / 2, WALL_UP, zMin + 0.05);
 
@@ -570,6 +602,8 @@ export function create3D({ canvas, wrap, onDrag }) {
     for (let x = 2; x + 3 < Lt; x += 5) {
       const gm = new THREE.MeshBasicMaterial({ color: '#fff' });
       state.glass.push(gm);
+      const strip = new THREE.Mesh(new THREE.BoxGeometry(3.0, 0.07, 0.07), new THREE.MeshBasicMaterial({ color: '#3a3f52', toneMapped: false })); // luminária acima da janela
+      strip.position.set(x + 1.5, 3.12, zMin + 0.1); g.add(strip); state.strips.push(strip);
       box(g, 3.2, 1.8, 0.12, '#1d2030', x + 1.5, 2.05, zMin + 0.05, { cast: false });
       const pane = new THREE.Mesh(new THREE.PlaneGeometry(1.45, 1.55), gm); pane.position.set(x + 0.77, 2.05, zMin + 0.12); g.add(pane);
       const pane2 = new THREE.Mesh(new THREE.PlaneGeometry(1.45, 1.55), gm); pane2.position.set(x + 2.23, 2.05, zMin + 0.12); g.add(pane2);
@@ -689,6 +723,9 @@ export function create3D({ canvas, wrap, onDrag }) {
       label.rotation.x = -Math.PI / 2; label.position.set(cx + 2.5, 0.035, cy + 4.5); label.renderOrder = 1; dg.add(label); state.flat.push(label);
       // clique
       const hit = new THREE.Mesh(new THREE.BoxGeometry(4, 1.6, 4), new THREE.MeshBasicMaterial({ visible: false })); hit.position.set(cx + 2.5, 0.8, cy + 2.5); hit.userData = { kind: 'project', id: d.id }; dg.add(hit); hitList.push(hit);
+      // poça de luz do teto sobre a mesa (aparece com a luz acesa)
+      const pool = new THREE.Mesh(new THREE.PlaneGeometry(5.8, 5.2), new THREE.MeshBasicMaterial({ map: radialTex(), color: '#ffdca0', transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false }));
+      pool.rotation.x = -Math.PI / 2; pool.position.set(cx + 2.5, 0.04, cy + 2.4); dg.add(pool); state.pools.push(pool);
       state.desks.set(d.id, { cv, tex, screen, glow, phone, pled, outline: ol, key: '', col, ring: false });
     }
 
@@ -831,8 +868,18 @@ export function create3D({ canvas, wrap, onDrag }) {
     // luz e céu conforme a hora
     const night = s.night, h = new Date().getHours();
     const dayK = night ? 0 : h >= 17 || h < 7 ? 0.65 : 1;
-    sun.intensity = night ? 0.45 : 2.3 * dayK; sun.color.set(night ? '#6f86e6' : dayK < 1 ? '#ffb27a' : '#fff3dd');
-    hemi.intensity = night ? 0.5 : 1.55; hemi.color.set(night ? '#4a5aa8' : '#cfe0ff');
+    // interruptor da luz: muda aos poucos. Acesa à noite, o escritório fica claro e quente; apagada, só as luzes da copa,
+    // da reunião e do descanso (as `warm`) iluminam, e de dia ela só escurece um pouco.
+    state.lk ??= s.lights === false ? 0 : 1;
+    state.lk += ((s.lights === false ? 0 : 1) - state.lk) * Math.min(1, dt * 3);
+    const lk = state.lk;
+    sun.intensity = night ? 0.45 + 0.12 * lk : 2.3 * dayK; sun.color.set(night ? '#6f86e6' : dayK < 1 ? '#ffb27a' : '#fff3dd');
+    hemi.intensity = night ? 0.5 + 0.85 * lk : 1.55 * (0.8 + 0.2 * lk);
+    hemi.color.set(night ? '#4a5aa8' : '#cfe0ff'); if (night) hemi.color.lerp(WARM_WHITE, lk);
+    const poolA = (night ? 0.2 : 0.05) * lk;
+    for (const pl of state.pools) pl.material.opacity = poolA;
+    for (const st of state.strips) st.material.color.copy(STRIP_OFF).lerp(STRIP_ON, lk);
+    if (state.door) state.door.pivot.rotation.y = 1.5 * (s.doorK || 0);
     warm.forEach((l) => { l.intensity = night ? 9 : dayK < 1 ? 3 : 0; });
     const gk = s.sky.join() + night;
     if (gk !== state.glassKey) {
@@ -928,6 +975,7 @@ export function create3D({ canvas, wrap, onDrag }) {
     else if (spotSit && rt.atSpot.act === 'sofa') z -= (u.seatFit ? 0.25 : 0.55) * sk;
     else if (spotSit && u.seatFit && rt.atSpot.act === 'puff') z += 0.25 * sk;
     g.position.set(x, 0, z);
+    g.visible = rt.y / T <= cam.zMax + 0.04; // além da parede da frente (do lado de fora da porta): escondido
     u.rot = lerpAngle(u.rot, rotFor(rt.facing), Math.min(1, dt * 14));
     g.rotation.y = u.rot;
     const seatY = rt.seated ? SEAT_Y : spotSit ? SEAT_BY_ACT[rt.atSpot.act] : null;

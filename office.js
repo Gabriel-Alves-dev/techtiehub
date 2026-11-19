@@ -81,6 +81,8 @@ class Office {
     s.mcpServers ??= [];
     // memória do escritório: notas gerais + um bloco por projeto (enviado pela mesa)
     s.officeMemory ??= { general: '', projects: {} };
+    // luz do escritório: `on` é a escolha do usuário e `at` quando foi feita. Apagada de dia, o navegador acende sozinha ao escurecer
+    s.lights ??= { on: true, at: 0 };
     // relatórios do dia: { 'AAAA-MM-DD': { projectId: { text, at, agent } } } — guarda 30 dias
     s.reports ??= {};
     for (const day of Object.keys(s.reports).sort().slice(0, -30)) delete s.reports[day];
@@ -137,6 +139,7 @@ class Office {
     const agent = project && this.state.agents.find((a) => a.id === project.agentId);
     if (!agent) return;
     agent.status = status;
+    if (status === 'trabalhando' || status === 'bloqueado') agent.home = false; // chamado ao trabalho: volta pela porta
     agent.message = String(message).replace(/\s+/g, ' ').slice(0, 200);
     if (log) this.addLog(agent.id, projectId, `[${status}] ${agent.message}`);
     this.save();
@@ -230,7 +233,7 @@ class Office {
       return {
         id: p.id, mesa: p.name, descricao: p.description || '', sala: room?.name || '',
         agente: a ? `${a.name}${a.role ? ` (${a.role})` : ''}` : null,
-        status: a?.status || 'sem agente', ocupada: !!this.live[p.id], naFila: this.state.queue[p.id]?.length || 0,
+        status: a ? (a.home ? 'em casa' : a.status) : 'sem agente', ocupada: !!this.live[p.id], naFila: this.state.queue[p.id]?.length || 0,
         secretaria: p.role === 'secretaria',
       };
     });
